@@ -10,9 +10,37 @@ egomodelkit run hand-object-contact \
   --output /path/to/results
 ```
 
-Docker execution is hidden behind the Python command-line interface (CLI).
+The public interface is run-only. Runtime preparation, container use, and model environment details stay hidden behind the command-line interface (CLI).
+
+## Current Milestone
+
+The public Shan command shape is now available.
+
+At this commit, use --dry-run to validate a request:
+
+```bash
+egomodelkit run hand-object-contact \
+  --input /path/to/image.jpg \
+  --output /path/to/results \
+  --dry-run
+```
+
+Expected output:
+
+```text
+Dry run: hand-object-contact request is valid.
+Input: /path/to/image.jpg
+Output: /path/to/results
+```
 
 ## Development
+
+Clone the repository, then create and activate a virtual environment.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
 
 Install the package locally in editable mode:
 
@@ -40,7 +68,8 @@ Run a quick manual CLI smoke test:
 egomodelkit --help
 ```
 
-Expected rough output:
+Expected output:
+
 ```text
 Usage: egomodelkit [OPTIONS] COMMAND [ARGS]...
 
