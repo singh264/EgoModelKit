@@ -37,7 +37,11 @@ include-package-data = true
 where = ["src"]
 
 [tool.setuptools.package-data]
-egomodelkit = ["resources/*.yaml", "resources/*.json"]
+egomodelkit = [
+    "resources/*.yaml",
+    "resources/*.json",
+    "resources/containers/hand_object_contact/*"
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

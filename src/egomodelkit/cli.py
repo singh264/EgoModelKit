@@ -12,6 +12,10 @@ from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
     validate_request,
 )
+from egomodelkit.runtime.hand_object_contact import (
+    HandObjectContactRuntimeError,
+    run_hand_object_contact,
+)
 
 app = typer.Typer(
     help = "EgoModelKit: reproducible egocentric-video model packaging and inference."
@@ -22,7 +26,7 @@ CLI_UNSUPPORTED_MODEL_EXIT_CODE: Final[int] = 2
 
 @app.callback()
 def main() -> None:
-    """ EgoModeKit command-line interface. """
+    """ EgoModelKit command-line interface. """
 
 @app.command()
 def run(
@@ -65,23 +69,20 @@ def run(
     )
     
     try:
-        validate_request(request)
-    except HandObjectContactInputError as exc:
+        if dry_run:
+            validate_request(request)
+            typer.echo(DRY_RUN_VALIDATION_MESSAGE)
+            typer.echo(f"Input: {input_path}")
+            typer.echo(f"Output: {output_dir}")
+            return
+        
+        run_hand_object_contact(request)
+    except (
+        HandObjectContactInputError,
+        HandObjectContactRuntimeError,
+    ) as exc:
         typer.echo(f"Error: {exc}", err = True)
         raise typer.Exit(code=CLI_RUNTIME_ERROR_EXIT_CODE) from exc
     
-    if dry_run:
-        typer.echo(DRY_RUN_VALIDATION_MESSAGE)
-        typer.echo(f"Input: {input_path}")
-        typer.echo(f"Output: {output_dir}")
-        return
-    
-    typer.echo(
-        "hand-object-contact runtime execution is not available yet."
-    )
-    
-    typer.echo(
-        "The next commit will make this same run command execute Shan."
-    )
-    
-    raise typer.Exit(code = CLI_RUNTIME_ERROR_EXIT_CODE)
+    typer.echo("Completed: hand-object-contact")
+    typer.echo(f"Outputs: {output_dir}")
