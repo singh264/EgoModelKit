@@ -16,6 +16,7 @@ from egomodelkit.runtime.hand_object_contact import (
     HandObjectContactRuntimeError,
     run_hand_object_contact,
 )
+from egomodelkit.runtime.preflight import HostPrerequisiteError
 
 app = typer.Typer(
     help = "EgoModelKit: reproducible egocentric-video model packaging and inference."
@@ -23,6 +24,10 @@ app = typer.Typer(
 
 CLI_RUNTIME_ERROR_EXIT_CODE: Final[int] = 1
 CLI_UNSUPPORTED_MODEL_EXIT_CODE: Final[int] = 2
+
+def _report_progress(message: str) -> None:
+    """ Print one user-facing runtime progress message. """
+    typer.echo(f"EgoModelKit: {message}")
 
 @app.callback()
 def main() -> None:
@@ -76,10 +81,14 @@ def run(
             typer.echo(f"Output: {output_dir}")
             return
         
-        run_hand_object_contact(request)
+        run_hand_object_contact(
+            request,
+            progress=_report_progress,
+        )
     except (
         HandObjectContactInputError,
         HandObjectContactRuntimeError,
+        HostPrerequisiteError,
     ) as exc:
         typer.echo(f"Error: {exc}", err = True)
         raise typer.Exit(code=CLI_RUNTIME_ERROR_EXIT_CODE) from exc

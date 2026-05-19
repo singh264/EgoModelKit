@@ -1,4 +1,4 @@
-""" Hidden runtime execution for Shan hand-object-contact inference """
+""" Hidden runtime execution for Shan hand-object-contact inference. """
 
 import subprocess
 from collections.abc import Callable
@@ -11,8 +11,15 @@ from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
     validate_request,
 )
+from egomodelkit.runtime.preflight import (
+    ProgressReporter,
+    ensure_host_runtime_ready,
+)
 
 CommandRunner = Callable[[list[str]], int]
+
+SHAN_FORK_REPOSITORY_URL: Final[str] = "https://github.com/singh264/hand_object_detector"
+SHAN_FORK_COMMIT_SHA: Final[str] = "70146cabaeffb41ecc02e6edb605fc021dbdb555"
 
 @dataclass(frozen = True, slots = True)
 class HandObjectContactRuntimeSpec:
@@ -60,15 +67,9 @@ DEFAULT_RUNTIME_SPEC: Final[HandObjectContactRuntimeSpec] = (
         image_tag = "egomodelkit-hand-object-contact:dev",
         container_input_dir = PurePosixPath("/workspace/input"),
         container_output_dir = PurePosixPath("/workspace/output"),
-        shan_repository_url = (
-            "https://github.com/ddshan/hand_object_detector.git"
-        ),
-        shan_commit_sha = (
-            "e6eec712a498ec7844b97893c8d012cea1a71e09"
-        ),
-        checkpoint_google_drive_file_id = (
-            "1H2tWsZkS7tDF8q1-jdjx6V9XrK25EDbE"
-        ),
+        shan_repository_url = SHAN_FORK_REPOSITORY_URL,
+        shan_commit_sha = SHAN_FORK_COMMIT_SHA,
+        checkpoint_google_drive_file_id = "1b_BkGgmYAe8VNbsFeljrSP7V1Jd8E82v",
         checkpoint_session = 1,
         checkpoint_epoch = 8,
         checkpoint_step = 132028,
@@ -80,6 +81,9 @@ DEFAULT_RUNTIME_SPEC: Final[HandObjectContactRuntimeSpec] = (
 
 class HandObjectContactRuntimeError(RuntimeError):
     """ Raised when the hidden Shan runtime fails. """
+
+def _ignore_progress(_: str) -> None:
+    """ Default no-op progress reporter. """
 
 def _subprocess_runner(command: list[str]) -> int:
     completed = subprocess.run(command, check = False)
@@ -123,8 +127,11 @@ def ensure_runtime_image(
     *,
     runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_RUNTIME_SPEC,
     command_runner: CommandRunner = _subprocess_runner,
+    progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Build the hidden Shan runtime image only when missing. """
+    progress("Checking packaged Shan runtime image.")
+
     inspect_command = [
         runtime_spec.docker_executable,
         "image",
@@ -133,7 +140,13 @@ def ensure_runtime_image(
     ]
     
     if command_runner(inspect_command) == 0:
+        progress("Packaged Shan runtime image is already available.")
         return
+
+    progress(
+        "Packaged Shan runtime image is missing; preparing it now. "
+        "The first run may take longer."
+    )
 
     container_dir = _container_resource_dir()
     dockerfile_path = container_dir / "Dockerfile"
@@ -155,6 +168,8 @@ def ensure_runtime_image(
         raise HandObjectContactRuntimeError(
             f"hand-object-contact runtime image build failed with exit code {exit_code}."
         )
+
+    progress("Packaged Shan runtime image is ready.")
 
 def build_run_command(
     request: HandObjectContactRequest,
@@ -191,14 +206,25 @@ def run_hand_object_contact(
     *,
     runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_RUNTIME_SPEC,
     command_runner: CommandRunner = _subprocess_runner,
+    progress: ProgressReporter = _ignore_progress,
 ) -> list[str]:
     """ Run Shan hand-object-contact behind EgoModelKit's run command. """
+    progress("Validating hand-object-contact request.")
     validate_request(request)
+
+    ensure_host_runtime_ready(
+        docker_executable = runtime_spec.docker_executable,
+        command_runner = command_runner,
+        progress = progress,
+    )
+
     request.output_dir.mkdir(parents = True, exist_ok = True)
+    progress(f"Using output directory: {request.output_dir}")
     
     ensure_runtime_image(
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        progress = progress
     )
     
     run_command = build_run_command(
@@ -206,6 +232,7 @@ def run_hand_object_contact(
         runtime_spec = runtime_spec,
     )
     
+    progress("Starting Shan hand-object-contact inference.")
     exit_code = command_runner(run_command)
     
     if exit_code != 0:
@@ -213,4 +240,5 @@ def run_hand_object_contact(
             f"hand-object-contact inference runtime failed with exit code {exit_code}."
         )
 
+    progress("Shan hand-object-contact inference completed.")
     return run_command

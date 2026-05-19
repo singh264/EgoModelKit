@@ -9,6 +9,8 @@ from egomodelkit.models.hand_object_contact import (
 )
 from egomodelkit.runtime.hand_object_contact import (
     DEFAULT_RUNTIME_SPEC,
+    SHAN_FORK_COMMIT_SHA,
+    SHAN_FORK_REPOSITORY_URL,
     HandObjectContactRuntimeError,
     _subprocess_runner,
     build_run_command,
@@ -19,12 +21,16 @@ from egomodelkit.runtime.hand_object_contact import (
 
 def test_ensure_runtime_image_skips_build_when_image_exists() -> None:
     calls: list[list[str]] = []
+    messages: list[str] = []
     
     def runner(command: list[str]) -> int:
         calls.append(command)
         return 0
 
-    ensure_runtime_image(command_runner = runner)
+    ensure_runtime_image(
+        command_runner = runner,
+        progress = messages.append,
+    )
 
     assert calls == [
         [
@@ -35,8 +41,12 @@ def test_ensure_runtime_image_skips_build_when_image_exists() -> None:
         ],
     ]
     
+    assert "Checking packaged Shan runtime image." in messages
+    assert "Packaged Shan runtime image is already available." in messages
+
 def test_ensure_runtime_image_builds_when_image_is_missing() -> None:
     calls: list[list[str]] = []
+    messages: list[str] = []
     
     def runner(command: list[str]) -> int:
         calls.append(command)
@@ -46,7 +56,10 @@ def test_ensure_runtime_image_builds_when_image_is_missing() -> None:
 
         return 0
 
-    ensure_runtime_image(command_runner = runner)
+    ensure_runtime_image(
+        command_runner = runner,
+        progress = messages.append,
+    )
     
     inspect_command = calls[0]
     build_command = calls[1]
@@ -77,6 +90,19 @@ def test_ensure_runtime_image_builds_when_image_is_missing() -> None:
         f"CHECKPOINT_FILENAME={DEFAULT_RUNTIME_SPEC.checkpoint_filename}"
         in build_command
     )
+    
+    assert (
+        f"SHAN_REPOSITORY_URL={SHAN_FORK_REPOSITORY_URL}"
+        in build_command
+    )
+    
+    assert (
+        f"SHAN_COMMIT_SHA={SHAN_FORK_COMMIT_SHA}"
+        in build_command
+    )
+
+    assert any("preparing it now" in message for message in messages)
+    assert "Packaged Shan runtime image is ready." in messages
 
 def test_ensure_runtime_image_reports_build_failure() -> None:
     def runner(command: list[str]) -> int:
@@ -167,12 +193,19 @@ def test_run_hand_object_contact_executes_hidden_runtime(tmp_path: Path) -> None
     
     assert calls[0] == [
         DEFAULT_RUNTIME_SPEC.docker_executable,
+        "version",
+        "--format",
+        "{{.Server.Version}}",
+    ]
+
+    assert calls[1] == [
+        DEFAULT_RUNTIME_SPEC.docker_executable,
         "image",
         "inspect",
         DEFAULT_RUNTIME_SPEC.image_tag,
     ]
     
-    assert calls[1] == command
+    assert calls[2] == command
 
 def test_run_hand_object_contact_reports_runtime_failure(tmp_path: Path) -> None:
     image_path = tmp_path / "frame.jpg"
@@ -184,6 +217,9 @@ def test_run_hand_object_contact_reports_runtime_failure(tmp_path: Path) -> None
     )
     
     def runner(command: list[str]) -> int:
+        if command[1:3] == ["version", "--format"]:
+            return 0
+
         if command[1:3] == ["image", "inspect"]:
             return 0
 
@@ -219,3 +255,33 @@ def test_subprocess_runner_returns_subprocess_exit_code(
     monkeypatch.setattr(runtime_module.subprocess, "run", fake_run)
     
     assert _subprocess_runner(command) == 17
+
+def test_run_hand_object_contact_reports_progress_messages(tmp_path: Path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"fake-image")
+
+    request = HandObjectContactRequest(
+        input_path = image_path,
+        output_dir = tmp_path / "results",
+    )
+
+    messages: list[str] = []
+
+    run_hand_object_contact(
+        request,
+        command_runner = lambda command: 0,
+        progress = messages.append,
+    )
+
+    assert "Validating hand-object-contact request." in messages
+    assert "Checking host runtime prerequisites." in messages
+    assert any(message.startswith("Python ") for message in messages)
+    assert "Docker daemon is available." in messages
+    assert any(message.startswith("Using output directory:") for message in messages)
+    assert "Checking packaged Shan runtime image." in messages
+    assert "Starting Shan hand-object-contact inference." in messages
+    assert "Shan hand-object-contact inference completed." in messages
+
+def test_runtime_spec_uses_pinned_shan_fork() -> None:
+    assert DEFAULT_RUNTIME_SPEC.shan_repository_url == SHAN_FORK_REPOSITORY_URL
+    assert DEFAULT_RUNTIME_SPEC.shan_commit_sha == SHAN_FORK_COMMIT_SHA

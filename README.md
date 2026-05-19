@@ -33,10 +33,41 @@ Completed: hand-object-contact
 Outputs: /path/to/results
 ```
 
-A successful run should write Shan visualization output into the requested results directory, typically ending in:
+A successful run should write Shan visualization output into the requested results directory, typically including:
 
 ```text
-_det.png
+<image_stem>_det.png
+<image_stem>_shan.json
+<image_stem>_shan.pkl
+```
+
+The JSON file provides a portable structured representation of detected hands and objects. The pickle file preserves Python-friendly raw prediction structures for downstream research workflows.
+
+The hidden Shan runtime is built from an EgoModelKit-maintained fork of the original Shan repository, pinned to a specific commit. This allows EgoModelKit to preserve the upstream model behavior while adding packaging-oriented outputs such as JSON and pickle prediction files.
+
+## Runtime Checks and Progress Messages
+
+Before executing inference, the `run` command checks the host prerequisites needed by the current runtime and reports progress clearly.
+
+Example output:
+
+```text
+EgoModelKit: Validating hand-object-contact request.
+EgoModelKit: Checking host runtime prerequisites.
+EgoModelKit: Python 3.12.2 detected.
+EgoModelKit: Docker executable found: /usr/bin/docker
+EgoModelKit: Docker daemon is available.
+EgoModelKit: Using output directory: /path/to/results
+EgoModelKit: Checking packaged Shan runtime image.
+EgoModelKit: Packaged Shan runtime image is already available.
+EgoModelKit: Starting Shan hand-object-contact inference.
+EgoModelKit runtime: preparing output directory.
+EgoModelKit runtime: staging input image for Shan.
+EgoModelKit runtime: launching Shan demo inference.
+EgoModelKit runtime: Shan inference finished.
+EgoModelKit: Shan hand-object-contact inference completed.
+Completed: hand-object-contact
+Outputs: /path/to/results
 ```
 
 ## Optional Dry Run
@@ -65,12 +96,16 @@ The current target is a research-group Linux NVIDIA GPU machine. EgoModelKit hid
 
 ## Development
 
-Clone the repository, then create and activate a virtual environment:
+Clone the repository, then create and activate a virtual environment. Use Python 3.10 or newer for the EgoModelKit development environment. The examples below use Python 3.10 explicitly.
 
 ```bash
-python3 -m venv .venv
+python3.10 --version
+python3.10 -m venv .venv
 source .venv/bin/activate
+python --version
 ```
+
+The final `python --version` check should report Python 3.10 or newer.
 
 Install the package locally in editable mode:
 

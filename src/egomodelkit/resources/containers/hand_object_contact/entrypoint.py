@@ -43,6 +43,8 @@ def parse_args() -> argparse.Namespace:
 
 def prepare_image_dir(input_path: Path) -> Path:
     """ Stage one mounted input image for Shan's directory-based demo API. """
+    print("EgoModelKit runtime: staging input image for Shan.", flush = True)
+
     if STAGED_IMAGE_DIR.exists():
         shutil.rmtree(STAGED_IMAGE_DIR)
     
@@ -57,7 +59,9 @@ def main() -> None:
     input_path = Path(args.input_path)
     output_dir = Path(args.output_dir)
     
+    print("EgoModelKit runtime: preparing output directory.", flush = True)
     output_dir.mkdir(parents = True, exist_ok = True)
+
     image_dir = prepare_image_dir(input_path)
 
     command = [
@@ -82,7 +86,9 @@ def main() -> None:
         os.environ[LOAD_DIR_ENV],
     ]
     
+    print("EgoModelKit runtime: launching Shan demo inference.", flush = True)
     subprocess.run(command, check = True)
+    print("EgoModelKit runtime: Shan inference finished.", flush = True)
 
 if __name__ == "__main__":
     main()

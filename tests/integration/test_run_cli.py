@@ -84,8 +84,13 @@ def test_run_executes_hand_object_contact(
     
     captured: dict[str, object] = {}
     
-    def fake_run_hand_object_contact(request) -> list[str]:
+    def fake_run_hand_object_contact(
+        request,
+        *,
+        progress,
+    ) -> list[str]:
         captured["request"] = request
+        progress("Pretend runtime progress.")
         
         return ["docker", "run"]
 
@@ -108,4 +113,5 @@ def test_run_executes_hand_object_contact(
     
     assert result.exit_code == 0
     assert "Completed: hand-object-contact" in result.output
+    assert "EgoModelKit: Pretend runtime progress." in result.output
     assert "request" in captured
