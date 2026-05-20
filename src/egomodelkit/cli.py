@@ -43,7 +43,7 @@ def run(
             file_okay = True,
             dir_okay = True,
             readable = True,
-            help = "Path to one image file.",
+            help = "Path to one image file or an images directory.",
         ),
     ],
     output_dir: Annotated[
