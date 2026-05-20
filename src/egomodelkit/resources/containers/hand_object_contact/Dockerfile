@@ -77,7 +77,10 @@ if old not in text:
 setup_py.write_text(text.replace(old, new))
 PY
 
-RUN cd lib && FORCE_CUDA=1 python3.8 setup.py build develop
+RUN cd lib && \
+    TORCH_CUDA_ARCH_LIST="7.5;8.6" \
+    FORCE_CUDA=1 \
+    python3.8 setup.py build develop
 
 RUN mkdir -p "${SHAN_LOAD_DIR}/${SHAN_MODEL_SUBDIR}" \
     && python3.8 -m gdown \
