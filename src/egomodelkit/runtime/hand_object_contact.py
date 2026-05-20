@@ -177,11 +177,11 @@ def build_run_command(
     runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_RUNTIME_SPEC,
 ) -> list[str]:
     """ Build the hidden runtime execution command. """
-    input_parent = request.input_path.resolve().parent
     output_dir = request.output_dir.resolve()
     
-    container_input_path = (
-        runtime_spec.container_input_dir / request.input_path.name
+    container_input_path = _container_input_path(
+        request,
+        runtime_spec = runtime_spec,
     )
     
     return [
@@ -191,7 +191,10 @@ def build_run_command(
         "--gpus",
         "all",
         "-v",
-        f"{input_parent}:{runtime_spec.container_input_dir}:ro",
+        _input_mount_argument(
+            request,
+            runtime_spec = runtime_spec,
+        ),
         "-v",
         f"{output_dir}:{runtime_spec.container_output_dir}",
         runtime_spec.image_tag,
@@ -242,3 +245,30 @@ def run_hand_object_contact(
 
     progress("Shan hand-object-contact inference completed.")
     return run_command
+
+def _container_input_path(
+    request: HandObjectContactRequest,
+    *,
+    runtime_spec: HandObjectContactRuntimeSpec,
+) -> PurePosixPath:
+    """ Return the input path that the container entrypoint should receive. """
+    if request.input_path.is_dir():
+        return runtime_spec.container_input_dir
+
+    return runtime_spec.container_input_dir / request.input_path.name
+
+def _input_mount_argument(
+    request: HandObjectContactRequest,
+    *,
+    runtime_spec: HandObjectContactRuntimeSpec,
+) -> str:
+    """ return the Docker read-only mount for file or directory input. """
+    container_input_path = _container_input_path(
+        request,
+        runtime_spec = runtime_spec
+    )
+    
+    return (
+        f"{request.input_path.resolve()}:"
+        f"{container_input_path}:ro"
+    )

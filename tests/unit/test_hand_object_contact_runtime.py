@@ -148,9 +148,9 @@ def test_build_run_command_mounts_input_and_output(tmp_path: Path) -> None:
     ]
     
     assert DEFAULT_RUNTIME_SPEC.image_tag in command
-    
+        
     assert (
-        f"{tmp_path.resolve()}:{DEFAULT_RUNTIME_SPEC.container_input_dir}:ro"
+        f"{image_path.resolve()}:{expected_container_input}:ro"
         in command
     )
     
@@ -285,3 +285,27 @@ def test_run_hand_object_contact_reports_progress_messages(tmp_path: Path) -> No
 def test_runtime_spec_uses_pinned_shan_fork() -> None:
     assert DEFAULT_RUNTIME_SPEC.shan_repository_url == SHAN_FORK_REPOSITORY_URL
     assert DEFAULT_RUNTIME_SPEC.shan_commit_sha == SHAN_FORK_COMMIT_SHA
+
+def test_build_run_command_supports_directory_input(tmp_path: Path) -> None:
+    input_dir = tmp_path / "frames"
+    input_dir.mkdir()
+    
+    (input_dir / "frame_001.jpg").write_bytes(b"fake-image")
+    
+    request = HandObjectContactRequest(
+        input_path = input_dir,
+        output_dir = tmp_path / "results",
+    )
+    
+    command = build_run_command(request)
+        
+    assert (
+        f"{input_dir.resolve()}:{DEFAULT_RUNTIME_SPEC.container_input_dir}:ro"
+        in command
+    )
+    
+    input_arg_index = command.index("--input-path")
+    
+    assert command[input_arg_index + 1] == str(
+        DEFAULT_RUNTIME_SPEC.container_input_dir
+    )

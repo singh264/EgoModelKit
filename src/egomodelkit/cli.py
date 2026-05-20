@@ -41,7 +41,7 @@ def run(
             "--input",
             exists = True,
             file_okay = True,
-            dir_okay = False,
+            dir_okay = True,
             readable = True,
             help = "Path to one image file.",
         ),

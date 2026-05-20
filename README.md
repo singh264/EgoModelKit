@@ -10,11 +10,24 @@ egomodelkit run hand-object-contact \
   --output /path/to/results
 ```
 
+```bash
+egomodelkit run hand-object-contact \
+  --input /path/to/image-directory \
+  --output /path/to/results
+```
+
 The public interface is run-only. Runtime preparation, container use, and model environment details stay hidden behind the command-line interface (CLI).
+
+`--input` may be either:
+
+- one supported image file, or
+- a directory containing one or more supported image files.
+
+Directory input is processed non-recursively in the current milestone.
 
 ## Current Milestone
 
-The Shan hand-object-contact command now performs real inference.
+The Shan hand-object-contact command now performs real inference for either one supported image file or a directory of supported image files.
 
 Run:
 
@@ -62,13 +75,15 @@ EgoModelKit: Checking packaged Shan runtime image.
 EgoModelKit: Packaged Shan runtime image is already available.
 EgoModelKit: Starting Shan hand-object-contact inference.
 EgoModelKit runtime: preparing output directory.
-EgoModelKit runtime: staging input image for Shan.
+EgoModelKit runtime: staging input image(s) for Shan.
 EgoModelKit runtime: launching Shan demo inference.
 EgoModelKit runtime: Shan inference finished.
 EgoModelKit: Shan hand-object-contact inference completed.
 Completed: hand-object-contact
 Outputs: /path/to/results
 ```
+
+For directory input, EgoModelKit writes one visualization image, one JSON file, and one pickle file for each processed input image stem.
 
 ## Optional Dry Run
 
@@ -88,6 +103,8 @@ Dry run: hand-object-contact request is valid.
 Input: /path/to/image.jpg
 Output: /path/to/results
 ```
+
+The same dry-run flow also accepts a directory input that contains one or more supported image files.
 
 ## Current Platform Target
 

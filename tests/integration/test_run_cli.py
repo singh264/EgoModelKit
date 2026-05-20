@@ -115,3 +115,27 @@ def test_run_executes_hand_object_contact(
     assert "Completed: hand-object-contact" in result.output
     assert "EgoModelKit: Pretend runtime progress." in result.output
     assert "request" in captured
+
+def test_run_dry_run_accepts_hand_object_contact_directory(tmp_path: Path) -> None:
+    input_dir = tmp_path / "frames"
+    input_dir.mkdir()
+    
+    (input_dir / "frame_001.jpg").write_bytes(b"fake-images")
+    
+    output_dir = tmp_path / "results"
+    
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "hand-object-contact",
+            "--input",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--dry-run",
+        ]
+    )
+    
+    assert result.exit_code == 0
+    assert "Dry run: hand-object-contact request is valid." in result.output

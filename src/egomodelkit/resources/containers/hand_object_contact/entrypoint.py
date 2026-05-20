@@ -34,6 +34,10 @@ STAGED_IMAGE_DIR: Final[Path] = Path(
     "/tmp/egomodelkit_hand_object_contact_input"
 )
 
+SUPPORTED_IMAGE_SUFFIXES = frozenset(
+    {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
+)
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser() 
     parser.add_argument(INPUT_PATH_FLAG, required = True)
@@ -41,15 +45,37 @@ def parse_args() -> argparse.Namespace:
     
     return parser.parse_args()
 
+def _copy_supported_directory_images(
+    input_dir: Path,
+    staged_dir: Path,
+) -> None:
+    """ Copy supported image files from one mounted directory into Shan staging. """
+    for child in sorted(input_dir.iterdir()):
+        if (
+            child.is_file()
+            and child.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+        ):
+            shutil.copy2(child, staged_dir / child.name)
+
 def prepare_image_dir(input_path: Path) -> Path:
-    """ Stage one mounted input image for Shan's directory-based demo API. """
-    print("EgoModelKit runtime: staging input image for Shan.", flush = True)
+    """ Stage mounted image input for Shan's directory-based demo API. """
+    print("EgoModelKit runtime: staging input image(s) for Shan.", flush = True)
 
     if STAGED_IMAGE_DIR.exists():
         shutil.rmtree(STAGED_IMAGE_DIR)
     
     STAGED_IMAGE_DIR.mkdir(parents = True, exist_ok = True)
-    shutil.copy2(input_path, STAGED_IMAGE_DIR / input_path.name)
+    
+    if input_path.is_dir():
+        _copy_supported_directory_images(
+            input_dir = input_path,
+            staged_dir = STAGED_IMAGE_DIR,
+        )
+    else:
+        shutil.copy2(
+            input_path,
+            STAGED_IMAGE_DIR / input_path.name,
+        )
     
     return STAGED_IMAGE_DIR
 
