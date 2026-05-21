@@ -19,6 +19,11 @@ from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
     validate_hand_object_contact_request,
 )
+from egomodelkit.runtime.adl_recognition import (
+    AdlRecognitionRuntimeError,
+    run_adl_recognition,
+)
+from egomodelkit.runtime.commands import subprocess_runner
 from egomodelkit.runtime.hand_object_contact import (
     HandObjectContactRuntimeError,
     run_hand_object_contact,
@@ -94,7 +99,8 @@ def run(
 
             run_hand_object_contact(
                 request,
-                progress=_report_progress,
+                command_runner = subprocess_runner,
+                progress = _report_progress,
             )
 
             typer.echo("Completed: hand-object-contact")
@@ -111,15 +117,19 @@ def run(
                 typer.echo(f"Output: {output_dir}")
                 return
 
-            raise typer.BadParameter(
-                "adl-recognition runtime is not available yet; "
-                "use --dry-run for this milestone."
+            run_adl_recognition(
+                request,
+                command_runner = subprocess_runner,
+                progress = _report_progress,
             )
+
+            typer.echo("Completed: adl-recognition")
     except (
         HandObjectContactInputError,
-        HandObjectContactRuntimeError,
-        HostPrerequisiteError,
         AdlRecognitionInputError,
+        HostPrerequisiteError,
+        HandObjectContactRuntimeError,
+        AdlRecognitionRuntimeError,
     ) as exc:
         typer.echo(f"Error: {exc}", err = True)
         raise typer.Exit(code=CLI_RUNTIME_ERROR_EXIT_CODE) from exc

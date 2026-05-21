@@ -27,7 +27,7 @@ Directory input is processed non-recursively in the current milestone.
 
 ## Current Milestone
 
-The Shan hand-object-contact command now performs real inference for either one supported image file or a directory of supported image files.
+The hand-object-contact command now performs real inference for either one supported image file or a directory of supported image files.
 
 Run:
 
@@ -46,7 +46,7 @@ Completed: hand-object-contact
 Outputs: /path/to/results
 ```
 
-A successful run should write Shan visualization output into the requested results directory, typically including:
+A successful run should write visualization output into the requested results directory, typically including:
 
 ```text
 <image_stem>_det.png
@@ -56,7 +56,7 @@ A successful run should write Shan visualization output into the requested resul
 
 The JSON file provides a portable structured representation of detected hands and objects. The pickle file preserves Python-friendly raw prediction structures for downstream research workflows.
 
-The hidden Shan runtime is built from an EgoModelKit-maintained fork of the original Shan repository, pinned to a specific commit. This allows EgoModelKit to preserve the upstream model behavior while adding packaging-oriented outputs such as JSON and pickle prediction files.
+The hidden hand-object-contact runtime is built from an EgoModelKit-maintained fork of the original hand-object-detector repository, pinned to a specific commit. This allows EgoModelKit to preserve the upstream model behavior while adding packaging-oriented outputs such as JSON and pickle prediction files.
 
 ## Runtime Checks and Progress Messages
 
@@ -71,14 +71,14 @@ EgoModelKit: Python 3.12.2 detected.
 EgoModelKit: Docker executable found: /usr/bin/docker
 EgoModelKit: Docker daemon is available.
 EgoModelKit: Using output directory: /path/to/results
-EgoModelKit: Checking packaged Shan runtime image.
-EgoModelKit: Packaged Shan runtime image is already available.
-EgoModelKit: Starting Shan hand-object-contact inference.
+EgoModelKit: Checking packaged hand-object-contact runtime image.
+EgoModelKit: Packaged hand-object-contact runtime image is already available.
+EgoModelKit: Starting hand-object-contact inference.
 EgoModelKit runtime: preparing output directory.
-EgoModelKit runtime: staging input image(s) for Shan.
-EgoModelKit runtime: launching Shan demo inference.
-EgoModelKit runtime: Shan inference finished.
-EgoModelKit: Shan hand-object-contact inference completed.
+EgoModelKit runtime: staging input image(s) for hand-object-contact.
+EgoModelKit runtime: launching hand-object-contact demo inference.
+EgoModelKit runtime: hand-object-contact inference finished.
+EgoModelKit: hand-object-contact inference completed.
 Completed: hand-object-contact
 Outputs: /path/to/results
 ```

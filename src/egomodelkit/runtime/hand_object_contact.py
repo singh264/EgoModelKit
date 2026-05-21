@@ -1,6 +1,5 @@
-""" Hidden runtime execution for Shan hand-object-contact inference. """
+""" Hidden runtime execution for hand-object-contact inference. """
 
-import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from importlib.resources import files
@@ -11,6 +10,7 @@ from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
     validate_hand_object_contact_request,
 )
+from egomodelkit.runtime.commands import subprocess_runner
 from egomodelkit.runtime.preflight import (
     ProgressReporter,
     ensure_host_runtime_ready,
@@ -23,7 +23,7 @@ SHAN_FORK_COMMIT_SHA: Final[str] = "70146cabaeffb41ecc02e6edb605fc021dbdb555"
 
 @dataclass(frozen = True, slots = True)
 class HandObjectContactRuntimeSpec:
-    """ Build and execution settings for the hidden Shan runtime. """
+    """ Build and execution settings for the hidden hand-object-contact runtime. """
     
     docker_executable: str
     image_tag: str
@@ -44,7 +44,7 @@ class HandObjectContactRuntimeSpec:
     
     @property
     def checkpoint_filename(self) -> str:
-        """ Return the Shan checkpoint filename expected by demo.py. """ 
+        """ Return the checkpoint filename expected by demo.py. """ 
 
         return (
             "faster_rcnn_"
@@ -61,7 +61,7 @@ class HandObjectContactRuntimeSpec:
             f"{self.shan_network_name}_handobj_100K/{self.shan_dataset_name}"    
         )
 
-DEFAULT_RUNTIME_SPEC: Final[HandObjectContactRuntimeSpec] = (
+DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC: Final[HandObjectContactRuntimeSpec] = (
     HandObjectContactRuntimeSpec(
         docker_executable = "docker",
         image_tag = "egomodelkit-hand-object-contact:dev",
@@ -80,15 +80,10 @@ DEFAULT_RUNTIME_SPEC: Final[HandObjectContactRuntimeSpec] = (
 )
 
 class HandObjectContactRuntimeError(RuntimeError):
-    """ Raised when the hidden Shan runtime fails. """
+    """ Raised when hand-object-contact runtime execution fails. """
 
 def _ignore_progress(_: str) -> None:
     """ Default no-op progress reporter. """
-
-def _subprocess_runner(command: list[str]) -> int:
-    completed = subprocess.run(command, check = False)
-    
-    return completed.returncode
 
 def _container_resource_dir() -> Path:
     return Path(
@@ -125,12 +120,12 @@ def _docker_build_arguments(runtime_spec: HandObjectContactRuntimeSpec) -> list[
     
 def ensure_runtime_image(
     *,
-    runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_RUNTIME_SPEC,
-    command_runner: CommandRunner = _subprocess_runner,
+    runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
+    command_runner: CommandRunner = subprocess_runner,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
-    """ Build the hidden Shan runtime image only when missing. """
-    progress("Checking packaged Shan runtime image.")
+    """ Build the hidden hand-object-contact runtime image only when missing. """
+    progress("Checking packaged hand-object-contact runtime image.")
 
     inspect_command = [
         runtime_spec.docker_executable,
@@ -140,11 +135,11 @@ def ensure_runtime_image(
     ]
     
     if command_runner(inspect_command) == 0:
-        progress("Packaged Shan runtime image is already available.")
+        progress("Packaged hand-object-contact runtime image is already available.")
         return
 
     progress(
-        "Packaged Shan runtime image is missing; preparing it now. "
+        "Packaged hand-object-contact runtime image is missing; preparing it now. "
         "The first run may take longer."
     )
 
@@ -169,12 +164,12 @@ def ensure_runtime_image(
             f"hand-object-contact runtime image build failed with exit code {exit_code}."
         )
 
-    progress("Packaged Shan runtime image is ready.")
+    progress("Packaged hand-object-contact runtime image is ready.")
 
 def build_run_command(
     request: HandObjectContactRequest,
     *,
-    runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_RUNTIME_SPEC,
+    runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
 ) -> list[str]:
     """ Build the hidden runtime execution command. """
     output_dir = request.output_dir.resolve()
@@ -207,11 +202,11 @@ def build_run_command(
 def run_hand_object_contact(
     request: HandObjectContactRequest,
     *,
-    runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_RUNTIME_SPEC,
-    command_runner: CommandRunner = _subprocess_runner,
+    runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
+    command_runner: CommandRunner = subprocess_runner,
     progress: ProgressReporter = _ignore_progress,
 ) -> list[str]:
-    """ Run Shan hand-object-contact behind EgoModelKit's run command. """
+    """ Run hand-object-contact behind EgoModelKit's run command. """
     progress("Validating hand-object-contact request.")
     validate_hand_object_contact_request(request)
 
@@ -235,7 +230,7 @@ def run_hand_object_contact(
         runtime_spec = runtime_spec,
     )
     
-    progress("Starting Shan hand-object-contact inference.")
+    progress("Starting hand-object-contact inference.")
     exit_code = command_runner(run_command)
     
     if exit_code != 0:
@@ -243,7 +238,7 @@ def run_hand_object_contact(
             f"hand-object-contact inference runtime failed with exit code {exit_code}."
         )
 
-    progress("Shan hand-object-contact inference completed.")
+    progress("hand-object-contact inference completed.")
     return run_command
 
 def _container_input_path(

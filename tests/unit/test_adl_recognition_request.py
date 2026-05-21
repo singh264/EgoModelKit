@@ -156,3 +156,23 @@ def test_validate_adl_recognition_rejects_existing_input_that_is_not_file_or_dir
         match = "Input path must be a file or directory."
     ):
         validate_adl_recognition_request(request)
+
+def test_validate_adl_recognition_rejects_directory_named_like_video(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "videos"
+    input_dir.mkdir()
+
+    fake_video_dir = input_dir / "clip.mp4"
+    fake_video_dir.mkdir()
+
+    request = AdlRecognitionRequest(
+        input_path = input_dir,
+        output_dir = tmp_path / "results",
+    )
+
+    with pytest.raises(
+        AdlRecognitionInputError,
+        match = "does not contain any supported video files",
+    ):
+        validate_adl_recognition_request(request)

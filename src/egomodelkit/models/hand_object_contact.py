@@ -1,4 +1,4 @@
-""" Validation helpers for Shan hand-object-contact runs. """
+""" Validation helpers for hand-object-contact runs. """
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,7 +21,7 @@ class HandObjectContactInputError(ValueError):
 
 @dataclass(frozen=True, slots=True)
 class HandObjectContactRequest:
-    """ One image-based Shan hand-object-contact request. """
+    """ One image-based hand-object-contact request. """
     input_path: Path
     output_dir: Path
 

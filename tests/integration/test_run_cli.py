@@ -87,6 +87,7 @@ def test_run_executes_hand_object_contact(
     def fake_run_hand_object_contact(
         request,
         *,
+        command_runner,
         progress,
     ) -> list[str]:
         captured["request"] = request
@@ -192,3 +193,47 @@ def test_run_rejects_adl_recognition_as_not_available_yet(
 
     assert result.exit_code != 0
     assert "adl-recognition runtime is not available yet" in result.output
+
+def test_run_executes_adl_recognition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    input_path = tmp_path / "video.mp4"
+    input_path.write_bytes(b"fake-video")
+    
+    output_dir = tmp_path / "results"
+    
+    captured: dict[str, object] = {}
+    
+    def fake_run_adl_recognition(
+        request,
+        *,
+        command_runner,
+        progress,
+    ) -> list[str]:
+        captured["request"] = request
+        progress("Pretend runtime progress.")
+        
+        return ["docker", "run"]
+
+    monkeypatch.setattr(
+        "egomodelkit.cli.run_adl_recognition",
+        fake_run_adl_recognition,
+    )
+    
+    result = runner.invoke(
+        app,
+        [
+          "run",
+          "adl-recognition",
+          "--input",
+          str(input_path),
+          "--output",
+          str(output_dir)
+        ],
+    )
+    
+    assert result.exit_code == 0
+    assert "Completed: adl-recognition" in result.output
+    assert "EgoModelKit: Pretend runtime progress." in result.output
+    assert "request" in captured

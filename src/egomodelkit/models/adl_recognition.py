@@ -23,7 +23,7 @@ class AdlRecognitionRequest:
     output_dir: Path
 
 def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
-    """ Validate anADL reconition request. """
+    """ Validate an ADL reconition request. """
     input_path = request.input_path
     
     if not input_path.exists():
@@ -59,7 +59,7 @@ def _is_combined_predictions_file(input_path: Path) -> bool:
 
 def _directory_contains_supported_videos(input_dir: Path) -> bool:
     return any(
-        child.is_file 
+        child.is_file()
         and child.suffix.lower() in SUPPORTED_VIDEO_SUFFIXES
         for child in input_dir.iterdir()
     )

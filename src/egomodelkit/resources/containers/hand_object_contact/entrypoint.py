@@ -49,7 +49,7 @@ def _copy_supported_directory_images(
     input_dir: Path,
     staged_dir: Path,
 ) -> None:
-    """ Copy supported image files from one mounted directory into Shan staging. """
+    """ Copy supported image files from one mounted directory into staging. """
     for child in sorted(input_dir.iterdir()):
         if (
             child.is_file()
@@ -58,8 +58,8 @@ def _copy_supported_directory_images(
             shutil.copy2(child, staged_dir / child.name)
 
 def prepare_image_dir(input_path: Path) -> Path:
-    """ Stage mounted image input for Shan's directory-based demo API. """
-    print("EgoModelKit runtime: staging input image(s) for Shan.", flush = True)
+    """ Stage mounted image input for directory-based demo API. """
+    print("EgoModelKit runtime: staging input image(s) for hand-object-contact.", flush = True)
 
     if STAGED_IMAGE_DIR.exists():
         shutil.rmtree(STAGED_IMAGE_DIR)
@@ -112,9 +112,9 @@ def main() -> None:
         os.environ[LOAD_DIR_ENV],
     ]
     
-    print("EgoModelKit runtime: launching Shan demo inference.", flush = True)
+    print("EgoModelKit runtime: launching hand-object-contact demo inference.", flush = True)
     subprocess.run(command, check = True)
-    print("EgoModelKit runtime: Shan inference finished.", flush = True)
+    print("EgoModelKit runtime: hand-object-contact inference finished.", flush = True)
 
 if __name__ == "__main__":
     main()
