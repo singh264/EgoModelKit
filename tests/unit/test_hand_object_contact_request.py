@@ -5,11 +5,13 @@ import pytest
 from egomodelkit.models.hand_object_contact import (
     HandObjectContactInputError,
     HandObjectContactRequest,
-    validate_request,
+    validate_hand_object_contact_request,
 )
 
 
-def test_validate_request_accepts_supported_image(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_accepts_supported_image(
+    tmp_path: Path,
+) -> None:
     input_path = tmp_path / "frame.JPG"
     input_path.write_bytes(b"fake-image")
     
@@ -18,9 +20,11 @@ def test_validate_request_accepts_supported_image(tmp_path: Path) -> None:
         output_dir = tmp_path / "results",
     )
     
-    validate_request(request)
+    validate_hand_object_contact_request(request)
 
-def test_validate_request_rejects_missing_image(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_rejects_missing_image(
+    tmp_path: Path,
+) -> None:
     request = HandObjectContactRequest(
         input_path = tmp_path / "missing.jpg",
         output_dir = tmp_path / "results",
@@ -30,9 +34,11 @@ def test_validate_request_rejects_missing_image(tmp_path: Path) -> None:
         HandObjectContactInputError,
         match="Input path does not exist",
     ):
-        validate_request(request)
+        validate_hand_object_contact_request(request)
 
-def test_validate_request_rejects_unsupported_suffix(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_rejects_unsupported_suffix(
+    tmp_path: Path,
+) -> None:
     input_path = tmp_path / "notes.txt"
     input_path.write_text("not an image", encoding="utf-8")
     
@@ -45,9 +51,11 @@ def test_validate_request_rejects_unsupported_suffix(tmp_path: Path) -> None:
         HandObjectContactInputError,
         match="Unsupported input image suffix",
     ):
-        validate_request(request)
+        validate_hand_object_contact_request(request)
 
-def test_validate_request_allows_missing_output_directory(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_allows_missing_output_directory(
+    tmp_path: Path,
+) -> None:
     input_path = tmp_path / "frame.jpg"
     input_path.write_bytes(b"fake-image")
     
@@ -58,9 +66,11 @@ def test_validate_request_allows_missing_output_directory(tmp_path: Path) -> Non
         output_dir = output_dir,
     )
     
-    validate_request(request)
+    validate_hand_object_contact_request(request)
 
-def test_validate_request_allows_existing_output_directory(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_allows_existing_output_directory(
+    tmp_path: Path,
+) -> None:
     input_path = tmp_path / "frame.jpg"
     input_path.write_bytes(b"fake-image")
     
@@ -72,9 +82,11 @@ def test_validate_request_allows_existing_output_directory(tmp_path: Path) -> No
         output_dir = output_dir,
     )
     
-    validate_request(request)
+    validate_hand_object_contact_request(request)
     
-def test_validate_request_rejects_output_path_that_is_a_file(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_rejects_output_path_that_is_a_file(
+    tmp_path: Path,
+) -> None:
     input_path = tmp_path / "frame.jpg"
     input_path.write_bytes(b"fake-image")
 
@@ -90,9 +102,11 @@ def test_validate_request_rejects_output_path_that_is_a_file(tmp_path: Path) -> 
         HandObjectContactInputError,
         match="Output path exists but is not a directory",
     ):
-        validate_request(request)
+        validate_hand_object_contact_request(request)
 
-def test_validate_request_accepts_directory_with_supported_images(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_accepts_directory_with_supported_images(
+    tmp_path: Path,
+) -> None:
     input_dir = tmp_path / "frames"
     input_dir.mkdir()
     
@@ -104,9 +118,11 @@ def test_validate_request_accepts_directory_with_supported_images(tmp_path: Path
         output_dir = tmp_path / "results",
     )
     
-    validate_request(request)
+    validate_hand_object_contact_request(request)
 
-def test_validate_request_rejects_directory_without_supported_images(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_rejects_directory_without_supported_images(
+    tmp_path: Path,
+) -> None:
     input_dir = tmp_path / "frames"
     input_dir.mkdir()
     
@@ -121,9 +137,11 @@ def test_validate_request_rejects_directory_without_supported_images(tmp_path: P
         HandObjectContactInputError,
         match = "directory does not contain any supported image files",
     ):
-        validate_request(request)
+        validate_hand_object_contact_request(request)
 
-def test_validate_request_accepts_directory_with_images_and_non_images(tmp_path: Path) -> None:
+def test_validate_hand_object_contact_request_accepts_directory_with_images_and_non_images(
+    tmp_path: Path,
+) -> None:
     input_dir = tmp_path / "frames"
     input_dir.mkdir()
     
@@ -135,9 +153,9 @@ def test_validate_request_accepts_directory_with_images_and_non_images(tmp_path:
         output_dir = tmp_path / "results",
     )
     
-    validate_request(request)
+    validate_hand_object_contact_request(request)
 
-def test_validate_request_rejects_existing_input_that_is_not_file_or_directory(
+def test_validate_hand_object_contact_request_rejects_existing_input_not_file_or_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -182,4 +200,4 @@ def test_validate_request_rejects_existing_input_that_is_not_file_or_directory(
             "containing supported image files."
         )
     ):
-        validate_request(request)
+        validate_hand_object_contact_request(request)

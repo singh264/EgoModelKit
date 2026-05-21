@@ -9,7 +9,7 @@ from typing import Final
 
 from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
-    validate_request,
+    validate_hand_object_contact_request,
 )
 from egomodelkit.runtime.preflight import (
     ProgressReporter,
@@ -213,7 +213,7 @@ def run_hand_object_contact(
 ) -> list[str]:
     """ Run Shan hand-object-contact behind EgoModelKit's run command. """
     progress("Validating hand-object-contact request.")
-    validate_request(request)
+    validate_hand_object_contact_request(request)
 
     ensure_host_runtime_ready(
         docker_executable = runtime_spec.docker_executable,

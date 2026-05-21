@@ -5,12 +5,19 @@ from typing import Annotated, Final
 
 import typer
 
+from egomodelkit.models.adl_recognition import (
+    ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE,
+    ADL_RECOGNITION_MODEL_ID,
+    AdlRecognitionInputError,
+    AdlRecognitionRequest,
+    validate_adl_recognition_request,
+)
 from egomodelkit.models.hand_object_contact import (
-    DRY_RUN_VALIDATION_MESSAGE,
+    HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE,
     HAND_OBJECT_CONTACT_MODEL_ID,
     HandObjectContactInputError,
     HandObjectContactRequest,
-    validate_request,
+    validate_hand_object_contact_request,
 )
 from egomodelkit.runtime.hand_object_contact import (
     HandObjectContactRuntimeError,
@@ -43,7 +50,7 @@ def run(
             file_okay = True,
             dir_okay = True,
             readable = True,
-            help = "Path to one image file or an images directory.",
+            help = "Path to a model input file or directory.",
         ),
     ],
     output_dir: Annotated[
@@ -55,7 +62,7 @@ def run(
     ],
     model_id: str = typer.Argument(
         ...,
-        help = "Public model id. Currently supported: hand-object-contact.",
+        help = "Public model id. Supported: hand-object-contact, adl-recognition.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -64,34 +71,57 @@ def run(
     ),
 ) -> None:
     """ Run one packaged model adapter. """
-    if model_id != HAND_OBJECT_CONTACT_MODEL_ID:
+    if (
+        model_id != HAND_OBJECT_CONTACT_MODEL_ID and
+        model_id != ADL_RECOGNITION_MODEL_ID
+    ):
         typer.echo(f"Unsupported model: {model_id}", err = True)
         raise typer.Exit(code=CLI_UNSUPPORTED_MODEL_EXIT_CODE)
-    
-    request = HandObjectContactRequest(
-        input_path = input_path,
-        output_dir = output_dir,
-    )
-    
-    try:
-        if dry_run:
-            validate_request(request)
-            typer.echo(DRY_RUN_VALIDATION_MESSAGE)
-            typer.echo(f"Input: {input_path}")
-            typer.echo(f"Output: {output_dir}")
-            return
         
-        run_hand_object_contact(
-            request,
-            progress=_report_progress,
-        )
+    try:
+        if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
+            request = HandObjectContactRequest(
+                input_path = input_path,
+                output_dir = output_dir,
+            )
+
+            if dry_run:
+                validate_hand_object_contact_request(request)
+                typer.echo(HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE)
+                typer.echo(f"Input: {input_path}")
+                typer.echo(f"Output: {output_dir}")
+                return
+
+            run_hand_object_contact(
+                request,
+                progress=_report_progress,
+            )
+
+            typer.echo("Completed: hand-object-contact")
+        else:
+            request = AdlRecognitionRequest(
+                input_path = input_path,
+                output_dir = output_dir,
+            )
+
+            if dry_run:
+                validate_adl_recognition_request(request)
+                typer.echo(ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE)
+                typer.echo(f"Input: {input_path}")
+                typer.echo(f"Output: {output_dir}")
+                return
+
+            raise typer.BadParameter(
+                "adl-recognition runtime is not available yet; "
+                "use --dry-run for this milestone."
+            )
     except (
         HandObjectContactInputError,
         HandObjectContactRuntimeError,
         HostPrerequisiteError,
+        AdlRecognitionInputError,
     ) as exc:
         typer.echo(f"Error: {exc}", err = True)
         raise typer.Exit(code=CLI_RUNTIME_ERROR_EXIT_CODE) from exc
     
-    typer.echo("Completed: hand-object-contact")
     typer.echo(f"Outputs: {output_dir}")

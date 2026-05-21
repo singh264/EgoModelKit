@@ -113,11 +113,10 @@ The current target is a research-group Linux NVIDIA GPU machine. EgoModelKit hid
 
 ## Development
 
-Clone the repository, then create and activate a virtual environment. Use Python 3.10 or newer for the EgoModelKit development environment. The examples below use Python 3.10 explicitly.
+Clone the repository, then create and activate a virtual environment. Use Python 3.10 or newer for the EgoModelKit development environment.
 
 ```bash
-python3.10 --version
-python3.10 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 python --version
 ```

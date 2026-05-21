@@ -4,7 +4,7 @@ import pytest
 from typer.testing import CliRunner
 
 from egomodelkit.cli import CLI_RUNTIME_ERROR_EXIT_CODE, CLI_UNSUPPORTED_MODEL_EXIT_CODE, app
-from egomodelkit.models.hand_object_contact import DRY_RUN_VALIDATION_MESSAGE
+from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE
 
 runner = CliRunner()
 
@@ -28,7 +28,7 @@ def test_run_dry_run_accepts_hand_object_contact(tmp_path: Path) -> None:
     )
     
     assert result.exit_code == 0
-    assert DRY_RUN_VALIDATION_MESSAGE in result.output
+    assert HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE in result.output
     assert str(image_path) in result.output
     assert str(output_dir) in result.output
 
@@ -116,7 +116,9 @@ def test_run_executes_hand_object_contact(
     assert "EgoModelKit: Pretend runtime progress." in result.output
     assert "request" in captured
 
-def test_run_dry_run_accepts_hand_object_contact_directory(tmp_path: Path) -> None:
+def test_run_dry_run_accepts_hand_object_contact_directory(
+    tmp_path: Path,
+) -> None:
     input_dir = tmp_path / "frames"
     input_dir.mkdir()
     
@@ -139,3 +141,54 @@ def test_run_dry_run_accepts_hand_object_contact_directory(tmp_path: Path) -> No
     
     assert result.exit_code == 0
     assert "Dry run: hand-object-contact request is valid." in result.output
+
+def test_run_dry_run_accepts_adl_recognition_directory(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "videos"
+    input_dir.mkdir()
+    
+    (input_dir / "clip.mp4").write_bytes(b"fake-video")
+    
+    output_dir = tmp_path / "results"
+    
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "adl-recognition",
+            "--input",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+            "--dry-run",
+        ]
+    )
+    
+    assert result.exit_code == 0
+    assert "Dry run: adl-recognition request is valid." in result.output
+
+def test_run_rejects_adl_recognition_as_not_available_yet(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "videos"
+    input_dir.mkdir()
+    
+    (input_dir / "clip.mp4").write_bytes(b"fake-video")
+    
+    output_dir = tmp_path / "results"
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "adl-recognition",
+            "--input",
+            str(input_dir),
+            "--output",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "adl-recognition runtime is not available yet" in result.output

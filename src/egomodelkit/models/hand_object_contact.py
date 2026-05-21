@@ -10,7 +10,7 @@ SUPPORTED_IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 )
 
-DRY_RUN_VALIDATION_MESSAGE: Final[str] = (
+HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE: Final[str] = (
     f"Dry run: {HAND_OBJECT_CONTACT_MODEL_ID} request is valid."
 )
 
@@ -26,7 +26,7 @@ class HandObjectContactRequest:
     output_dir: Path
 
 
-def validate_request(request: HandObjectContactRequest) -> None:
+def validate_hand_object_contact_request(request: HandObjectContactRequest) -> None:
     """ Validate one image-based hand-object-contact request. """
     input_path = request.input_path
     

@@ -1,0 +1,65 @@
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Final
+
+ADL_RECOGNITION_MODEL_ID: Final[str] = "adl-recognition"
+COMBINED_PREDS_FILENAME: Final[str] = "all_preds.pkl"
+
+SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset(
+    {".mp4", ".mov", ".m4v", ".avi"}
+)
+
+ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE: Final[str] = (
+    f"Dry run: {ADL_RECOGNITION_MODEL_ID} request is valid."
+)
+
+class AdlRecognitionInputError(ValueError):
+    """ Raised when an ADL recognition request in invalid. """
+
+@dataclass(frozen = True, slots = True)
+class AdlRecognitionRequest:
+    """ One video-based ADL recognition request. """
+    input_path: Path
+    output_dir: Path
+
+def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
+    """ Validate anADL reconition request. """
+    input_path = request.input_path
+    
+    if not input_path.exists():
+        raise AdlRecognitionInputError(f"Input path does not exist: {input_path}")
+
+    if input_path.is_file():
+        if _is_combined_predictions_file(input_path):
+            pass
+        elif input_path.suffix.lower() in SUPPORTED_VIDEO_SUFFIXES:
+            pass
+        else:
+            raise AdlRecognitionInputError(
+                "Input must be an EgoVizML all_preds.pkl file, a supported "
+                "video file, or a directory containing supported video files."
+            )
+    elif input_path.is_dir():
+        if not _directory_contains_supported_videos(input_path):
+            raise AdlRecognitionInputError(
+                "Input directory does not contain any supported video files."
+            )
+    else:
+        raise AdlRecognitionInputError(
+            "Input path must be a file or directory."
+        )
+    
+    if request.output_dir.exists() and not request.output_dir.is_dir():
+        raise AdlRecognitionInputError(
+            f"Output path exists but is not a directory: {request.output_dir}"
+        )
+
+def _is_combined_predictions_file(input_path: Path) -> bool:
+    return input_path.is_file() and input_path.name == COMBINED_PREDS_FILENAME
+
+def _directory_contains_supported_videos(input_dir: Path) -> bool:
+    return any(
+        child.is_file 
+        and child.suffix.lower() in SUPPORTED_VIDEO_SUFFIXES
+        for child in input_dir.iterdir()
+    )
