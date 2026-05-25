@@ -40,7 +40,10 @@ where = ["src"]
 egomodelkit = [
     "resources/*.yaml",
     "resources/*.json",
-    "resources/containers/hand_object_contact/*"
+    "resources/containers/hand_object_contact/*",
+    "resources/containers/hand_object_contact/**/*",
+    "resources/containers/adl_recognition/*",
+    "resources/containers/adl_recognition/**/*",
 ]
 
 [tool.pytest.ini_options]

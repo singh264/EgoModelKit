@@ -5,6 +5,7 @@ from typer.testing import CliRunner
 
 from egomodelkit.cli import CLI_RUNTIME_ERROR_EXIT_CODE, CLI_UNSUPPORTED_MODEL_EXIT_CODE, app
 from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE
+from egomodelkit.runtime.adl_recognition import AdlRecognitionRuntimeError
 
 runner = CliRunner()
 
@@ -169,16 +170,30 @@ def test_run_dry_run_accepts_adl_recognition_directory(
     assert result.exit_code == 0
     assert "Dry run: adl-recognition request is valid." in result.output
 
-def test_run_rejects_adl_recognition_as_not_available_yet(
+def test_run_reports_adl_recognition_runtime_error(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     input_dir = tmp_path / "videos"
     input_dir.mkdir()
     
-    (input_dir / "clip.mp4").write_bytes(b"fake-video")
+    (input_dir / "video.mp4").write_bytes(b"fake-video")
     
     output_dir = tmp_path / "results"
 
+    def fake_run_adl_recognition(
+        request,
+        *,
+        command_runner,
+        progress,
+    ) -> list[str]:
+        raise AdlRecognitionRuntimeError("simulated ADL failure")
+
+    monkeypatch.setattr(
+        "egomodelkit.cli.run_adl_recognition",
+        fake_run_adl_recognition,
+    )
+    
     result = runner.invoke(
         app,
         [
@@ -191,8 +206,8 @@ def test_run_rejects_adl_recognition_as_not_available_yet(
         ],
     )
 
-    assert result.exit_code != 0
-    assert "adl-recognition runtime is not available yet" in result.output
+    assert result.exit_code == CLI_RUNTIME_ERROR_EXIT_CODE
+    assert "simulated ADL failure" in result.output
 
 def test_run_executes_adl_recognition(
     tmp_path: Path,

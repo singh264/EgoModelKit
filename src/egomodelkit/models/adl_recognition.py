@@ -23,7 +23,7 @@ class AdlRecognitionRequest:
     output_dir: Path
 
 def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
-    """ Validate an ADL reconition request. """
+    """ Validate an ADL recognition request. """
     input_path = request.input_path
     
     if not input_path.exists():
