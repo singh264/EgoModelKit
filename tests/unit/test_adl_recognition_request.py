@@ -55,7 +55,7 @@ def test_validate_adl_recognition_rejects_empty_video_directory(tmp_path: Path) 
     
     with pytest.raises(
         AdlRecognitionInputError,
-        match = "does not contain any supported video files",
+        match = "does not contain any MP4 video files",
     ):
         validate_adl_recognition_request(request)
 
@@ -107,8 +107,8 @@ def test_validate_adl_recognition_rejects_directory_without_supported_input(
     with pytest.raises(
         AdlRecognitionInputError,
         match = (
-            "Input must be an EgoVizML all_preds.pkl file, a supported "
-            "video file, or a directory containing supported video files."
+            "Input must be an EgoVizML all_preds.pkl file, an MP4 video file, "
+            "or a directory containing MP4 video files."
         )
     ):
         validate_adl_recognition_request(request)
@@ -173,6 +173,6 @@ def test_validate_adl_recognition_rejects_directory_named_like_video(
 
     with pytest.raises(
         AdlRecognitionInputError,
-        match = "does not contain any supported video files",
+        match = "does not contain any MP4 video files",
     ):
         validate_adl_recognition_request(request)

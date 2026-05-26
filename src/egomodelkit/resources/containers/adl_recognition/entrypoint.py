@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Final
 
 SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
+EGOVIZML_STAGED_VIDEO_SUFFIX: Final[str] = ".MP4"
 
 EGOVIZML_HOME: Final[Path] = Path("/opt/EgoVizML")
 
@@ -233,7 +234,7 @@ def _stage_input_videos(
         if path.suffix.lower() not in SUPPORTED_VIDEO_SUFFIXES:
             continue
         
-        staged_path = adl_dir / f"video{staged_count + 1:03d}.MP4"
+        staged_path = adl_dir / f"video{staged_count + 1:03d}.{EGOVIZML_STAGED_VIDEO_SUFFIX}"
         shutil.copy2(path, staged_path)
         staged_count += 1
     

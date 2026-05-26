@@ -5,9 +5,7 @@ from typing import Final
 ADL_RECOGNITION_MODEL_ID: Final[str] = "adl-recognition"
 COMBINED_PREDS_FILENAME: Final[str] = "all_preds.pkl"
 
-SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset(
-    {".mp4", ".mov", ".m4v", ".avi"}
-)
+SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
 
 ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE: Final[str] = (
     f"Dry run: {ADL_RECOGNITION_MODEL_ID} request is valid."
@@ -36,13 +34,13 @@ def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
             pass
         else:
             raise AdlRecognitionInputError(
-                "Input must be an EgoVizML all_preds.pkl file, a supported "
-                "video file, or a directory containing supported video files."
+                "Input must be an EgoVizML all_preds.pkl file, an MP4 video file, "
+                "or a directory containing MP4 video files."
             )
     elif input_path.is_dir():
         if not _directory_contains_supported_videos(input_path):
             raise AdlRecognitionInputError(
-                "Input directory does not contain any supported video files."
+                "Input directory does not contain any MP4 video files."
             )
     else:
         raise AdlRecognitionInputError(
