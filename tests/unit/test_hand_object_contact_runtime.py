@@ -5,6 +5,10 @@ import pytest
 from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
 )
+from egomodelkit.runtime.external_code import (
+    HAND_OBJECT_DETECTOR_PIN,
+    HAND_OBJECT_DETECTOR_WEIGHTS_PIN,
+)
 from egomodelkit.runtime.hand_object_contact import (
     DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     SHAN_FORK_COMMIT_SHA,
@@ -97,7 +101,27 @@ def test_ensure_runtime_image_builds_when_image_is_missing() -> None:
         f"SHAN_COMMIT_SHA={SHAN_FORK_COMMIT_SHA}"
         in build_command
     )
+    
+    assert (
+        "org.egomodelkit.provenance.code.hand-object-detector.commit-sha="
+        f"{HAND_OBJECT_DETECTOR_PIN.commit_sha}"
+    ) in build_command
+    
+    assert (
+        f"org.egomodelkit.provenance.asset.{HAND_OBJECT_DETECTOR_WEIGHTS_PIN.asset_id}."
+        f"source-url={HAND_OBJECT_DETECTOR_WEIGHTS_PIN.source_url}"
+    ) in build_command
+    
+    assert (
+        f"org.egomodelkit.provenance.asset.{HAND_OBJECT_DETECTOR_WEIGHTS_PIN.asset_id}."
+        f"filename={HAND_OBJECT_DETECTOR_WEIGHTS_PIN.filename}"
+    ) in build_command
 
+    assert (
+        f"org.egomodelkit.provenance.asset.{HAND_OBJECT_DETECTOR_WEIGHTS_PIN.asset_id}."
+        f"download-tool={HAND_OBJECT_DETECTOR_WEIGHTS_PIN.download_tool}"
+    ) in build_command
+    
     assert any("preparing it now" in message for message in messages)
     assert "Packaged hand-object-contact runtime image is ready." in messages
 
@@ -258,8 +282,15 @@ def test_run_hand_object_contact_reports_progress_messages(tmp_path: Path) -> No
     assert "hand-object-contact inference completed." in messages
 
 def test_runtime_spec_uses_pinned_shan_fork() -> None:
-    assert DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.shan_repository_url == SHAN_FORK_REPOSITORY_URL
-    assert DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.shan_commit_sha == SHAN_FORK_COMMIT_SHA
+    assert (
+        DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.shan_repository_url
+        == HAND_OBJECT_DETECTOR_PIN.fork_repository_url
+    )
+
+    assert (
+        DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.shan_commit_sha
+        == HAND_OBJECT_DETECTOR_PIN.commit_sha
+    )
 
 def test_build_run_command_supports_directory_input(tmp_path: Path) -> None:
     input_dir = tmp_path / "frames"

@@ -14,6 +14,14 @@ from egomodelkit.models.adl_recognition import (
 )
 from egomodelkit.models.hand_object_contact import HandObjectContactRequest
 from egomodelkit.runtime.commands import subprocess_runner
+from egomodelkit.runtime.external_code import (
+    DETECTRON2_PIN,
+    DETIC_PIN,
+    DETIC_WEIGHTS_PIN,
+    EGOVIZML_PIN,
+    docker_asset_label_arguments,
+    docker_code_label_arguments,
+)
 from egomodelkit.runtime.hand_object_contact import (
     DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     HandObjectContactRuntimeSpec,
@@ -27,18 +35,16 @@ from egomodelkit.runtime.preflight import (
 CommandRunner = Callable[[list[str]], int]
 AdlRecognitionStage = Literal["extract", "predict", "finalize"]
 
-EGOVIZML_REPOSITORY_URL: Final[str] = "https://github.com/adeshkadambi/EgoVizML"
-DETIC_REPOSITORY_URL: Final[str] = "https://github.com/facebookresearch/Detic"
-DETECTRON2_REPOSITORY_URL: Final[str] = "https://github.com/facebookresearch/detectron2"
+EGOVIZML_REPOSITORY_URL: Final[str] = EGOVIZML_PIN.fork_repository_url
+DETIC_REPOSITORY_URL: Final[str] = DETIC_PIN.fork_repository_url
+DETECTRON2_REPOSITORY_URL: Final[str] = DETECTRON2_PIN.fork_repository_url
 
-EGOVIZML_COMMIT_SHA: Final[str] = "b3c24d065179289cd0d99091de06ba6fe54083c8"
-DETIC_COMMIT_SHA: Final[str] = "436cda2a2347df60a7c66daca0e8c59f93dc5e79"
-DETECTRON2_COMMIT_SHA: Final[str] = "e0ec4e189d438848521aee7926f9900e114229f5"
+EGOVIZML_COMMIT_SHA: Final[str] = EGOVIZML_PIN.commit_sha
+DETIC_COMMIT_SHA: Final[str] = DETIC_PIN.commit_sha
+DETECTRON2_COMMIT_SHA: Final[str] = DETECTRON2_PIN.commit_sha
 
-DETIC_WEIGHTS_URL: Final[str] = (
-    "https://dl.fbaipublicfiles.com/detic/"
-    "Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth"
-)
+DETIC_WEIGHTS_URL: Final[str] = DETIC_WEIGHTS_PIN.source_url
+DETIC_WEIGHTS_FILENAME: Final[str] = DETIC_WEIGHTS_PIN.filename
 
 @dataclass(frozen = True, slots = True)
 class AdlRecognitionRuntimeSpec:
@@ -60,6 +66,7 @@ class AdlRecognitionRuntimeSpec:
     detectron2_repository_url: str
     detectron2_commit_sha: str
     detic_weights_url: str
+    detic_weights_filename: str
     
     pytorch_version: str
     torchvision_version: str
@@ -97,6 +104,7 @@ DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC: Final[AdlRecognitionRuntimeSpec] = (
         detectron2_repository_url = DETECTRON2_REPOSITORY_URL,
         detectron2_commit_sha = DETECTRON2_COMMIT_SHA,
         detic_weights_url = DETIC_WEIGHTS_URL,
+        detic_weights_filename = DETIC_WEIGHTS_FILENAME,
         pytorch_version = "1.10.0+cu113",
         torchvision_version = "0.11.1+cu113",
         torchaudio_version = "0.10.0+cu113",
@@ -133,6 +141,7 @@ def _detic_resource_dir() -> Path:
 
 def _core_docker_build_arguments(runtime_spec: AdlRecognitionRuntimeSpec) -> list[str]:
     return [
+        *docker_code_label_arguments(EGOVIZML_PIN),
         "--build-arg",
         f"EGOVIZML_REPOSITORY_URL={runtime_spec.egovizml_repository_url}",
         "--build-arg",
@@ -141,6 +150,8 @@ def _core_docker_build_arguments(runtime_spec: AdlRecognitionRuntimeSpec) -> lis
 
 def _detic_docker_build_arguments(runtime_spec: AdlRecognitionRuntimeSpec) -> list[str]:
     return [
+        *docker_code_label_arguments(EGOVIZML_PIN, DETIC_PIN, DETECTRON2_PIN),
+        *docker_asset_label_arguments(DETIC_WEIGHTS_PIN),
         "--build-arg",
         f"EGOVIZML_REPOSITORY_URL={runtime_spec.egovizml_repository_url}",
         "--build-arg",
@@ -155,6 +166,8 @@ def _detic_docker_build_arguments(runtime_spec: AdlRecognitionRuntimeSpec) -> li
         f"DETECTRON2_COMMIT_SHA={runtime_spec.detectron2_commit_sha}",
         "--build-arg",
         f"DETIC_WEIGHTS_URL={runtime_spec.detic_weights_url}",
+        "--build-arg",
+        f"DETIC_WEIGHTS_FILENAME={runtime_spec.detic_weights_filename}",
         "--build-arg",
         f"PYTORCH_VERSION={runtime_spec.pytorch_version}",
         "--build-arg",

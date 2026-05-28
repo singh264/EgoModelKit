@@ -19,6 +19,13 @@ from egomodelkit.runtime.adl_recognition import (
     ensure_detic_runtime_image,
     run_adl_recognition,
 )
+from egomodelkit.runtime.external_code import (
+    DETECTRON2_PIN,
+    DETIC_PIN,
+    DETIC_WEIGHTS_PIN,
+    EGOVIZML_PIN,
+    HAND_OBJECT_DETECTOR_PIN,
+)
 from egomodelkit.runtime.hand_object_contact import (
     DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
 )
@@ -38,17 +45,28 @@ def _test_runtime_spec(docker_executable: str = "docker"):
 
 def test_default_adl_runtime_spec_exposes_external_code_pins() -> None:
     runtime_spec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC
-
-    assert runtime_spec.egovizml_repository_url
-    assert runtime_spec.egovizml_commit_sha
-    assert runtime_spec.detic_repository_url
-    assert runtime_spec.detic_commit_sha
-    assert runtime_spec.detectron2_repository_url
-    assert runtime_spec.detectron2_commit_sha
-    assert runtime_spec.detic_weights_url
-
-    assert runtime_spec.hand_object_contact_runtime_spec.shan_repository_url
-    assert runtime_spec.hand_object_contact_runtime_spec.shan_commit_sha
+    
+    assert runtime_spec.egovizml_repository_url == EGOVIZML_PIN.fork_repository_url
+    assert runtime_spec.egovizml_commit_sha == EGOVIZML_PIN.commit_sha
+    
+    assert runtime_spec.detic_repository_url == DETIC_PIN.fork_repository_url
+    assert runtime_spec.detic_commit_sha == DETIC_PIN.commit_sha
+    
+    assert runtime_spec.detectron2_repository_url == DETECTRON2_PIN.fork_repository_url
+    assert runtime_spec.detectron2_commit_sha == DETECTRON2_PIN.commit_sha
+    
+    assert runtime_spec.detic_weights_url == DETIC_WEIGHTS_PIN.source_url
+    assert runtime_spec.detic_weights_filename == DETIC_WEIGHTS_PIN.filename
+    
+    assert (
+        runtime_spec.hand_object_contact_runtime_spec.shan_repository_url
+        == HAND_OBJECT_DETECTOR_PIN.fork_repository_url
+    )
+    
+    assert (
+        runtime_spec.hand_object_contact_runtime_spec.shan_commit_sha
+        == HAND_OBJECT_DETECTOR_PIN.commit_sha
+    )
 
 def test_ensure_core_runtime_image_builds_when_missing() -> None:
     calls: list[list[str]] = []
@@ -86,6 +104,12 @@ def test_ensure_core_runtime_image_builds_when_missing() -> None:
     
     assert f"EGOVIZML_REPOSITORY_URL={runtime_spec.egovizml_repository_url}" in build_command
     assert f"EGOVIZML_COMMIT_SHA={runtime_spec.egovizml_commit_sha}" in build_command
+    
+    assert (
+        f"org.egomodelkit.provenance.code.egovizml.commit-sha={EGOVIZML_PIN.commit_sha}"
+        in build_command
+    )
+    
     assert "Packaged adl-recognition core runtime image is ready." in messages
 
 def test_ensure_detic_runtime_image_builds_when_missing() -> None:
@@ -131,6 +155,36 @@ def test_ensure_detic_runtime_image_builds_when_missing() -> None:
     assert f"DETIC_WEIGHTS_URL={runtime_spec.detic_weights_url}" in build_command
     assert f"PYTORCH_VERSION={runtime_spec.pytorch_version}" in build_command
     assert f"TORCHVISION_VERSION={runtime_spec.torchvision_version}" in build_command
+    assert f"DETIC_WEIGHTS_URL={DETIC_WEIGHTS_PIN.source_url}" in build_command
+    assert f"DETIC_WEIGHTS_FILENAME={DETIC_WEIGHTS_PIN.filename}" in build_command
+    
+    assert (
+        f"org.egomodelkit.provenance.code.egovizml.commit-sha={EGOVIZML_PIN.commit_sha}"
+        in build_command
+    )
+    
+    assert (
+        f"org.egomodelkit.provenance.code.detic.commit-sha={DETIC_PIN.commit_sha}"
+        in build_command
+    )
+    
+    assert (
+        f"org.egomodelkit.provenance.code.detectron2.commit-sha={DETECTRON2_PIN.commit_sha}"
+        in build_command
+    )
+    
+    assert (
+        f"org.egomodelkit.provenance.asset.{DETIC_WEIGHTS_PIN.asset_id}.source-url="
+        f"{DETIC_WEIGHTS_PIN.source_url}"
+        in build_command
+    )
+    
+    assert (
+        f"org.egomodelkit.provenance.asset.{DETIC_WEIGHTS_PIN.asset_id}.download-tool="
+        f"{DETIC_WEIGHTS_PIN.download_tool}"
+        in build_command 
+    )
+    
     assert "Packaged adl-recognition Detic runtime image is ready." in messages
     
 def test_build_core_command_mounts_input_and_output(tmp_path: Path) -> None:
@@ -603,3 +657,11 @@ def test_detic_dockerfile_configures_detectron2_import_smoke_test() -> None:
     assert dockerfile_text.index("Pillow==9.5.0") < dockerfile_text.index(
         "detectron2 import ok"
     )
+
+def test_detic_dockerfile_downloads_weights_with_gdown() -> None:
+    dockerfile_text = (_detic_resource_dir() / "Dockerfile").read_text()
+    
+    assert "gdown==5.2.0" in dockerfile_text
+    assert "gdown --fuzzy" in dockerfile_text
+    assert "DETIC_WEIGHTS_FILENAME" in dockerfile_text
+    assert "test -s" in dockerfile_text

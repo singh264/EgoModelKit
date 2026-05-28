@@ -65,6 +65,8 @@ Directory input is processed non-recursively in the current milestone.
 
 The public interface is run-only. Runtime preparation, container use, external model repositories, model checkpoints, and model environment details stay hidden behind the command-line interface (CLI).
 
+Model code and checkpoint provenance is centralized in `src/egomodelkit/runtime/external_code.py`. The hidden runtime images are built from pinned project-controlled fork URLs and pinned checkpoint sources so runs can be audited and reproduced.
+
 ## Current Milestone
 
 The `run` command now performs real inference for both supported model adapters.

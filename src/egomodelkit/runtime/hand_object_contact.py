@@ -11,6 +11,12 @@ from egomodelkit.models.hand_object_contact import (
     validate_hand_object_contact_request,
 )
 from egomodelkit.runtime.commands import subprocess_runner
+from egomodelkit.runtime.external_code import (
+    HAND_OBJECT_DETECTOR_PIN,
+    HAND_OBJECT_DETECTOR_WEIGHTS_PIN,
+    docker_asset_label_arguments,
+    docker_code_label_arguments,
+)
 from egomodelkit.runtime.preflight import (
     ProgressReporter,
     ensure_host_runtime_ready,
@@ -18,8 +24,11 @@ from egomodelkit.runtime.preflight import (
 
 CommandRunner = Callable[[list[str]], int]
 
-SHAN_FORK_REPOSITORY_URL: Final[str] = "https://github.com/singh264/hand_object_detector"
-SHAN_FORK_COMMIT_SHA: Final[str] = "70146cabaeffb41ecc02e6edb605fc021dbdb555"
+SHAN_FORK_REPOSITORY_URL: Final[str] = HAND_OBJECT_DETECTOR_PIN.fork_repository_url
+SHAN_FORK_COMMIT_SHA: Final[str] = HAND_OBJECT_DETECTOR_PIN.commit_sha
+
+CHECKPOINT_SOURCE_URL: Final[str] = HAND_OBJECT_DETECTOR_WEIGHTS_PIN.source_url
+CHECKPOINT_FILENAME: Final[str] = HAND_OBJECT_DETECTOR_WEIGHTS_PIN.filename
 
 @dataclass(frozen = True, slots = True)
 class HandObjectContactRuntimeSpec:
@@ -33,7 +42,8 @@ class HandObjectContactRuntimeSpec:
     shan_repository_url: str
     shan_commit_sha: str
     
-    checkpoint_google_drive_file_id: str
+    checkpoint_source_url: str
+    checkpoint_filename: str
     checkpoint_session: int
     checkpoint_epoch: int
     checkpoint_step: int
@@ -41,17 +51,6 @@ class HandObjectContactRuntimeSpec:
     shan_network_name: str
     shan_dataset_name: str
     shan_load_dir: str
-    
-    @property
-    def checkpoint_filename(self) -> str:
-        """ Return the checkpoint filename expected by demo.py. """ 
-
-        return (
-            "faster_rcnn_"
-            f"{self.checkpoint_session}_"
-            f"{self.checkpoint_epoch}_"
-            f"{self.checkpoint_step}.pth"
-        )
 
     @property
     def shan_model_subdir(self) -> str:
@@ -69,7 +68,8 @@ DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC: Final[HandObjectContactRuntimeSpec] = 
         container_output_dir = PurePosixPath("/workspace/output"),
         shan_repository_url = SHAN_FORK_REPOSITORY_URL,
         shan_commit_sha = SHAN_FORK_COMMIT_SHA,
-        checkpoint_google_drive_file_id = "1b_BkGgmYAe8VNbsFeljrSP7V1Jd8E82v",
+        checkpoint_source_url = CHECKPOINT_SOURCE_URL,
+        checkpoint_filename = CHECKPOINT_FILENAME,
         checkpoint_session = 1,
         checkpoint_epoch = 8,
         checkpoint_step = 132028,
@@ -94,12 +94,16 @@ def _container_resource_dir() -> Path:
 
 def _docker_build_arguments(runtime_spec: HandObjectContactRuntimeSpec) -> list[str]:
     return [
+        *docker_code_label_arguments(HAND_OBJECT_DETECTOR_PIN),
+        *docker_asset_label_arguments(HAND_OBJECT_DETECTOR_WEIGHTS_PIN),
         "--build-arg",
         f"SHAN_REPOSITORY_URL={runtime_spec.shan_repository_url}",
         "--build-arg",
         f"SHAN_COMMIT_SHA={runtime_spec.shan_commit_sha}",
         "--build-arg",
-        f"CHECKPOINT_GOOGLE_DRIVE_FILE_ID={runtime_spec.checkpoint_google_drive_file_id}",
+        f"CHECKPOINT_SOURCE_URL={runtime_spec.checkpoint_source_url}",
+        "--build-arg",
+        f"CHECKPOINT_FILENAME={runtime_spec.checkpoint_filename}",
         "--build-arg",
         f"CHECKPOINT_SESSION={runtime_spec.checkpoint_session}",
         "--build-arg",

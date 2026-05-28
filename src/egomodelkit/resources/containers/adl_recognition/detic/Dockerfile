@@ -10,6 +10,7 @@ ARG DETECTRON2_REPOSITORY_URL
 ARG DETECTRON2_COMMIT_SHA
 
 ARG DETIC_WEIGHTS_URL
+ARG DETIC_WEIGHTS_FILENAME
 
 ARG PYTORCH_VERSION
 ARG TORCHVISION_VERSION
@@ -41,6 +42,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 RUN python3.8 -m pip install --upgrade pip setuptools wheel
+
+RUN python3.8 -m pip install --no-cache-dir "gdown==5.2.0"
 
 RUN git clone "${EGOVIZML_REPOSITORY_URL}" "${EGOVIZML_HOME}" \
     && cd "${EGOVIZML_HOME}" \
@@ -80,8 +83,9 @@ from detectron2.layers import nms; \
 print('detectron2 import ok')"
 
 RUN mkdir -p models && \
-    wget "${DETIC_WEIGHTS_URL}" \
-    -O models/Detic_LCOCOI21k_CLIP_SwinB_896b32_4x_ft4x_max-size.pth
+    gdown --fuzzy "${DETIC_WEIGHTS_URL}" \
+    -O "models/${DETIC_WEIGHTS_FILENAME}" && \
+    test -s "models/${DETIC_WEIGHTS_FILENAME}"
 
 COPY patch_egovizml_run_detic.py /tmp/patch_egovizml_run_detic.py
 
