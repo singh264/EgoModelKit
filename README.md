@@ -63,7 +63,7 @@ Directory input is processed non-recursively in the current milestone.
 
 </details>
 
-The public interface is run-only. Runtime preparation, container use, external model repositories, model checkpoints, and model environment details stay hidden behind the command-line interface (CLI).
+The public interfaces are the `run` command for direct CLI execution and the `gui` command for launching the local browser GUI. Runtime preparation, container use, external model repositories, model checkpoints, and model environment details stay hidden behind these interfaces.
 
 Model code and checkpoint provenance is centralized in `src/egomodelkit/runtime/external_code.py`. The hidden runtime images are built from pinned project-controlled fork URLs and pinned checkpoint sources so runs can be audited and reproduced.
 
@@ -322,6 +322,54 @@ The same dry-run flow also accepts a directory input that contains one or more s
 
 </details>
 
+## Local Browser GUI
+
+EgoModelKit also provides a local browser GUI backend for users who should not need to run model commands directly.
+
+Install the optional GUI dependencies:
+
+```bash
+python -m pip install -e ".[gui]"
+```
+
+Launch the GUI:
+
+```bash
+egomodelkit gui
+```
+
+Launch without automatically opening a browser window:
+
+```bash
+egomodelkit gui --no-browser
+```
+
+Use a custom local port:
+
+```bash
+egomodelkit gui --port 7860 --no-browser
+```
+
+The GUI server binds to `127.0.0.1` by default. This keeps the interface local-only for privacy-sensitive research workflows. The backend exposes a small local API for the React frontend:
+
+```text
+GET  /api/models
+POST /api/output-preview
+POST /api/dry-run
+POST /api/runs
+GET  /api/runs/{run_id}/progress
+POST /api/open-output-folder
+POST /api/select-output-folder
+```
+
+During backend development, the API documentation is available at:
+
+```text
+http://127.0.0.1:7860/docs
+```
+
+The React frontend build is served from `src/egomodelkit/web/dist` when those frontend assets are present. The frontend source/build artifacts are tracked separately from the backend GUI API work.
+
 ## Current Platform Target
 
 The current target is a research-group Linux NVIDIA GPU machine. EgoModelKit hides container execution, but the underlying runtime still depends on GPU-enabled container support. The public command remains intentionally stable and operating-system-neutral so the runtime layer can later be adjusted for additional lab environments without changing the CLI.
@@ -342,8 +390,10 @@ Install the package locally in editable mode:
 
 ```bash
 python -m pip install --upgrade pip
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev,gui]"
 ```
+
+The test suite includes GUI backend tests. Use `.[dev,gui]` for local development so FastAPI, Uvicorn, multipart upload handling, and HTTP test dependencies are available.
 
 Run the automated quality checks:
 

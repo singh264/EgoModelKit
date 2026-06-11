@@ -46,6 +46,28 @@ def main() -> None:
     """ EgoModelKit command-line interface. """
 
 @app.command()
+def gui(
+    port: int = typer.Option(
+        7860,
+        "--port",
+        help = "Local port for the browser GUI.",
+    ),
+    no_browser: bool = typer.Option(
+        False,
+        "--no-browser",
+        help = "Do not automatically open a browser window."
+    ),
+) -> None:
+    """ Launch the local browser GUI. """
+    try:
+        from egomodelkit.gui import launch_gui
+        
+        launch_gui(server_port = port, inbrowser = not no_browser)
+    except RuntimeError as exc:
+        typer.echo(f"Error: {exc}", err = True)
+        raise typer.Exit(code = CLI_RUNTIME_ERROR_EXIT_CODE) from exc
+
+@app.command()
 def run(
     input_path: Annotated[
         Path,
