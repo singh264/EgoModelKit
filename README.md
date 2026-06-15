@@ -392,7 +392,7 @@ npm test
 npm run build
 ```
 
-The frontend uses Vite, React, Tailwind CSS, Vitest, and Testing Library. The first implemented screen is the welcome/start screen; later commits will add the model-selection, input-selection, output-folder, review, progress, results, refresh-persistence, and output-preview flows.
+The frontend uses Vite, React, Tailwind CSS, Vitest, and Testing Library. The implemented GUI flow currently includes the welcome/start screen and model-selection screen. Later commits will add input-selection, output-folder, review, progress, results, refresh-persistence, and output-preview flows.
 
 ## Current Platform Target
 
