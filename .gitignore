@@ -51,6 +51,12 @@ coverage.xml
 .pytest_cache/
 cover/
 
+# Frontend
+src/egomodelkit/web/node_modules/
+src/egomodelkit/web/dist/
+src/egomodelkit/web/coverage/
+src/egomodelkit/web/tsconfig.tsbuildinfo
+
 # Translations
 *.mo
 *.pot

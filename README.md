@@ -370,6 +370,30 @@ http://127.0.0.1:7860/docs
 
 The React frontend build is served from `src/egomodelkit/web/dist` when those frontend assets are present. The frontend source/build artifacts are tracked separately from the backend GUI API work.
 
+Frontend development files live in:
+
+```text
+src/egomodelkit/web
+```
+
+Run the frontend locally during development:
+
+```bash
+cd src/egomodelkit/web
+npm ci
+npm run dev
+```
+
+Run frontend checks:
+
+```bash
+npm run typecheck
+npm test
+npm run build
+```
+
+The frontend uses Vite, React, Tailwind CSS, Vitest, and Testing Library. The first implemented screen is the welcome/start screen; later commits will add the model-selection, input-selection, output-folder, review, progress, results, refresh-persistence, and output-preview flows.
+
 ## Current Platform Target
 
 The current target is a research-group Linux NVIDIA GPU machine. EgoModelKit hides container execution, but the underlying runtime still depends on GPU-enabled container support. The public command remains intentionally stable and operating-system-neutral so the runtime layer can later be adjusted for additional lab environments without changing the CLI.

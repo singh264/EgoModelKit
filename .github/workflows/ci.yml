@@ -53,3 +53,32 @@ jobs:
         with:
           name: python-dist
           path: dist/
+  frontend-quality:
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: src/egomodelkit/web
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: src/egomodelkit/web/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Typecheck frontend
+        run: npm run typecheck
+
+      - name: Test frontend with coverage
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
