@@ -1,7 +1,13 @@
-import { Check, ChevronLeft, Info, Shield } from "lucide-react";
-import { useState } from "react";
+import { Check, ChevronLeft, Info, Shield, Upload } from "lucide-react";
+import {
+    type ChangeEvent,
+    type DragEvent,
+    type RefObject,
+    useRef, 
+    useState 
+} from "react";
 
-type Step = "welcome" | "select-model" | "choose-input";
+type Step = "welcome" | "select-model" | "choose-input" | "choose-output";
 
 const privacyMessage =
     "Your selected files are processed locally by default. " +
@@ -39,6 +45,7 @@ const DEFAULT_MODELS: ModelInfo[] = [
 const STEPS: Array<{ id: Exclude<Step, "welcome">; label: string }> = [
     { id: "select-model", label: "Select model" },
     { id: "choose-input", label: "Choose input" },
+    { id: "choose-output", label: "Choose output" },
 ]
 
 const buttonBaseClass =
@@ -61,10 +68,51 @@ const backButtonClass =
 export function App() {
     const [step, setStep] = useState<Step>("welcome");
     const [modelId, setModelId] = useState<string>("");
+    const [files, setFiles] = useState<File[]>([]);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+    const selectedModel =
+        DEFAULT_MODELS.find((model) => model.id === modelId) ?? DEFAULT_MODELS[0];
 
     function startNewRun() {
         setModelId("");
+        setFiles([]);
         setStep("select-model");
+    }
+
+    function goHome() {
+        setModelId("");
+        setFiles([]);
+        setStep("welcome");
+    }
+
+    function selectModel(nextModelId: string) {
+        if (nextModelId !== modelId) {
+            setModelId(nextModelId);
+            setFiles([]);
+        }
+    }
+
+    function handleFilesChange(event: ChangeEvent<HTMLInputElement>) {
+        const selectedFiles = event.currentTarget.files
+            ? Array.from(event.currentTarget.files)
+            : [];
+        
+        setFiles(selectedFiles);
+    }
+
+    function handleDrop(event: DragEvent<HTMLDivElement>) {
+        event.preventDefault();
+
+        const droppedFiles = event.dataTransfer.files
+            ? Array.from(event.dataTransfer.files)
+            : [];
+        
+        if (droppedFiles.length === 0) {
+            return;
+        }
+
+        setFiles(droppedFiles);
     }
 
     return (
@@ -74,10 +122,19 @@ export function App() {
                     <div
                         className="
                             mx-auto flex h-[68px] w-full max-w-[1040px] items-center px-6
-                            text-[26px] font-normal leading-none tracking-[0.01em]
                         "
                     >
-                        EgoModelKit
+                        <button
+                            className="
+                                rounded-md bg-transparent text-left text-[26px] font-normal
+                                leading-none tracking-[0.01em] focus-visible:outline-3 
+                                focus-visible:outline-offset-3 focus-visible:outline-egm-green
+                            "
+                            type="button"
+                            onClick={goHome}
+                        >
+                            EgoModelKit
+                        </button>
                     </div>
                 </header>
 
@@ -86,26 +143,39 @@ export function App() {
                 ) : (
                     <main
                         className="
-                            mx-auto grid w-full max-w-[1040px] grid-cols-1 gap-8 px-6 pt-16 
-                            pb-24 md:grid-cols-[220px_minmax(0,1fr)]
+                            mx-auto grid min-h-[calc(100vh-68px)] w-full max-w-[1040px] 
+                            grid-cols-1 gap-8 px-6 pt-16 pb-0 
+                            md:grid-cols-[220px_minmax(0,1fr)] md:pt-14
                         ">
                         <Stepper currentStep={step} />
 
-                        <section aria-live="polite">
+                        <section aria-live="polite" className="flex min-h-0 min-w-0 flex-col">
                             {step === "select-model" ? (
                                 <SelectModelScreen
                                     models={DEFAULT_MODELS}
                                     selectedModelId={modelId}
-                                    onSelectModel={setModelId}
+                                    onSelectModel={selectModel}
                                     canContinue={modelId.length > 0}
                                     onBack={() => setStep("welcome")}
                                     onContinue={() => setStep("choose-input")}
                                 />
                             ) : (
-                                <ChooseInputPlaceholder 
-                                    selectedModelId={modelId}
-                                    onBack={() => setStep("select-model")} 
-                                />
+                                step === "choose-input" ? (
+                                    <ChooseInputScreen 
+                                        selectedModel={selectedModel}
+                                        files={files}
+                                        fileInputRef={fileInputRef}
+                                        onFilesChange={handleFilesChange}
+                                        onDrop={handleDrop}
+                                        canContinue={files.length > 0}
+                                        onBack={() => setStep("select-model")}
+                                        onContinue={() => setStep("choose-output")}
+                                    />
+                                ) : (
+                                    <ChooseOutputPlaceholder 
+                                        onBack={() => setStep("choose-input")}
+                                    />
+                                )
                             )}
                         </section>
                     </main>
@@ -339,7 +409,12 @@ function FooterActions({
     continueDisabled: boolean;
 }) {
     return (
-        <div className="mt-16 flex items-center justify-between gap-4">
+        <div 
+            className="
+                sticky bottom-0 z-10 mt-auto flex items-center justify-between gap-4
+                bg-egm-bg pt-8 pb-4
+            "
+        >
             <button className={backButtonClass} type="button" onClick={onBack}>
                 <ChevronLeft aria-hidden="true" size={22} strokeWidth={2.4} />
                 Back
@@ -357,33 +432,150 @@ function FooterActions({
     )
 }
 
-function ChooseInputPlaceholder({ 
-    selectedModelId, 
-    onBack, 
+function inputLabelFromFiles(files: File[]): string {
+    if (files.length === 1) {
+        return files[0].name;
+    }
+
+    return `${files.length} files`;
+}
+
+function ChooseInputScreen({
+    selectedModel,
+    files,
+    fileInputRef,
+    onFilesChange,
+    onDrop,
+    canContinue,
+    onBack,
+    onContinue,
 } : {
-    selectedModelId: string;
+    selectedModel: ModelInfo;
+    files: File[];
+    fileInputRef: RefObject<HTMLInputElement | null>;
+    onFilesChange: (event: ChangeEvent<HTMLInputElement>) => void;
+    onDrop: (event: DragEvent<HTMLDivElement>) => void;
+    canContinue: boolean;
+    onBack: () => void;
+    onContinue: () => void;
+}) {
+    const subtitle =
+        selectedModel.id === HAND_OBJECT_MODEL_ID
+            ? "Select an image or folder of images"
+            : "Select a video or folder of videos";
+
+    return (
+        <>
+            <PageHeading title="Choose input" subtitle={subtitle} />
+
+            <div 
+                className="
+                    mt-8 flex min-h-[280px] flex-col items-center justify-center
+                    rounded-2xl border-2 border-dashed border-egm-dashed bg-white
+                    px-6 py-10 text-center hover:bg-egm-hover
+                "
+                data-testid="input-drop-zone"
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={onDrop}
+            >
+                <div 
+                    className="
+                        flex h-16 w-16 items-center justify-center rounded-full
+                        bg-egm-icon-bg
+                    "
+                >
+                    <Upload aria-hidden="true" size={36} strokeWidth={2.0} />
+                </div>
+
+                <h2 className="mt-6 text-2xl font-normal leading-none">
+                    Drop input or choose from your computer
+                </h2>
+
+                <button
+                    className="
+                        mt-7 min-h-12 rounded-lg border border-egm-border-strong
+                        bg-white px-7 py-3 text-base hover:bg-egm-hover
+                        focus-visible:outline-3 focus-visible:outline-offset-3
+                        focus-visible:outline-egm-green
+                    "
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                >
+                    Choose input files
+                </button>
+
+                <p className="mt-5 text-sm leading-6 text-egm-secondary-copy">
+                    Supported files depend on the selected model.
+                </p>
+
+                <input
+                    ref={fileInputRef}
+                    aria-label="Choose input files"
+                    className="hidden"
+                    multiple
+                    type="file"
+                    onChange={onFilesChange} 
+                />
+            </div>
+
+            {files.length === 0 ? (
+                <p className="mt-6 text-base text-egm-body-copy">
+                    No input selected yet.
+                </p>
+            ) : (
+                <>
+                    <div
+                        className="
+                            mt-6 rounded-2xl border border-egm-card-border bg-white
+                            px-6 py-4 text-base text-egm-body-copy
+                        "
+                    >
+                        Selected: {inputLabelFromFiles(files)}
+                    </div>
+
+                    <div
+                        className="
+                            mt-4 rounded-2xl bg-egm-success-soft px-6 py-4
+                            text-base text-egm-body-copy
+                        "
+                    >
+                        Input selected.
+                    </div>
+                </>
+            )}
+
+            <FooterActions
+                onBack={onBack}
+                onContinue={onContinue}
+                continueLabel="Continue"
+                continueDisabled={!canContinue}
+            />
+        </>
+    )
+}
+
+function ChooseOutputPlaceholder({
+    onBack,
+} : {
     onBack: () => void;
 }) {
     return (
         <>
             <PageHeading
-                title="Choose input"
-                subtitle = { 
-                    selectedModelId === HAND_OBJECT_MODEL_ID
-                        ? "Select an image or folder of images"
-                        : "Select a video or folder of videos"
-                }
+                title="Choose output folder"
+                subtitle="Select a folder where EgoModelKit should save the results."
             />
 
             <div
                 className="
                     mt-8 rounded-2xl border border-egm-card-border bg-white
                     px-6 py-8 text-egm-body-copy
-                ">
-                Input selection will be added in the next commit.
+                "
+            >
+                Output folder selection will be added in the next commit.
             </div>
 
-            <div className="mt-16">
+            <div className="sticky bottom-0 z-10 mt-auto bg-egm-bg pt-8 pb-4">
                 <button className={backButtonClass} type="button" onClick={onBack}>
                     <ChevronLeft aria-hidden="true" size={22} strokeWidth={2.4} />
                     Back

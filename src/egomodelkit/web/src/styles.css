@@ -8,6 +8,7 @@
   --color-egm-green-dark: #1b7c34;
   --color-egm-green-soft: #dcfce5;
   --color-egm-green-tint: #e6f9eB;
+  --color-egm-success-soft: #e3faeb;
 
   --color-egm-blue-soft: #ecf2ff;
   --color-egm-blue-border: #7fb4f6;
@@ -16,6 +17,7 @@
   --color-egm-card-border: #a6a6a6;
   --color-egm-border-strong: #9da0a4;
   --color-egm-radio-border: #d9d9d9;
+  --color-egm-dashed: #8c8f94;
 
   --color-egm-step-border: #c6c8cd;
   --color-egm-step-text: #8d9198;
@@ -25,6 +27,7 @@
   --color-egm-body-copy: #555555;
   --color-egm-secondary-copy: #777a80;
   --color-egm-back: #555555;
+  --color-egm-icon-bg: #f0eeee;
 
   --color-egm-hover: #f4f4f4;
   --color-egm-disabled: #d0d0d6;

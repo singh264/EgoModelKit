@@ -1,8 +1,30 @@
-import { render, screen } from "@testing-library/react"
+import { createEvent, fireEvent, render, screen } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
+
+function dropInputFiles(target: HTMLElement, files: File[]) {
+    const dropEvent = createEvent.drop(target);
+
+    Object.defineProperty(dropEvent, "dataTransfer", {
+        value: {
+            files,
+        },
+    });
+
+    fireEvent(target, dropEvent);
+}
+
+function dropWithoutFileList(target: HTMLElement) {
+    const dropEvent = createEvent.drop(target);
+
+    Object.defineProperty(dropEvent, "dataTransfer", {
+        value: {},
+    });
+
+    fireEvent(target, dropEvent);
+}
 
 describe("App", () => {
     it("renders the welcome screen", () => {
@@ -140,7 +162,7 @@ describe("App", () => {
         expect(adlModel).toHaveAttribute("aria-pressed", "true");
     });
 
-    it("continues from hand-object model selection to the next placeholder step", async () => {
+    it("continues from hand-object model selection to an image input screen", async () => {
         const user = userEvent.setup()
 
         render(<App />);
@@ -158,11 +180,14 @@ describe("App", () => {
         ).toBeInTheDocument();
         
         expect(
-            screen.getByText("Input selection will be added in the next commit."),
+            screen.getByText("Drop input or choose from your computer"),
         ).toBeInTheDocument();
+
+        expect(screen.getByText("No input selected yet.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
     });
 
-    it("continues from adl model selection to the next placeholder step", async () => {
+    it("continues from adl model selection to a video input screen", async () => {
         const user = userEvent.setup()
 
         render(<App />);
@@ -180,8 +205,105 @@ describe("App", () => {
         ).toBeInTheDocument();
         
         expect(
-            screen.getByText("Input selection will be added in the next commit."),
+            screen.getByText("Select a video or folder of videos"),
         ).toBeInTheDocument();
+
+        expect(screen.getByRole("button", {name: "Continue" })).toBeDisabled();
+    });
+
+    it("selects one input file and enables continue", async () => {
+        const user = userEvent.setup();
+        
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(
+            screen.getByLabelText("Choose input files"),
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+        );
+
+        expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("Input selected.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();   
+    });
+
+    it("summarizes multiple selected input files", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(screen.getByLabelText("Choose input files"), [
+            new File(["fake image"], "frame-1.jpg", { type: "image/jpeg" }),
+            new File(["fake image"], "frame-2.jpg", { type: "image/jpeg" }),
+        ]);
+
+        expect(screen.getByText("Selected: 2 files")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it("ignores empty input drops", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        fireEvent.drop(screen.getByTestId("input-drop-zone"), {
+            dataTransfer: {
+                files: [],
+            },
+        });
+
+        expect(screen.getByText("No input selected yet.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("accepts input files by drag and drop", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        
+        const dropZone = screen.getByTestId("input-drop-zone");
+        
+        const droppedFile = new File(["fake image"], "dropped-frame.png", {
+            type: "image/png",
+        });
+
+        fireEvent.dragOver(dropZone)
+        dropInputFiles(dropZone, [droppedFile]);
+
+        expect(screen.getByText("Selected: dropped-frame.png")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it("opens the native file picker from the visible choose-input button", async () => {
+        const user = userEvent.setup();
+        const inputClickSpy = vi.spyOn(HTMLInputElement.prototype, "click");
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.click(screen.getByRole("button", { name: "Choose input files" }));
+
+        expect(inputClickSpy).toHaveBeenCalledOnce();
+
+        inputClickSpy.mockRestore();
     });
 
     it("returns from choose input to the model selection screen", async () => {
@@ -216,10 +338,10 @@ describe("App", () => {
         ).toBeInTheDocument();
         
         expect(
-            screen.getByText("Input selection will be added in the next commit."),
+            screen.getByText("No input selected yet."),
         ).toBeInTheDocument();
 
-        await user.click(screen.getByRole("button", {name: "Back"}));
+        await user.click(screen.getByRole("button", { name: "Back" }));
 
         expect(
             screen.getByRole("button", { name: /Hand-object contact/}),
@@ -241,5 +363,145 @@ describe("App", () => {
         expect(
             screen.getByRole("button", { name: "Start New Run" }),
         ).toBeEnabled();
+    });
+
+    it("continues from selected input to the output placeholder step", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(
+            screen.getByLabelText("Choose input files"),
+            new File(["fake-image"], "frame.jpg", { type: "image/jpeg" }),
+        );
+
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        expect(
+            screen.getByRole("heading", { name: "Choose output folder"}),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Select a folder where EgoModelKit should save the results."),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Output folder selection will be added in the next commit."),
+        ).toBeInTheDocument();
+    });
+
+    it("returns from output placeholder to the selected input screen", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        
+        await user.upload(
+            screen.getByLabelText("Choose input files"),
+            new File(["fake-image"], "frame.jpg", { type: "image/jpeg" }),
+        );
+
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        expect(
+            screen.getByRole("heading", { name: "Choose output folder"}),
+        ).toBeInTheDocument();
+        
+        await user.click(screen.getByRole("button", { name: "Back" }));
+
+        expect(
+            screen.getByRole("heading", { name: "Choose input" }),
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("Input selected.")).toBeInTheDocument();
+    });
+
+    it("keeps the selected model when selecting the same model again", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        const handObjectModel = screen.getByRole("button", { name: /Hand-object contact/  });
+
+        await user.click(handObjectModel);
+        await user.click(handObjectModel);
+
+        expect(handObjectModel).toHaveAttribute("aria-pressed", "true");
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it("clears selected input when the file picker reports no files", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(
+            screen.getByLabelText("Choose input files"),
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+        );
+
+        expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
+
+        fireEvent.change(screen.getByLabelText("Choose input files"), {
+            target: {
+                files: null,
+            },
+        });
+
+        expect(screen.getByText("No input selected yet.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("ignores dropped input when the drop event has no file list", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+    
+        dropWithoutFileList(screen.getByTestId("input-drop-zone"));
+
+        expect(screen.getByText("No input selected yet.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("returns home when the EgoModelKit header title is clicked", async () => {
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+    
+        expect(
+            screen.getByRole("heading", { name: "Choose input" }),
+        ).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
+
+        expect(
+            screen.getByRole("heading", { name: "EgoModelKit" }),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByRole("button", { name: "Start New Run" }),
+        ).toBeInTheDocument();
     });
 });
