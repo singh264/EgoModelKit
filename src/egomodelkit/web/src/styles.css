@@ -26,12 +26,20 @@
   --color-egm-subtitle: #555555;
   --color-egm-body-copy: #555555;
   --color-egm-secondary-copy: #777a80;
+    --color-egm-strong-copy: #4e4e4e;
   --color-egm-back: #555555;
   --color-egm-icon-bg: #f0eeee;
 
   --color-egm-hover: #f4f4f4;
   --color-egm-disabled: #d0d0d6;
   --color-egm-disabled-text: #b8bac0;
+  --color-egm-progress-track: #e1e3e8;
+  --color-egm-tree-bg: #f3f3f3;
+
+  --color-egm-danger: #b42318;
+  --color-egm-danger-soft: #fff4f4;
+  --color-egm-danger-border: #f0b6b0;
+
 }
 
 @layer base {

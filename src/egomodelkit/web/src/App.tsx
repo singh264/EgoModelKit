@@ -1,4 +1,13 @@
-import { Check, ChevronLeft, Info, Shield, Upload } from "lucide-react";
+import { 
+    Check, 
+    ChevronDown,
+    ChevronLeft, 
+    ChevronUp,
+    Folder,
+    Info, 
+    Shield, 
+    Upload 
+} from "lucide-react";
 import {
     type ChangeEvent,
     type DragEvent,
@@ -7,7 +16,12 @@ import {
     useState 
 } from "react";
 
-type Step = "welcome" | "select-model" | "choose-input" | "choose-output";
+type Step = 
+    | "welcome" 
+    | "select-model" 
+    | "choose-input" 
+    | "choose-output"
+    | "review";
 
 const privacyMessage =
     "Your selected files are processed locally by default. " +
@@ -19,6 +33,10 @@ type ModelInfo = {
     description: string;
     acceptedInputLabel: string;
     outputLabel: string;
+};
+
+type SelectOutputFolderResponse = {
+    outputRoot: string;
 };
 
 const HAND_OBJECT_MODEL_ID = "hand-object-contact";
@@ -46,6 +64,7 @@ const STEPS: Array<{ id: Exclude<Step, "welcome">; label: string }> = [
     { id: "select-model", label: "Select model" },
     { id: "choose-input", label: "Choose input" },
     { id: "choose-output", label: "Choose output" },
+    { id: "review", label: "Review and run" },
 ]
 
 const buttonBaseClass =
@@ -70,6 +89,10 @@ export function App() {
     const [modelId, setModelId] = useState<string>("");
     const [files, setFiles] = useState<File[]>([]);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const [outputRoot, setOutputRoot] = useState<string>("");
+    const [privacyOpen, setPrivacyOpen] = useState<boolean>(false);
+    const [errorMessage, setErrorMessage] = useState<string>("");
+    const [isBusy, setIsBusy] = useState<boolean>(false);
 
     const selectedModel =
         DEFAULT_MODELS.find((model) => model.id === modelId) ?? DEFAULT_MODELS[0];
@@ -77,12 +100,20 @@ export function App() {
     function startNewRun() {
         setModelId("");
         setFiles([]);
+        setOutputRoot("");
+        setPrivacyOpen(false);
+        setErrorMessage("");
+        setIsBusy(false);
         setStep("select-model");
     }
 
     function goHome() {
         setModelId("");
         setFiles([]);
+        setOutputRoot("");
+        setPrivacyOpen(false);
+        setErrorMessage("");
+        setIsBusy(false);
         setStep("welcome");
     }
 
@@ -90,6 +121,9 @@ export function App() {
         if (nextModelId !== modelId) {
             setModelId(nextModelId);
             setFiles([]);
+            setOutputRoot("");
+            setPrivacyOpen(false);
+            setErrorMessage("");
         }
     }
 
@@ -99,6 +133,9 @@ export function App() {
             : [];
         
         setFiles(selectedFiles);
+        setOutputRoot("");
+        setPrivacyOpen(false);
+        setErrorMessage("");
     }
 
     function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -113,6 +150,35 @@ export function App() {
         }
 
         setFiles(droppedFiles);
+        setOutputRoot("");
+        setPrivacyOpen(false);
+        setErrorMessage("");
+    }
+
+    async function chooseOutputFolder() {
+        try {
+            setIsBusy(true);
+            setErrorMessage("");
+
+            const backendSelection = await requestNativeOutputFolder();
+
+            const selectedOutputRoot =
+                backendSelection?.outputRoot ??
+                window.prompt(
+                    "Enter the output folder path:",
+                    "/Users/Research/Desktop/EgoModelKit Results",
+                );
+            
+            if (!selectedOutputRoot?.trim()) {
+                return;
+            }
+
+            setOutputRoot(selectedOutputRoot.trim());
+        } catch {
+            setErrorMessage("Unable to choose output folder.")
+        } finally {
+            setIsBusy(false);
+        }
     }
 
     return (
@@ -150,6 +216,19 @@ export function App() {
                         <Stepper currentStep={step} />
 
                         <section aria-live="polite" className="flex min-h-0 min-w-0 flex-col">
+                            {errorMessage ? (
+                                <div
+                                    className="
+                                        mb-6 rounded-xl border border-egm-danger-border
+                                        bg-egm-danger-soft px-5 py-4 text-base
+                                        text-egm-danger
+                                    "
+                                    role="alert"
+                                >
+                                    {errorMessage}
+                                </div>
+                            ) : null}
+                            
                             {step === "select-model" ? (
                                 <SelectModelScreen
                                     models={DEFAULT_MODELS}
@@ -159,23 +238,35 @@ export function App() {
                                     onBack={() => setStep("welcome")}
                                     onContinue={() => setStep("choose-input")}
                                 />
+                            ) : step === "choose-input" ? (
+                                <ChooseInputScreen 
+                                    selectedModel={selectedModel}
+                                    files={files}
+                                    fileInputRef={fileInputRef}
+                                    onFilesChange={handleFilesChange}
+                                    onDrop={handleDrop}
+                                    canContinue={files.length > 0}
+                                    onBack={() => setStep("select-model")}
+                                    onContinue={() => setStep("choose-output")}
+                                />
+                            ) : step === "choose-output" ? (
+                                <ChooseOutputScreen
+                                    outputRoot={outputRoot}
+                                    isBusy={isBusy}
+                                    privacyOpen={privacyOpen}
+                                    onTogglePrivacy={() => setPrivacyOpen((open) => !open)}
+                                    onChooseOutputFolder={chooseOutputFolder}
+                                    canContinue={outputRoot.trim().length > 0 && !isBusy}
+                                    onBack={() => setStep("choose-input")}
+                                    onContinue={() => setStep("review")}
+                                />
                             ) : (
-                                step === "choose-input" ? (
-                                    <ChooseInputScreen 
-                                        selectedModel={selectedModel}
-                                        files={files}
-                                        fileInputRef={fileInputRef}
-                                        onFilesChange={handleFilesChange}
-                                        onDrop={handleDrop}
-                                        canContinue={files.length > 0}
-                                        onBack={() => setStep("select-model")}
-                                        onContinue={() => setStep("choose-output")}
-                                    />
-                                ) : (
-                                    <ChooseOutputPlaceholder 
-                                        onBack={() => setStep("choose-input")}
-                                    />
-                                )
+                                <ReviewPlaceholder
+                                    selectedModel={selectedModel}
+                                    files={files}
+                                    outputRoot={outputRoot}
+                                    onBack={() => setStep("choose-output")}
+                                />
                             )}
                         </section>
                     </main>
@@ -440,6 +531,22 @@ function inputLabelFromFiles(files: File[]): string {
     return `${files.length} files`;
 }
 
+async function requestNativeOutputFolder(): Promise<SelectOutputFolderResponse | null> {
+    const response = await fetch("/api/select-output-folder", {
+        method: "POST",
+    });
+
+    if ([404, 405].includes(response.status)) {
+        return null;
+    }
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}.`);
+    }
+
+    return (await response.json()) as SelectOutputFolderResponse;
+}
+
 function ChooseInputScreen({
     selectedModel,
     files,
@@ -554,10 +661,24 @@ function ChooseInputScreen({
     )
 }
 
-function ChooseOutputPlaceholder({
+function ChooseOutputScreen({
+    outputRoot,
+    isBusy,
+    privacyOpen,
+    onTogglePrivacy,
+    onChooseOutputFolder,
+    canContinue,
     onBack,
+    onContinue,
 } : {
+    outputRoot: string;
+    isBusy: boolean;
+    privacyOpen: boolean;
+    onTogglePrivacy: () => void;
+    onChooseOutputFolder: () => void;
+    canContinue: boolean;
     onBack: () => void;
+    onContinue: () => void;
 }) {
     return (
         <>
@@ -568,16 +689,176 @@ function ChooseOutputPlaceholder({
 
             <div
                 className="
-                    mt-8 rounded-2xl border border-egm-card-border bg-white
-                    px-6 py-8 text-egm-body-copy
+                    mt-8 rounded-2xl border border-egm-card-border bg-white px-14 py-10
                 "
             >
-                Output folder selection will be added in the next commit.
+                <div className="flex items-center gap-5">
+                    <div className="
+                        flex h-14 w-14 shrink-0 items-center justify-center rounded-lg
+                        bg-egm-icon-bg
+                        "
+                    >
+                        <Folder aria-hidden="true" size={30} strokeWidth={2.0} />
+                    </div>
+                    <p className="
+                        min-w-0 break-words text-base text-egm-secondary-copy
+                        "
+                    >
+                        {outputRoot.trim()
+                            ? outputRoot.trim()
+                            : "No output folder selected"}
+                    </p>
+                </div>
+
+                <button
+                    className="
+                            mt-7 min-h-12 rounded-lg border border-egm-border-strong
+                            bg-white px-6 py-3 text-base hover:bg-egm-hover
+                            focus-visible:outline-3 focus-visible:outline-offset-3
+                            focus-visible:outline-egm-green disabled:cursor-not-allowed
+                            disabled:border-egm-disabled disabled:text-egm-disabled-text
+                    "
+                    disabled={isBusy}
+                    type="button"
+                    onClick={onChooseOutputFolder}
+                >
+                    Choose Output Folder
+                </button>
+            </div>
+
+            <div
+                className="
+                    mt-5 rounded-xl border border-egm-blue-border bg-egm-blue-soft
+                    px-5 py-4 text-base text-egm-body-copy
+                "
+            >
+                A new run folder will be created inside the selected output folder.
+            </div>
+
+            <div
+                className="
+                    mt-5 overflow-hidden rounded-xl border border-egm-card-border bg-white
+                "
+            >
+                <button
+                    aria-expanded={privacyOpen}
+                    className="
+                        flex min-h-14 w-full items-center justify-between px-5
+                        text-left text-base text-egm-body-copy hover:bg-egm-hover
+                        focus-visible:outline-3 focus-visible:outline-offset-3
+                        focus-visible:outline-egm-green
+                    "
+                    type="button"
+                    onClick={onTogglePrivacy}
+                >
+                    <span className={privacyOpen ? "font-semibold text-black" : ""}>
+                        Privacy-safe outputs
+                    </span>
+
+                    {privacyOpen ? (
+                        <ChevronUp
+                            aria-hidden="true"
+                            size={22}
+                            strokeWidth={2.0}
+                        />
+                    ) : (
+                        <ChevronDown
+                            aria-hidden="true"
+                            size={22}
+                            strokeWidth={2.0}
+                        />
+                    )}
+                </button>
+
+                {privacyOpen ? (
+                    <div
+                        className="
+                            border-t border-egm-card-border px-7 py-4 text-sm
+                            leading-6 text-egm-body-copy
+                        "
+                    >
+                        <ul className="m-0 list-disc pl-5">
+                            <li>Run IDs are neutral names.</li>
+                            <li>Logs avoid unnecessary personal details.</li>
+                            <li>Temporary files can be cleaned up after processing.</li>
+                        </ul>
+                    </div>
+                ) : null}
+           </div> 
+
+           <FooterActions
+                onBack={onBack}
+                onContinue={onContinue}
+                continueLabel="Continue"
+                continueDisabled={!canContinue}
+           />
+        </>
+    )
+}
+
+function ReviewPlaceholder({
+    selectedModel,
+    files,
+    outputRoot,
+    onBack,
+} : {
+    selectedModel: ModelInfo;
+    files: File[];
+    outputRoot: string;
+    onBack: () => void;
+}) {
+    return (
+        <>
+            <PageHeading 
+                title="Review and run"
+                subtitle="Confirm the model, input, and output location before starting."
+            />
+
+            <div
+                className="
+                    mt-8 rounded-2xl border border-egm-card-border bg-white px-6
+                    py-7 text-base text-egm-body-copy
+                "
+            >
+                <dl className="grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
+                    <dt>Model:</dt>
+                    <dd className="m-0 font-semibold text-egm-strong-copy text-right">
+                        {selectedModel.name}
+                    </dd>
+
+                    <dt>Input:</dt>
+                    <dd className="m-0 font-semibold text-egm-strong-copy text-right">
+                        {inputLabelFromFiles(files)}
+                    </dd>
+
+                    <dt>Output folder:</dt>
+                    <dd 
+                        className="
+                            m-0 break-words font-semibold text-egm-strong-copy text-right
+                        "   
+                    >
+                        {outputRoot}
+                    </dd>
+
+                    <dt>Processing mode:</dt>
+                    <dd className="m-0 font-semibold text-egm-strong-copy text-right">
+                        Local
+                    </dd>
+                </dl>
+            </div>
+
+            <div
+                className="
+                    mt-5 rounded-xl border border-egm-blue-border bg-egm-blue-soft
+                    px-5 py-4 text-base text-egm-body-copy
+                "
+            >
+                Run review will be added in the next commit.
             </div>
 
             <div className="sticky bottom-0 z-10 mt-auto bg-egm-bg pt-8 pb-4">
                 <button className={backButtonClass} type="button" onClick={onBack}>
-                    <ChevronLeft aria-hidden="true" size={22} strokeWidth={2.4} />
+                    <ChevronLeft aria-hidden="true" size={22} strokeWidth={2.0} />
                     Back
                 </button>
             </div>
