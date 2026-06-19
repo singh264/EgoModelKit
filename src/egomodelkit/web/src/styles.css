@@ -26,7 +26,7 @@
   --color-egm-subtitle: #555555;
   --color-egm-body-copy: #555555;
   --color-egm-secondary-copy: #777a80;
-    --color-egm-strong-copy: #4e4e4e;
+  --color-egm-strong-copy: #4e4e4e;
   --color-egm-back: #555555;
   --color-egm-icon-bg: #f0eeee;
 
@@ -53,5 +53,17 @@
       BlinkMacSystemFont,
       "Segoe UI",
       sans-serif;
+  }
+}
+
+@layer utilities {
+  @keyframes egm-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .animate-egm-spin {
+    animation: egm-spin 1s linear infinite;
   }
 }

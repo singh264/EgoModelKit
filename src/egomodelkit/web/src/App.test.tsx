@@ -31,18 +31,80 @@ function dropWithoutFileList(target: HTMLElement) {
     fireEvent(target, dropEvent);
 }
 
-async function navigateToOutputStep(user: ReturnType<typeof userEvent.setup>) {
+async function navigateToOutputStep(
+    user: ReturnType<typeof userEvent.setup>,
+    {
+        modelName = /Hand-object contact/,
+        file = new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+    }: {
+        modelName?: RegExp;
+        file?: File;
+    } = {},
+) {
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Start New Run" }));
-    await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+    await user.click(screen.getByRole("button", { name: modelName }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
-    await user.upload(
-        screen.getByLabelText("Choose input files"),
-        new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+    await user.upload(screen.getByLabelText("Choose input files"), file);
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+}
+
+function outputPreview(runId: string) {
+    return {
+        runId,
+        scenario: "single_image",
+        folderTree: "results/",
+        note: "Preview only.",
+        files: [],
+    }
+}
+
+function dryRunResponse(runId = "dry-run-1") {
+    return {
+        runId,
+        status: "ready",
+        scenario: "single_iamge",
+        summary: {
+            modelId: "hand-object-contact",
+            model: "Hand-object contact",
+            input: "frame.jpg",
+            outputFolder: "/tmp/egomodelkit-results",
+            status: "ready",
+        },
+        outputPreview: outputPreview(runId),
+    }
+}
+
+function startRunResponse(runId = "run-1") {
+    return {
+        runId,
+        status: "running",
+        scenario: "single_image",
+        summary: {
+            modelId: "hand-object-contact",
+            model: "Hand-object contact",
+            input: "frame.jpg",
+            outputFolder: "/tmp/egomodelkit-results",
+            status: "running",
+        },
+        outputPreview: outputPreview(runId),
+    }
+}
+
+async function navigateToReviewStep(user: ReturnType<typeof userEvent.setup>) {
+    vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+        }),
     );
 
+    await navigateToOutputStep(user);
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
 }
 
@@ -640,49 +702,211 @@ describe("App", () => {
         expect(screen.queryByText("Run IDs are neutral names.")).not.toBeInTheDocument();
     });
 
-    it("continues from selected output folder to the review placeholder", async () => {
+    it("continues from selected output folder to the review screen", async () => {
         const user = userEvent.setup();
 
-        vi.stubGlobal(
-            "fetch",
-            vi.fn().mockResolvedValue({
-                ok: true,
-                status: 200,
-                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
-            }),
-        );
-
-        await navigateToOutputStep(user);
-
-        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
-        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await navigateToReviewStep(user);
 
         expect(screen.getByRole("heading", { name: "Review and run" }),).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Confirm the model, input, and output location before starting."),
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("Summary")).toBeInTheDocument();
         expect(screen.getByText("Hand-object contact")).toBeInTheDocument();
         expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("/tmp/egomodelkit-results")).toBeInTheDocument();
         expect(screen.getByText("Local")).toBeInTheDocument();
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
         
-        expect(
-            screen.getByText("Run review will be added in the next commit.")
-        ).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Dry Run"})).toBeEnabled();
+        expect(screen.getByRole("button", { name: "Run Model"})).toBeEnabled();
     });
 
-    it("returns from review placeholder to the selected output folder screen", async () => {
+    it("runs a dry run and shows the dry-run success panel", async () => {
         const user = userEvent.setup();
-
-        vi.stubGlobal(
-            "fetch",
-            vi.fn().mockResolvedValue({
+        
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
                 ok: true,
                 status: 200,
                 json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => dryRunResponse(),
+            });
+
+        vi.stubGlobal("fetch", fetchMock);
+        
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(fetchMock).toHaveBeenLastCalledWith(
+            "/api/dry-run",
+            expect.objectContaining({
+                method: "POST",
+                body: expect.any(FormData)
             }),
         );
 
+        const dryRunRequest = fetchMock.mock.calls[1][1] as RequestInit;
+        const formData = dryRunRequest.body as FormData;
+
+        expect(formData.get("modelId")).toBe("hand-object-contact");
+        expect(formData.get("outputRoot")).toBe("/tmp/egomodelkit-results");
+        expect((formData.getAll("files")[0] as File).name).toBe("frame.jpg");
+
+        expect(screen.getByRole(
+            "heading", { name: "Dry run completed successfully." })
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("Checking selected input...")).toBeInTheDocument();
+        expect(screen.getByText("Checking output folder...")).toBeInTheDocument();
+        expect(screen.getByText("Checking local runtime...")).toBeInTheDocument();
+    });
+
+    it("shows an error when dry run fails", async () => {
+        const user = userEvent.setup();
+        
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                json: async () => ({}),
+            });
+
+        vi.stubGlobal("fetch", fetchMock);
+
         await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+    
+        expect(screen.getByRole("alert")).toHaveTextContent("Unable to complete dry run.");
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("starts a hand-object model run and shows the running panel", async () => {
+        const user = userEvent.setup();
+        
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => startRunResponse(),
+            });
+
+        vi.stubGlobal("fetch", fetchMock);
+
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+    
+        expect(fetchMock).toHaveBeenLastCalledWith(
+            "/api/runs",
+            expect.objectContaining({
+                method: "POST",
+                body: expect.any(FormData)
+            }),
+        );
+
+        expect(screen.getByText("Running model...")).toBeInTheDocument();
+        expect(screen.getByText("Run ID: run-1")).toBeInTheDocument();
+        expect(screen.getByText("Preparing image input...")).toBeInTheDocument();
+        expect(screen.getByText("Saving detection outputs...")).toBeInTheDocument();
+        expect(screen.getByText("Overall progress estimate")).toBeInTheDocument();
+
+        expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Dry Run" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Run Model" })).toBeDisabled();
+    });
+
+    it("starts an ADL model run with video-oriented progress messages", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => startRunResponse("adl-run-1"),
+            });
+
+        vi.stubGlobal("fetch", fetchMock);
+        
+        await navigateToOutputStep(user, {
+            modelName: /Activity recognition \(ADL\)/,
+            file: new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+        });
 
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(screen.getByText("Run ID: adl-run-1")).toBeInTheDocument();
+        expect(screen.getByText("Preparing video input...")).toBeInTheDocument();
+        expect(screen.getByText("Extracting frames...")).toBeInTheDocument();
+        expect(screen.getByText("Running Detic object detection...")).toBeInTheDocument();
+    });
+
+    it("shows an error when starting the model run fails", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                json: async () => ({}),
+            });
+
+        vi.stubGlobal("fetch", fetchMock);
+        
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(await screen.getByRole("alert")).toHaveTextContent(
+            "Unable to start model run",
+        );
+        
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("returns from review screen to the selected output folder screen", async () => {
+        const user = userEvent.setup();
+
+        await navigateToReviewStep(user);
         await user.click(screen.getByRole("button", { name: "Back" }));
 
         expect(

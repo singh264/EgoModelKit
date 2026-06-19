@@ -3,6 +3,7 @@ import {
     ChevronDown,
     ChevronLeft, 
     ChevronUp,
+    CircleCheck,
     Folder,
     Info, 
     Shield, 
@@ -23,6 +24,10 @@ type Step =
     | "choose-output"
     | "review";
 
+type ReviewMode = "ready" | "dry-run-complete" | "running";
+
+type GuiRunStatus = "ready" | "running" | "completed" | "failed";
+
 const privacyMessage =
     "Your selected files are processed locally by default. " +
     "No telemetry or cloud upload is used in this MVP.";
@@ -37,6 +42,52 @@ type ModelInfo = {
 
 type SelectOutputFolderResponse = {
     outputRoot: string;
+};
+
+type OutputPreviewFile = {
+    name: string;
+    description: string;
+}
+
+type OutputPreview = {
+    runId: string;
+    scenario: string;
+    folderTree: string;
+    note: string;
+    files: OutputPreviewFile[];
+};
+
+type RunSummary = {
+    modelId: string;
+    model: string;
+    input: string;
+    outputFolder: string;
+    status: string;
+}
+
+type DryRunResponse = {
+    runId: string;
+    status: GuiRunStatus;
+    scenario: string;
+    summary: RunSummary;
+    outputPreview: OutputPreview;
+}
+
+type StartRunResponse = {
+    runId: string;
+    status: GuiRunStatus;
+    scenario: string;
+    summary: RunSummary;
+    outputPreview: OutputPreview;
+};
+
+type ProgressEvent = {
+    stage: string;
+    message: string;
+    current: number | null;
+    total: number | null;
+    unit: string | null;
+    displayText: string;
 };
 
 const HAND_OBJECT_MODEL_ID = "hand-object-contact";
@@ -78,6 +129,11 @@ const primaryButtonClass =
     "hover:bg-egm-green-dark disabled:border-egm-disabled " +
     "disabled:bg-egm-disabled disabled:text-white"
 
+const secondaryButtonClass =
+    `${buttonBaseClass} border border-egm-border-strong bg-white text-black text-lg ` +
+    "hover:bg-egm-hover disabled:border-egm-disabled disabled:bg-white " +
+    "disabled:text-egm-disabled-text";
+
 const backButtonClass =
     "inline-flex min-h-12 items-center justify-center gap-2 rounded-lg " +
     "border border-transparent bg-transparent pl-0 pr-2 py-3 text-base " +
@@ -93,6 +149,9 @@ export function App() {
     const [privacyOpen, setPrivacyOpen] = useState<boolean>(false);
     const [errorMessage, setErrorMessage] = useState<string>("");
     const [isBusy, setIsBusy] = useState<boolean>(false);
+    const [reviewMode, setReviewMode] = useState<ReviewMode>("ready");
+    const [runId, setRunId] = useState<string>("");
+    const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([]);
 
     const selectedModel =
         DEFAULT_MODELS.find((model) => model.id === modelId) ?? DEFAULT_MODELS[0];
@@ -104,6 +163,7 @@ export function App() {
         setPrivacyOpen(false);
         setErrorMessage("");
         setIsBusy(false);
+        clearReviewState();
         setStep("select-model");
     }
 
@@ -114,6 +174,7 @@ export function App() {
         setPrivacyOpen(false);
         setErrorMessage("");
         setIsBusy(false);
+        clearReviewState();
         setStep("welcome");
     }
 
@@ -124,7 +185,14 @@ export function App() {
             setOutputRoot("");
             setPrivacyOpen(false);
             setErrorMessage("");
+            clearReviewState();
         }
+    }
+
+    function clearReviewState() {
+        setReviewMode("ready");
+        setRunId("");
+        setProgressEvents([]);
     }
 
     function handleFilesChange(event: ChangeEvent<HTMLInputElement>) {
@@ -136,6 +204,7 @@ export function App() {
         setOutputRoot("");
         setPrivacyOpen(false);
         setErrorMessage("");
+        clearReviewState();
     }
 
     function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -153,6 +222,7 @@ export function App() {
         setOutputRoot("");
         setPrivacyOpen(false);
         setErrorMessage("");
+        clearReviewState();
     }
 
     async function chooseOutputFolder() {
@@ -174,8 +244,53 @@ export function App() {
             }
 
             setOutputRoot(selectedOutputRoot.trim());
+            clearReviewState();
         } catch {
             setErrorMessage("Unable to choose output folder.")
+        } finally {
+            setIsBusy(false);
+        }
+    }
+
+    async function runDryRun() {
+        try {
+            setIsBusy(true);
+            setErrorMessage("");
+
+            const body = await postMultipart<DryRunResponse>("/api/dry-run", {
+                modelId,
+                outputRoot,
+                files,
+            });
+
+            setRunId(body.runId);
+            setProgressEvents([]);
+            setReviewMode("dry-run-complete");
+        } catch {
+            setErrorMessage("Unable to complete dry run.");
+            setReviewMode("ready");
+        } finally {
+            setIsBusy(false);
+        }
+    }
+
+    async function startRun() {
+        try {
+            setIsBusy(true);
+            setErrorMessage("");
+
+            const body = await postMultipart<StartRunResponse>("/api/runs", {
+                modelId,
+                outputRoot,
+                files,
+            });
+
+            setRunId(body.runId);
+            setProgressEvents(startingProgressEvents(modelId));
+            setReviewMode("running");
+        } catch {
+            setErrorMessage("Unable to start model run.");
+            setReviewMode("ready");
         } finally {
             setIsBusy(false);
         }
@@ -261,11 +376,17 @@ export function App() {
                                     onContinue={() => setStep("review")}
                                 />
                             ) : (
-                                <ReviewPlaceholder
+                                <ReviewScreen
                                     selectedModel={selectedModel}
                                     files={files}
                                     outputRoot={outputRoot}
+                                    reviewMode={reviewMode}
+                                    progressEvents={progressEvents}
+                                    runId={runId}
+                                    isBusy={isBusy}
                                     onBack={() => setStep("choose-output")}
+                                    onDryRun={runDryRun}
+                                    onRun={startRun}
                                 />
                             )}
                         </section>
@@ -547,6 +668,72 @@ async function requestNativeOutputFolder(): Promise<SelectOutputFolderResponse |
     return (await response.json()) as SelectOutputFolderResponse;
 }
 
+function startingProgressEvents(modelId: string): ProgressEvent[] {
+    if (modelId === HAND_OBJECT_MODEL_ID) {
+        return [
+            progressLine("setup", "Preparing image input..."),
+            progressLine("validate", "Checking selected image..."),
+            progressLine(
+                "runtime",
+                "Running hand-object contact model on the image: 1 / 1 image processed",
+            ),
+            progressLine("finalize", "Saving detection outputs..."),
+        ];
+    }
+
+    return [
+        progressLine("setup", "Preparing video input..."),
+        progressLine("extract", "Extracting frames..."),
+        progressLine("runtime", "Running hand-object contact model..."),
+        progressLine("runtime", "Running Detic object detection..."),
+        progressLine("finalize", "Saving activity recognition outputs..."),
+    ];
+}
+
+function progressLine(stage: string, displayText: string): ProgressEvent {
+    return {
+        stage,
+        message: displayText,
+        current: null,
+        total: null,
+        unit: null,
+        displayText,
+    }
+}
+
+async function postMultipart<T>(
+    url: string,
+    {
+        modelId,
+        outputRoot,
+        files,
+    }: {
+        modelId: string;
+        outputRoot: string;
+        files: File[];
+    },
+): Promise<T> {
+    const formData = new FormData();
+
+    formData.append("modelId", modelId);
+    formData.append("outputRoot", outputRoot);
+
+    for (const file of files) {
+        formData.append("files", file, file.name);
+    }
+
+    const response = await fetch(url, {
+        method: "POST",
+        body: formData,
+    });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}.`);
+    }
+
+    return (await response.json()) as T;
+}
+
 function ChooseInputScreen({
     selectedModel,
     files,
@@ -796,17 +983,31 @@ function ChooseOutputScreen({
     )
 }
 
-function ReviewPlaceholder({
+function ReviewScreen({
     selectedModel,
     files,
     outputRoot,
+    reviewMode,
+    progressEvents,
+    runId,
+    isBusy,
     onBack,
+    onDryRun,
+    onRun,
 } : {
     selectedModel: ModelInfo;
     files: File[];
     outputRoot: string;
+    reviewMode: ReviewMode;
+    progressEvents: ProgressEvent[];
+    runId: string;
+    isBusy: boolean;
     onBack: () => void;
+    onDryRun: () => void;
+    onRun: () => void;
 }) {
+    const running = reviewMode === "running";
+
     return (
         <>
             <PageHeading 
@@ -814,13 +1015,91 @@ function ReviewPlaceholder({
                 subtitle="Confirm the model, input, and output location before starting."
             />
 
+            <SummaryPanel
+                selectedModel={selectedModel}
+                inputLabel={inputLabelFromFiles(files)}
+                outputRoot={outputRoot}
+            />
+
+            <div
+                className="
+                    mt-5 rounded-xl border border-egm-blue-border bg-egm-blue-soft
+                    px-5 py-4 text-base text-egm-body-copy
+                "
+            >
+                Dry run checks the selected input, output folder, and required local
+                setup without running the full model.
+            </div>
+
+            {reviewMode === "ready" ? <ReadyPanel /> : null}
+
+            {reviewMode === "dry-run-complete" ? (
+                <DryRunCompletePanel runId={runId} />
+            ) : null}
+
+            {reviewMode === "running" ? (
+                <RunningPanel progressEvents={progressEvents} runId={runId} />
+            ) : null}
+
+            <div 
+                className="
+                    sticky bottom-0 z-10 mt-auto flex items-center justify-between gap-4
+                    bg-egm-bg pt-8 pb-4
+                "
+            >
+                <button 
+                    className={backButtonClass} 
+                    disabled={running}
+                    type="button" 
+                    onClick={onBack}
+                >
+                    <ChevronLeft aria-hidden="true" size={22} strokeWidth={2.0} />
+                    Back
+                </button>
+
+                <div className="flex gap-3">
+                    <button
+                        className={secondaryButtonClass}
+                        disabled={running || isBusy}
+                        type="button"
+                        onClick={onDryRun}
+                    >
+                        Dry Run
+                    </button>
+                    <button 
+                        className={primaryButtonClass}
+                        disabled={running || isBusy}
+                        type = "button"
+                        onClick={onRun}
+                    >
+                        Run Model
+                    </button>
+                </div>
+            </div>
+        </>
+    )
+}
+
+function SummaryPanel({
+    selectedModel,
+    inputLabel,
+    outputRoot,
+} : {
+    selectedModel: ModelInfo;
+    inputLabel: string;
+    outputRoot: string;
+}) {
+    return (
+        <>
             <div
                 className="
                     mt-8 rounded-2xl border border-egm-card-border bg-white px-6
                     py-7 text-base text-egm-body-copy
                 "
             >
-                <dl className="grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
+                <h2 className="text-xl font-normal leading-none text-black">Summary</h2>
+
+                <dl className="mt-6 grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
                     <dt>Model:</dt>
                     <dd className="m-0 font-semibold text-egm-strong-copy text-right">
                         {selectedModel.name}
@@ -828,7 +1107,7 @@ function ReviewPlaceholder({
 
                     <dt>Input:</dt>
                     <dd className="m-0 font-semibold text-egm-strong-copy text-right">
-                        {inputLabelFromFiles(files)}
+                        {inputLabel}
                     </dd>
 
                     <dt>Output folder:</dt>
@@ -846,22 +1125,127 @@ function ReviewPlaceholder({
                     </dd>
                 </dl>
             </div>
-
-            <div
-                className="
-                    mt-5 rounded-xl border border-egm-blue-border bg-egm-blue-soft
-                    px-5 py-4 text-base text-egm-body-copy
-                "
-            >
-                Run review will be added in the next commit.
-            </div>
-
-            <div className="sticky bottom-0 z-10 mt-auto bg-egm-bg pt-8 pb-4">
-                <button className={backButtonClass} type="button" onClick={onBack}>
-                    <ChevronLeft aria-hidden="true" size={22} strokeWidth={2.0} />
-                    Back
-                </button>
-            </div>
         </>
+    )
+}
+
+function ReadyPanel() {
+    return (
+        <div
+            className="
+                mt-6 flex min-h-24 items-center rounded-2xl border border-egm-card-border
+                bg-white px-6 py-6
+            "
+        >
+            <h2 className="text-2xl font-normal leading-none">Ready to start.</h2>
+        </div>
+    );
+}
+
+function DryRunCompletePanel({ runId } : { runId: string; }) {
+    const lines = [
+        "Checking selected input...",
+        "Checking output folder...",
+        "Checking local runtime...",
+        "Dry run completed successfully.",
+    ];
+
+    const dryRunRowLayout = "grid grid-cols-[26px_1fr] items-center gap-x-4";
+
+    return (
+        <div
+            className="
+                mt-6 rounded-2xl border border-egm-card-border bg-white px-6 py-7
+            "
+        >
+            <div className={dryRunRowLayout}>
+                <CircleCheck 
+                    aria-hidden="true"
+                    className="text-egm-green"
+                    size={26}
+                    strokeWidth={2.0}
+                />
+
+                <h2 className="text-2xl font-normal leading-none">
+                    Dry run completed successfully.
+                </h2>
+            </div>
+
+            <ul className="mt-6 space-y-1 text-base leading-6 text-egm-body-copy">
+                {lines.map((line, index) => {
+                    const isFinalLine = index === lines.length - 1;
+                    
+                    return (
+                        <li key={line} className={dryRunRowLayout}>
+                            <span>
+                                {isFinalLine ? (
+                                    <CircleCheck
+                                        aria-hidden="true"
+                                        className="text-egm-green"
+                                        size={20}
+                                        strokeWidth={2.2}
+                                    />
+                                ) : null}
+                            </span>
+
+                            <span>{line}</span>
+                        </li>
+                    )
+                })}
+            </ul>
+        </div>
+    )
+}
+
+function RunningPanel({ 
+    progressEvents, 
+    runId, 
+} : { 
+    progressEvents: ProgressEvent[];
+    runId: string;
+}) {
+    const percent = Math.min(92, progressEvents.length * 20);
+    
+    return (
+        <div
+            className="
+                mt-6 grid grid-cols-[28px_minmax(0,1fr)_28px] gap-x-4 rounded-2xl border 
+                border-egm-card-border bg-white px-6 py-7
+            "
+        >
+            <span 
+                aria-hidden="true"
+                className="
+                    col-start-1 row-start-1 h-7 w-7 rounded-full border-[3px] 
+                    border-egm-green-soft border-t-egm-green animate-egm-spin
+                "
+            />
+
+            <div className="col-start-2 min-w-0">
+                <h2 className="text-2xl font-normal leading-none">Running model...</h2>
+
+                <p className="mt-4 text-base leading-6 text-egm-secondary-copy">
+                    Run ID: {runId}
+                </p>
+                
+                <ul className="mt-6 space-y-1 text-base leading-6 text-egm-body-copy">
+                    {progressEvents.map((event, index) => (
+                        <li key={`${event.stage}-${index}`}>{event.displayText}</li>
+                    ))}
+                </ul>
+
+                <p className="mt-6 text-sm leading-6 text-egm-body-copy">
+                    Overall progress estimate
+                </p>
+
+                <div 
+                    className="
+                        mt-1 h-2.5 overflow-hidden rounded-full bg-egm-progress-track
+                    "
+                >
+                    <div className="h-full bg-egm-green" style={{ width: `${percent}%` }} />
+                </div>
+            </div>
+        </div>
     )
 }
