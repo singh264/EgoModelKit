@@ -112,6 +112,10 @@ class RunOutputLayout:
     def runtime_log_path(self) -> Path:
         return self.logs_dir / RUNTIME_LOG_FILENAME
     
+    @property
+    def output_folder_path(self) -> Path:
+        return self.run_dir.parent
+    
 def build_run_id(now: datetime | None = None) -> str:
     """ Return a neutral run id safe for privacy-sensitive workflows. """
     timestamp = now if now is not None else datetime.now().astimezone()

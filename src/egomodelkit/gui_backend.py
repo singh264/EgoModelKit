@@ -337,12 +337,12 @@ def create_app(
                 detail = "Output folder does not exist yet.",
             )
         
-        webbrowser.open(state.layout.run_dir.resolve().as_uri())
+        webbrowser.open(state.layout.output_folder_path.resolve().as_uri())
         
         return {
             "opened": True,
             "runId": state.run_id,
-            "outputFolder": str(state.layout.run_dir),
+            "outputFolder": str(state.layout.output_folder_path),
         }
     
     @app.post("/api/select-output-folder")
@@ -546,7 +546,7 @@ def _progress_response(state: GuiRunState) -> dict[str, object]:
         "runId": state.run_id,
         "status": status,
         "errorMessage": error_message,
-        "outputFolder": str(state.layout.run_dir),
+        "outputFolder": str(state.layout.output_folder_path),
         "events": [
             {
                 "stage": event.stage,

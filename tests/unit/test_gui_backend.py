@@ -132,7 +132,9 @@ def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> Non
     
     output_folder = Path(progress_body["outputFolder"])
     
-    assert (output_folder / "fake-output.txt").read_text(encoding = "utf-8") == "done"
+    assert (
+        output_folder / run_id / "fake-output.txt").read_text(encoding = "utf-8"
+    ) == "done"
 
 def test_open_output_folder_uses_tracked_run(
     tmp_path: Path,

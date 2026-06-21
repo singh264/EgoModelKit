@@ -1,4 +1,4 @@
-import { createEvent, fireEvent, render, screen } from "@testing-library/react"
+import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -93,6 +93,63 @@ function startRunResponse(runId = "run-1") {
     }
 }
 
+function progressEvent({
+    stage,
+    displayText,
+    current = null,
+    total = null,
+} : {
+    stage: string;
+    displayText: string;
+    current?: number | null;
+    total?: number | null;
+}) {
+    return {
+        stage,
+        message: displayText,
+        current,
+        total,
+        unit: null,
+        displayText,
+    }
+}
+
+function progressResponse({
+    runId = "run-1",
+    status = "running",
+    errorMessage = null,
+    outputFolder = "/tmp/egomodelkit-results/run-1",
+    events = [
+        progressEvent({
+            stage: "setup",
+            displayText: "Preparing image input...",
+            current: 1,
+            total: 4,
+        }),
+        progressEvent({
+            stage: "runtime",
+            displayText: "Running hand-object contact model...",
+            current: 2,
+            total: 4,
+        }),
+    ],
+} : {
+    runId?: string;
+    status?: string;
+    errorMessage?: string | null;
+    outputFolder?: string;
+    events?: object[];
+}) {
+    return {
+        runId,
+        status,
+        errorMessage,
+        outputFolder,
+        events,
+        outputPreview: outputPreview(runId),
+    }
+}
+
 async function navigateToReviewStep(user: ReturnType<typeof userEvent.setup>) {
     vi.stubGlobal(
         "fetch",
@@ -106,6 +163,154 @@ async function navigateToReviewStep(user: ReturnType<typeof userEvent.setup>) {
     await navigateToOutputStep(user);
     await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
+}
+
+async function startRunWithProgressResponses(
+    user: ReturnType<typeof userEvent.setup>,
+    progressResponses: unknown[],
+) {
+    const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+        })
+        .mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: async () => startRunResponse(),
+        });
+
+    for (const response of progressResponses) {
+        fetchMock.mockResolvedValueOnce({
+            ok: true,
+            status: 200,
+            json: async () => response,
+        });
+    }
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await navigateToOutputStep(user);
+
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Run Model" }));    
+    
+    return fetchMock;
+}
+
+async function renderCompletedResultsWithFetchMock(
+    user: ReturnType<typeof userEvent.setup>,
+    openOutputFolderResponse: {
+        ok: boolean;
+        status: number;
+        json: () => Promise<unknown>;
+    },
+) {
+    const fetchMock = vi.fn(async (url: string) => {
+        if (url === "/api/select-output-folder") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            }
+        }
+
+        if (url === "/api/runs") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => startRunResponse(),
+            }
+        }
+
+        if (url === "/api/runs/run-1/progress") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => progressResponse({ status: "completed" }),
+            };
+        }
+
+        if (url === "/api/open-output-folder") {
+            return openOutputFolderResponse;
+        }
+
+        throw new Error(`Unexpected fetch call: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await navigateToOutputStep(user);
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+    await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+    expect(
+        await screen.findByRole("heading", { name: "Run completed" })
+    ).toBeInTheDocument();
+
+    return fetchMock;
+}
+
+async function renderCompletedResultsWithCustomProgress(
+    user: ReturnType<typeof userEvent.setup>,
+    completedProgressResponse: unknown,
+) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+
+        if (url === "/api/select-output-folder") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            }
+        }
+
+        if (url === "/api/runs") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => startRunResponse(),
+            }
+        }
+
+        if (url === "/api/runs/run-1/progress") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => completedProgressResponse,
+            };
+        }
+
+        throw new Error(`Unexpected fetch call: ${url}`);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await navigateToOutputStep(user);
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+    await waitFor(() => {
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+    expect(
+        await screen.findByRole("heading", { name: "Run completed" })
+    ).toBeInTheDocument();
+
+    return fetchMock;
 }
 
 describe("App", () => {
@@ -308,7 +513,6 @@ describe("App", () => {
         );
 
         expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
-        expect(screen.getByText("Input selected.")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();   
     });
 
@@ -491,7 +695,6 @@ describe("App", () => {
         ).toBeInTheDocument();
 
         expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
-        expect(screen.getByText("Input selected.")).toBeInTheDocument();
     });
 
     it("keeps the selected model when selecting the same model again", async () => {
@@ -821,7 +1024,7 @@ describe("App", () => {
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Run Model" }));
     
-        expect(fetchMock).toHaveBeenLastCalledWith(
+        expect(fetchMock).toHaveBeenCalledWith(
             "/api/runs",
             expect.objectContaining({
                 method: "POST",
@@ -834,6 +1037,11 @@ describe("App", () => {
         expect(screen.getByText("Preparing image input...")).toBeInTheDocument();
         expect(screen.getByText("Saving detection outputs...")).toBeInTheDocument();
         expect(screen.getByText("Overall progress estimate")).toBeInTheDocument();
+
+        expect(
+            screen.getByText("This may take several minutes. Please keep this window open.")
+        ).toBeInTheDocument();
+
 
         expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
         expect(screen.getByRole("button", { name: "Dry Run" })).toBeDisabled();
@@ -899,8 +1107,44 @@ describe("App", () => {
         expect(await screen.getByRole("alert")).toHaveTextContent(
             "Unable to start model run",
         );
-        
+
         expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("polls run progress and shows backend progress events", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "running",
+                events: [
+                    progressEvent({
+                        stage: "setup",
+                        displayText: "Backend: preparing image input",
+                        current: 1,
+                        total: 4,
+                    }),
+                    progressEvent({
+                        stage: "runtime",
+                        displayText: "Backend: running model",
+                        current: 2,
+                        total: 4,
+                    }),
+                ],
+            }),
+        ]);
+
+        expect(
+            await screen.findByText("Backend: preparing image input")
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("Backend: running model")).toBeInTheDocument();
+
+        expect(
+            screen.getByRole("log", { name: "Run progress log" }),
+        ).toHaveClass("max-h-40", "overflow-y-auto");
+        
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "50%" });
     });
 
     it("returns from review screen to the selected output folder screen", async () => {
@@ -915,4 +1159,583 @@ describe("App", () => {
 
         expect(screen.getByText("/tmp/egomodelkit-results")).toBeInTheDocument();
     });
+
+    it(
+        "shows a small progress estimate when progress events do not include totals",
+        async () => {
+            const user = userEvent.setup();
+
+            await startRunWithProgressResponses(user, [
+                progressResponse({
+                    status: "running",
+                    events: [
+                        progressEvent({
+                            stage: "running",
+                            displayText: "Backend: running without numeric progress",
+                        }),
+                    ],
+                }),
+            ]);
+
+            expect(
+                await screen.findByText("Backend: running without numeric progress"),
+            ).toBeInTheDocument();
+
+            expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "8%" });
+        }
+    );
+
+    it("shows zero progress when no progress events are available", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "running",
+                events: [],
+            }),
+        ]);
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "0%" });
+    });
+
+    it("shows zero progress when backend progress omits events", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            {
+                runId: "run-1",
+                status: "running",
+                errorMessage: null,
+                outputFolder: "/tmp/egomodelkit-results/run-1",
+                outputPreview: outputPreview("run-1"),
+            },
+        ]);
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+        expect(screen.getByText("Run ID: run-1")).toBeInTheDocument();
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "0%" });
+    });
+
+    it("caps progress at 100 percent when backend progress exceeds the total", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "running",
+                events: [
+                    progressEvent({
+                        stage: "runtime",
+                        displayText: "Backend: progress exceeded total",
+                        current: 6,
+                        total: 4,
+                    }),
+                ],
+            }),
+        ]);
+
+        expect(
+            await screen.findByText("Backend: progress exceeded total"),
+        ).toBeInTheDocument();
+
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "100%" });
+    });
+
+    it("keeps progress at zero when the backend progress is negative", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "running",
+                events: [
+                    progressEvent({
+                        stage: "runtime",
+                        displayText: "Backend: negative progress",
+                        current: -1,
+                        total: 4,
+                    }),
+                ],
+            }),
+        ]);
+
+        expect(
+            await screen.findByText("Backend: negative progress"),
+        ).toBeInTheDocument();
+
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "0%" });
+    });
+
+    it("moves to the completed results screen when progress completes", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "completed",
+                events: [
+                    progressEvent({
+                        stage: "finalize",
+                        displayText: "Saving detection outputs...",
+                        current: 4,
+                        total: 4,
+                    }),
+                ],
+            }),
+        ]);
+
+        expect(
+            await screen.findByRole("heading", { name: "Run completed" }),
+        ).toBeInTheDocument();
+    
+        expect(
+            screen.getByText("Your results were saved successfully.")
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("Hand-object contact")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("/tmp/egomodelkit-results/run-1")).toBeInTheDocument();
+        expect(screen.getByText("Completed")).toBeInTheDocument();
+
+        expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-1/progress");
+    });
+
+    it("shows a graceful failed results screen when progress reports failure", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "failed",
+                errorMessage:  "Docker or an NVIDIA GPU was not available on this machine.",
+                events: [
+                    progressEvent({
+                        stage: "finalize",
+                        displayText: "Saving detection outputs...",
+                        current: 4,
+                        total: 4,
+                    }),
+                ],
+            }),
+        ]);
+
+        expect(
+            await screen.findByRole("heading", { name: "Needs attention" }),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByText("EgoModelKit could not complete the run."),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Docker or an NVIDIA GPU was not available on this machine."),
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("Failed")).toBeInTheDocument();
+    });
+
+    it(
+        "keeps running screen visible and shows an alert when progress polling fails",
+        async () => {
+            const user = userEvent.setup();
+
+            const fetchMock = vi
+                .fn()
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                })
+                .mockResolvedValueOnce({
+                    ok: true,
+                    status: 200,
+                    json: async () => startRunResponse(),
+                })
+                .mockResolvedValueOnce({
+                    ok: false,
+                    status: 500,
+                    json: async () => ({}),
+                });
+            
+            vi.stubGlobal("fetch", fetchMock);
+
+            await navigateToOutputStep(user);
+            await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+            expect(
+                await screen.findByText("/tmp/egomodelkit-results"),
+            ).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+            await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+            expect(await screen.findByRole("alert")).toHaveTextContent(
+                "Unable to refresh run progress.",
+            );
+
+            expect(screen.getByText("Running model...")).toBeInTheDocument();
+        }
+    );
+
+    it("encodes run IDs before polling progress", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                };
+            }
+
+            if (url === "/api/runs") {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => startRunResponse("run 1"),
+                };
+            }
+
+            if (url === "/api/runs/run%201/progress") {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => 
+                        progressResponse({
+                            runId: "run 1",
+                            status: "completed",
+                            outputFolder: "/tmp/egomodelkit-results/run 1"
+                        }),
+                };
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        vi.stubGlobal("fetch", fetchMock);
+
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+        });
+
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(
+            await screen.findByRole("heading", { name: "Run completed" })
+        ).toBeInTheDocument();
+
+        expect(fetchMock).toHaveBeenCalledWith("/api/runs/run%201/progress");
+    });
+
+    it(
+        "ignores a stale progress polling error after leaving the running screen", 
+        async () => {
+            const user = userEvent.setup();
+
+            let rejectProgress!: (reason?: unknown) => void;
+
+            const pendingProgressResponse = new Promise((_resolve, reject) => {
+                rejectProgress = reject;
+            });
+
+            const fetchMock = vi.fn((url: string) => {
+                if (url === "/api/select-output-folder") {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                    });
+                }
+
+                if (url === "/api/runs") {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => startRunResponse(),
+                    });
+                }
+
+                if (url === "/api/runs/run-1/progress") {
+                    return pendingProgressResponse;
+                }
+
+                return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
+            });
+
+            vi.stubGlobal("fetch", fetchMock);
+
+            await navigateToOutputStep(user);
+            await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+            expect(
+                await screen.findByText("/tmp/egomodelkit-results"),
+            ).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+            await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+            expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
+
+            expect(screen.getByRole("heading", { name: "EgoModelKit" })).toBeInTheDocument();
+
+            await act(async () => {
+                rejectProgress(new Error("stale progress failure"));
+
+                await Promise.resolve();
+                await Promise.resolve();
+            });
+
+            expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+            expect(screen.getByRole("heading", { name: "EgoModelKit" }),).toBeInTheDocument();
+        }
+    );
+    
+    it("ignores a stale progress response after leaving the running screen", async () => {
+        const user = userEvent.setup();
+
+        let resolveProgress!: (value: unknown) => void;
+
+        const pendingProgressResponse = new Promise((resolve) => {
+            resolveProgress = resolve;
+        });
+
+        const fetchMock = vi.fn((url: string) => {
+            if (url === "/api/select-output-folder") {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                });
+            }
+            
+            if (url === "/api/runs") {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    json: async () => startRunResponse(),
+                });
+            }
+
+            if (url === "/api/runs/run-1/progress") {
+                return pendingProgressResponse;
+            }
+
+            return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
+        });
+        
+        vi.stubGlobal("fetch", fetchMock);
+
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+        expect(await screen.findByText("/tmp/egomodelkit-results")).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name:  "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
+
+        expect(screen.getByRole("heading", { name: "EgoModelKit" })).toBeInTheDocument();
+
+        await act(async () => {
+            resolveProgress({
+                ok: true,
+                status: 200,
+                json: async () => progressResponse({ status: "completed" }),
+            });
+
+            await Promise.resolve();
+            await Promise.resolve();
+        });
+
+        expect(
+            screen.queryByRole("heading", { name: "Run completed" }),
+        ).not.toBeInTheDocument();
+    });
+
+    it("starts a new run from the results screen", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({ status: "completed" }),
+        ]);
+
+        expect(
+            await screen.findByRole("heading", { name: "Run completed" }),
+        ).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        expect(screen.getByRole("heading", { name: "Select a model" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("opens the completed run output folder", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = await renderCompletedResultsWithFetchMock(user, {
+            ok: true,
+            status: 200,
+            json: async () => ({
+                opened: true,
+                runId: "run-1",
+                outputFolder: "/tmp/egomodelkit-results/run-1",
+            }),
+        });
+
+        await user.click(screen.getByRole("button", { name: "Open Output Folder" }));
+
+        await waitFor(() => {
+            expect(fetchMock).toHaveBeenCalledWith(
+                "/api/open-output-folder",
+                expect.objectContaining({
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                    },
+                    body: JSON.stringify({ runId: "run-1" }),
+                }),
+            );
+        });
+    });
+
+    it("shows an alert when opening the output folder is unavailable", async () => {
+        const user = userEvent.setup();
+        
+        await renderCompletedResultsWithFetchMock(user, {
+            ok: false,
+            status: 405,
+            json: async () => ({}),
+        });
+
+        await user.click(screen.getByRole("button", { name: "Open Output Folder" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Opening output folders is not available in this environment."
+        );
+    });
+
+    it("shows an alert when opening the output folder fails", async () => {
+        const user = userEvent.setup();
+        
+        await renderCompletedResultsWithFetchMock(user, {
+            ok: false,
+            status: 500,
+            json: async () => ({}),
+        });
+        
+        await user.click(screen.getByRole("button", { name: "Open Output Folder" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Unable to open output folder."
+        );
+    });
+
+    it(
+        "keeps the output-preview action disabled until the output preview page is added",
+        async () => {
+            const user = userEvent.setup();
+
+            await startRunWithProgressResponses(user, [
+                progressResponse({ status: "completed" }),
+            ]);
+
+            expect(
+                await screen.findByRole("heading", { name: "Run completed" }),
+            ).toBeInTheDocument();
+    
+            expect(
+                screen.getByRole("button", { name: "View Output Preview" }),
+            ).toBeDisabled();
+        }
+    );
+
+    it(
+        "uses the start-run summary output folder when progress has no output folder",
+        async () => {
+            const user = userEvent.setup();
+
+            await renderCompletedResultsWithCustomProgress(user, {
+                ...progressResponse({ status: "completed" }),
+                outputFolder: null,
+            });
+
+            expect(screen.getByText("/tmp/egomodelkit-results")).toBeInTheDocument();
+        }
+    );
+
+    it(
+        "shows not available when no output folder is available in run or progress responses",
+        async () => {
+            const user = userEvent.setup();
+
+            const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input);
+
+                if (url === "/api/select-output-folder") {
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                    };
+                }
+
+                if (url === "/api/runs") {
+                    const response = startRunResponse();
+
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            ...response,
+                            summary: {
+                                ...response.summary,
+                                outputFolder: undefined,
+                            },
+                        }),
+                    };
+                }
+
+                if (url === "/api/runs/run-1/progress") {
+                    return {
+                        ok: true,
+                        status: 200,
+                        json: async () => ({
+                            ...progressResponse({ status: "completed" }),
+                            outputFolder: undefined,
+                        }),
+                    };
+                }
+
+                throw new Error(`Unexpected fetch call: ${url}`);
+            });
+
+            vi.stubGlobal("fetch", fetchMock);
+
+            await navigateToOutputStep(user);
+            await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+            await waitFor(() => {
+                expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+            });
+
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+            await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+            expect(
+                await screen.findByRole("heading", { name: "Run completed" }),
+            ).toBeInTheDocument();
+
+            expect(screen.getByText("Not available")).toBeInTheDocument();
+        }
+    );
 });

@@ -13,6 +13,7 @@ import {
     type ChangeEvent,
     type DragEvent,
     type RefObject,
+    useEffect,
     useRef, 
     useState 
 } from "react";
@@ -22,7 +23,8 @@ type Step =
     | "select-model" 
     | "choose-input" 
     | "choose-output"
-    | "review";
+    | "review"
+    | "results";
 
 type ReviewMode = "ready" | "dry-run-complete" | "running";
 
@@ -42,6 +44,12 @@ type ModelInfo = {
 
 type SelectOutputFolderResponse = {
     outputRoot: string;
+};
+
+type OpenOutputFolderResponse = {
+    opened: boolean;
+    runId: string;
+    outputFolder: string;
 };
 
 type OutputPreviewFile = {
@@ -90,6 +98,15 @@ type ProgressEvent = {
     displayText: string;
 };
 
+type ProgressResponse = {
+    runId: string;
+    status: GuiRunStatus;
+    errorMessage: string | null;
+    outputFolder: string;
+    events: ProgressEvent[];
+    outputPreview: OutputPreview;
+};
+
 const HAND_OBJECT_MODEL_ID = "hand-object-contact";
 const ADL_MODEL_ID = "adl-recognition";
 
@@ -116,6 +133,7 @@ const STEPS: Array<{ id: Exclude<Step, "welcome">; label: string }> = [
     { id: "choose-input", label: "Choose input" },
     { id: "choose-output", label: "Choose output" },
     { id: "review", label: "Review and run" },
+    { id: "results", label: "Results" }
 ]
 
 const buttonBaseClass =
@@ -151,7 +169,8 @@ export function App() {
     const [isBusy, setIsBusy] = useState<boolean>(false);
     const [reviewMode, setReviewMode] = useState<ReviewMode>("ready");
     const [runId, setRunId] = useState<string>("");
-    const [progressEvents, setProgressEvents] = useState<ProgressEvent[]>([]);
+    const [progress, setProgress] = useState<ProgressResponse | null>(null);
+    const [resultSummary, setResultSummary] = useState<RunSummary | null>(null);
 
     const selectedModel =
         DEFAULT_MODELS.find((model) => model.id === modelId) ?? DEFAULT_MODELS[0];
@@ -192,7 +211,8 @@ export function App() {
     function clearReviewState() {
         setReviewMode("ready");
         setRunId("");
-        setProgressEvents([]);
+        setProgress(null);
+        setResultSummary(null);
     }
 
     function handleFilesChange(event: ChangeEvent<HTMLInputElement>) {
@@ -252,6 +272,25 @@ export function App() {
         }
     }
 
+    async function openOutputFolder() {
+        try {
+            setIsBusy(true);
+            setErrorMessage("");
+
+            const body = await requestOpenOutputFolder({ runId });
+
+            if (body === null) {
+                setErrorMessage(
+                    "Opening output folders is not available in this environment."
+                );
+            }
+        } catch {
+            setErrorMessage("Unable to open output folder.")
+        } finally {
+            setIsBusy(false);
+        }
+    }
+
     async function runDryRun() {
         try {
             setIsBusy(true);
@@ -264,7 +303,8 @@ export function App() {
             });
 
             setRunId(body.runId);
-            setProgressEvents([]);
+            setResultSummary(body.summary);
+            setProgress(null);
             setReviewMode("dry-run-complete");
         } catch {
             setErrorMessage("Unable to complete dry run.");
@@ -286,7 +326,17 @@ export function App() {
             });
 
             setRunId(body.runId);
-            setProgressEvents(startingProgressEvents(modelId));
+            setResultSummary(body.summary);
+
+            setProgress({
+                runId: body.runId,
+                status: "running",
+                errorMessage: null,
+                outputFolder: body.summary.outputFolder,
+                events: startingProgressEvents(modelId),
+                outputPreview: body.outputPreview,
+            });
+
             setReviewMode("running");
         } catch {
             setErrorMessage("Unable to start model run.");
@@ -295,6 +345,44 @@ export function App() {
             setIsBusy(false);
         }
     }
+
+    useEffect(() => {
+        if (reviewMode !== "running" || runId.length === 0) {
+            return;
+        }
+
+        let isMounted = true;
+
+        async function pollProgress() {
+            try {
+                const body = await requestProgress(runId);
+
+                if (!isMounted) {
+                    return;
+                }
+
+                setProgress(body);
+
+                if (body.status === "completed" || body.status === "failed") {
+                    setReviewMode("ready");
+                    setStep("results");
+                }
+            } catch {
+                if (isMounted) {
+                    setErrorMessage("Unable to refresh run progress.");
+                }
+            }
+        }
+
+        void pollProgress();
+
+        const intervalId = window.setInterval(pollProgress, 1000);
+
+        return () => {
+            isMounted = false;
+            window.clearInterval(intervalId);
+        };
+    }, [reviewMode, runId]);
 
     return (
         <div className="min-h-screen bg-egm-bg text-black">
@@ -375,18 +463,29 @@ export function App() {
                                     onBack={() => setStep("choose-input")}
                                     onContinue={() => setStep("review")}
                                 />
-                            ) : (
+                            ) : step === "review" ? (
                                 <ReviewScreen
                                     selectedModel={selectedModel}
                                     files={files}
                                     outputRoot={outputRoot}
                                     reviewMode={reviewMode}
-                                    progressEvents={progressEvents}
+                                    progress={progress}
                                     runId={runId}
                                     isBusy={isBusy}
                                     onBack={() => setStep("choose-output")}
                                     onDryRun={runDryRun}
                                     onRun={startRun}
+                                />
+                            ) : (
+                                <ResultsScreen
+                                    selectedModel={selectedModel}
+                                    files={files}
+                                    runId={runId}
+                                    resultSummary={resultSummary}
+                                    progress={progress}
+                                    isBusy={isBusy}
+                                    onOpenOutputFolder={openOutputFolder}
+                                    onStartNewRun={startNewRun}
                                 />
                             )}
                         </section>
@@ -668,6 +767,30 @@ async function requestNativeOutputFolder(): Promise<SelectOutputFolderResponse |
     return (await response.json()) as SelectOutputFolderResponse;
 }
 
+async function requestOpenOutputFolder({
+    runId,
+} : {
+    runId: string;
+}) : Promise<OpenOutputFolderResponse | null> {
+    const response = await fetch("/api/open-output-folder", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ runId }),
+    });
+
+    if ([404, 405].includes(response.status)) {
+        return null;
+    }
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}.`);
+    }
+
+    return (await response.json()) as OpenOutputFolderResponse;
+}
+
 function startingProgressEvents(modelId: string): ProgressEvent[] {
     if (modelId === HAND_OBJECT_MODEL_ID) {
         return [
@@ -820,20 +943,11 @@ function ChooseInputScreen({
                 <>
                     <div
                         className="
-                            mt-6 rounded-2xl border border-egm-card-border bg-white
-                            px-6 py-4 text-base text-egm-body-copy
+                            mt-6 rounded-2xl border border-egm-card-border 
+                            bg-egm-success-soft px-6 py-4 text-base text-egm-body-copy
                         "
                     >
                         Selected: {inputLabelFromFiles(files)}
-                    </div>
-
-                    <div
-                        className="
-                            mt-4 rounded-2xl bg-egm-success-soft px-6 py-4
-                            text-base text-egm-body-copy
-                        "
-                    >
-                        Input selected.
                     </div>
                 </>
             )}
@@ -988,7 +1102,7 @@ function ReviewScreen({
     files,
     outputRoot,
     reviewMode,
-    progressEvents,
+    progress,
     runId,
     isBusy,
     onBack,
@@ -999,7 +1113,7 @@ function ReviewScreen({
     files: File[];
     outputRoot: string;
     reviewMode: ReviewMode;
-    progressEvents: ProgressEvent[];
+    progress: ProgressResponse | null;
     runId: string;
     isBusy: boolean;
     onBack: () => void;
@@ -1038,7 +1152,10 @@ function ReviewScreen({
             ) : null}
 
             {reviewMode === "running" ? (
-                <RunningPanel progressEvents={progressEvents} runId={runId} />
+                <RunningPanel 
+                    events={progress?.events ?? []} 
+                    runId={runId} 
+                />
             ) : null}
 
             <div 
@@ -1099,21 +1216,32 @@ function SummaryPanel({
             >
                 <h2 className="text-xl font-normal leading-none text-black">Summary</h2>
 
-                <dl className="mt-6 grid gap-4 sm:grid-cols-[180px_minmax(0,1fr)]">
-                    <dt>Model:</dt>
-                    <dd className="m-0 font-semibold text-egm-strong-copy text-right">
+                <dl className="mt-6 grid gap-y-4 sm:grid-cols-[180px_minmax(0,1fr)]">
+                    <dt className="border-b border-egm-list-border pb-2">Model:</dt>
+                    <dd 
+                        className="
+                            m-0 font-semibold text-egm-strong-copy text-right border-b 
+                            border-egm-list-border pb-2
+                        "
+                    >
                         {selectedModel.name}
                     </dd>
 
-                    <dt>Input:</dt>
-                    <dd className="m-0 font-semibold text-egm-strong-copy text-right">
+                    <dt className="border-b border-egm-list-border pb-2">Input:</dt>
+                    <dd 
+                        className="
+                            m-0 font-semibold text-egm-strong-copy text-right border-b 
+                            border-egm-list-border pb-2
+                        "
+                    >
                         {inputLabel}
                     </dd>
 
-                    <dt>Output folder:</dt>
+                    <dt className="border-b border-egm-list-border pb-2">Output folder:</dt>
                     <dd 
                         className="
                             m-0 break-words font-semibold text-egm-strong-copy text-right
+                            border-b border-egm-list-border pb-2
                         "   
                     >
                         {outputRoot}
@@ -1197,55 +1325,297 @@ function DryRunCompletePanel({ runId } : { runId: string; }) {
     )
 }
 
-function RunningPanel({ 
-    progressEvents, 
+function RunningPanel({
+    events, 
     runId, 
-} : { 
-    progressEvents: ProgressEvent[];
+} : {
+    events: ProgressEvent[];
     runId: string;
 }) {
-    const percent = Math.min(92, progressEvents.length * 20);
+    const percent = progressPercentage(events);
     
     return (
-        <div
-            className="
-                mt-6 grid grid-cols-[28px_minmax(0,1fr)_28px] gap-x-4 rounded-2xl border 
-                border-egm-card-border bg-white px-6 py-7
-            "
-        >
-            <span 
-                aria-hidden="true"
+        <>
+            <div
                 className="
-                    col-start-1 row-start-1 h-7 w-7 rounded-full border-[3px] 
-                    border-egm-green-soft border-t-egm-green animate-egm-spin
+                    mt-6 grid grid-cols-[28px_minmax(0,1fr)_28px] gap-x-4 rounded-2xl border 
+                    border-egm-card-border bg-white px-6 py-7
                 "
-            />
-
-            <div className="col-start-2 min-w-0">
-                <h2 className="text-2xl font-normal leading-none">Running model...</h2>
-
-                <p className="mt-4 text-base leading-6 text-egm-secondary-copy">
-                    Run ID: {runId}
-                </p>
-                
-                <ul className="mt-6 space-y-1 text-base leading-6 text-egm-body-copy">
-                    {progressEvents.map((event, index) => (
-                        <li key={`${event.stage}-${index}`}>{event.displayText}</li>
-                    ))}
-                </ul>
-
-                <p className="mt-6 text-sm leading-6 text-egm-body-copy">
-                    Overall progress estimate
-                </p>
-
-                <div 
+            >
+                <span 
+                    aria-hidden="true"
                     className="
-                        mt-1 h-2.5 overflow-hidden rounded-full bg-egm-progress-track
+                        col-start-1 row-start-1 h-7 w-7 rounded-full border-[3px] 
+                        border-egm-green-soft border-t-egm-green animate-egm-spin
                     "
-                >
-                    <div className="h-full bg-egm-green" style={{ width: `${percent}%` }} />
+                />
+
+                <div className="col-start-2 min-w-0">
+                    <h2 className="text-2xl font-normal leading-none">Running model...</h2>
+
+                    <p className="mt-4 text-base leading-6 text-egm-secondary-copy">
+                        Run ID: {runId}
+                    </p>
+                    
+                    <ul 
+                        aria-label="Run progress log"
+                        className="
+                            mt-6 max-h-40 space-y-1 overflow-y-auto rounded-xl bg-egm-tree-bg
+                            px-4 py-3 text-base leading-6  text-egm-body-copy
+                        "
+                        role="log"
+                    >
+                        {events.map((event, index) => (
+                            <li key={`${event.stage}-${index}`}>{event.displayText}</li>
+                        ))}
+                    </ul>
+
+                    <p className="mt-6 text-sm leading-6 text-egm-body-copy">
+                        Overall progress estimate
+                    </p>
+
+                    <div 
+                        className="
+                            mt-1 h-2.5 overflow-hidden rounded-full bg-egm-progress-track
+                        "
+                    >
+                        <div 
+                            className="h-full bg-egm-green" 
+                            data-testid="progress-bar-fill"
+                            style={{ width: `${percent}%` }} 
+                        />
+                    </div>
                 </div>
             </div>
-        </div>
+
+            <p className="mt-3 text-base text-egm-body-copy">
+                    This may take several minutes. Please keep this window open.
+            </p>
+        </>
     )
+}
+
+function ResultsScreen({
+    selectedModel,
+    files,
+    runId,
+    resultSummary,
+    progress,
+    isBusy,
+    onOpenOutputFolder,
+    onStartNewRun,
+} : {
+    selectedModel: ModelInfo;
+    files: File[];
+    runId: string;
+    resultSummary: RunSummary | null;
+    progress: ProgressResponse | null;
+    isBusy: boolean;
+    onOpenOutputFolder: () => void;
+    onStartNewRun: () => void;
+}) {
+    const failed = progress?.status === "failed";
+    
+    return (
+        <>
+            <PageHeading 
+                title={failed ? "Needs attention" : "Run completed"}
+                subtitle={
+                    failed
+                        ? "EgoModelKit could not complete the run."
+                        : "Your results were saved successfully."
+                }
+            />
+
+            <ResultsScreenSummaryPanel 
+                selectedModel={selectedModel}
+                files={files}
+                runId={runId}
+                resultSummary={resultSummary}
+                progress={progress}
+            />
+
+            <div 
+                className="
+                    sticky bottom-0 z-10 mt-auto flex flex-wrap justify-center gap-4 
+                    bg-egm-bg pt-8 pb-4
+                "
+            >
+                <button 
+                    className={primaryButtonClass}
+                    disabled={isBusy || runId.length === 0}
+                    onClick={onOpenOutputFolder}
+                    type="button"
+                >
+                    <Folder aria-hidden="true" />
+                    Open Output Folder
+                </button>
+
+                <button 
+                    className={secondaryButtonClass} 
+                    onClick={onStartNewRun} 
+                    type="button"
+                >
+                    Start New Run
+                </button>
+
+                <button className={secondaryButtonClass} disabled type="button">
+                    View Output Preview
+                </button>
+            </div>
+        </>
+    )
+}
+
+function ResultsScreenSummaryPanel({
+    selectedModel,
+    files,
+    runId,
+    resultSummary,
+    progress,
+} : {
+    selectedModel: ModelInfo;
+    files: File[];
+    runId: string;
+    resultSummary: RunSummary | null;
+    progress: ProgressResponse | null;
+}) {
+    const failed = progress?.status === "failed";
+    const statusLabel = failed ? "Failed" : "Completed";
+
+    const outputFolder = 
+        progress?.outputFolder ?? resultSummary?.outputFolder ?? "Not available";
+
+    const ResultIcon = failed ? Info : CircleCheck;
+
+    return (
+        <div
+            className={[
+                "mt-8 rounded-2xl border px-6 py-7 text-base",
+                failed
+                    ? "border-egm-danger-border bg-egm-danger-soft text-egm-danger"
+                    : "border-egm-card-border bg-egm-success-soft text-egm-body-copy"
+            ].join(" ")}
+        >
+            <div className="flex items-start">
+                <ResultIcon 
+                    aria-hidden="true"
+                    className={failed ? "mr-4 text-egm-danger" : "mr-4 text-egm-green"}
+                    size={34}
+                    strokeWidth={1.8}
+                />
+
+                <div className="min-w-0 flex-1">
+                    <h2 className="text-2xl font-normal leading-none text-black">
+                        {failed ? "Run could not be completed" : "Completed successfully"}
+                    </h2>
+
+                    {failed && progress?.errorMessage ? (
+                        <p className="mt-4 leading-6">{progress.errorMessage}</p>
+                    ) : null}
+
+                    <dl 
+                        className="
+                            mt-6 grid sm:gap-y-3 sm:grid-cols-[180px_minmax(0,1fr)]
+                        "
+                    >
+                        <dt className="border-b pb-2 border-egm-list-border">Model:</dt>
+                        <dd 
+                            className="
+                                m-0 pb-2 text-right font-semibold text-egm-strong-copy 
+                                border-b border-egm-list-border
+                            "
+                        >
+                            {selectedModel.name}
+                        </dd>
+
+                        <dt className="border-b pb-2 border-egm-list-border">Input:</dt>
+                        <dd 
+                            className="
+                                m-0 pb-2 text-right font-semibold text-egm-strong-copy 
+                                border-b border-egm-list-border
+                            "
+                        >
+                            {inputLabelFromFiles(files)}
+                        </dd>
+
+                        <dt className="border-b pb-2 border-egm-list-border">
+                            Output folder:
+                        </dt>
+                        <dd 
+                            className="
+                                m-0 pb-2 text-right break-words font-semibold 
+                                text-egm-strong-copy border-b border-egm-list-border
+                            "
+                        >
+                            {outputFolder}
+                        </dd>
+
+                        <dt className="border-b pb-2 border-egm-list-border">Run ID:</dt>
+                        <dd 
+                            className="
+                                m-0 pb-2 text-right font-semibold text-egm-strong-copy 
+                                border-b border-egm-list-border
+                            "
+                        >
+                            {runId}
+                        </dd>
+
+                        <dt className="border-b pb-2 border-egm-list-border">
+                            Running mode:
+                        </dt>
+                        <dd 
+                            className="
+                                m-0 pb-2 text-right font-semibold text-egm-strong-copy 
+                                border-b border-egm-list-border
+                            "
+                        >
+                            Local
+                        </dd>
+
+                        <dt>Status:</dt>
+                        <dd className={[
+                            "m-0 text-right font-semibold",
+                            failed ? "text-egm-danger" : "text-egm-green",
+                        ].join(" ")}>
+                            {statusLabel}
+                        </dd>
+                    </dl>
+                </div>
+            </div>
+        </div>   
+    )
+}
+
+async function requestProgress(runId: string): Promise<ProgressResponse> {
+    const response = await fetch(`/api/runs/${encodeURIComponent(runId)}/progress`);
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}.`);
+    }
+
+    return (await response.json()) as ProgressResponse;
+}
+
+function progressPercentage(events: ProgressEvent[]): number {
+    const eventWithTotal = [...events]
+        .reverse()
+        .find(
+            (event) =>
+                typeof event.current === "number" &&
+                typeof event.total === "number" &&
+                event.total > 0,
+        )
+    
+    const current = eventWithTotal?.current;
+    const total = eventWithTotal?.total;
+
+    if (typeof current !== "number" || typeof total !== "number" || total <= 0) {
+        return events.length > 0 ? 8 : 0;
+    }
+
+    return Math.max(
+        0,
+        Math.min(100,Math.round((current / total) * 100)),
+    );
 }
