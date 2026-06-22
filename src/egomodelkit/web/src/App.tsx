@@ -42,6 +42,10 @@ type ModelInfo = {
     outputLabel: string;
 };
 
+type ModelsResponse = {
+    models: ModelInfo[];
+}
+
 type SelectOutputFolderResponse = {
     outputRoot: string;
 };
@@ -110,31 +114,13 @@ type ProgressResponse = {
 const HAND_OBJECT_MODEL_ID = "hand-object-contact";
 const ADL_MODEL_ID = "adl-recognition";
 
-const DEFAULT_MODELS: ModelInfo[] = [
-    {
-        id: HAND_OBJECT_MODEL_ID,
-        name: "Hand-object contact",
-        description: "Detects hands, object, and hand-object contact in images.",
-        acceptedInputLabel: "Input: image folder or image file",
-        outputLabel: "Output: detection visualizations and structured results",
-    },
-    {
-        id: ADL_MODEL_ID,
-        name: "Activity recognition (ADL)",
-        description: 
-            "Processes egocentric video clips for activity of daily living (ADL) recognition.",
-        acceptedInputLabel: "Input: MP4 video or video folder",
-        outputLabel: "Output: predictions and processed frame-level files"
-    }
-]
-
 const STEPS: Array<{ id: Exclude<Step, "welcome">; label: string }> = [
     { id: "select-model", label: "Select model" },
     { id: "choose-input", label: "Choose input" },
     { id: "choose-output", label: "Choose output" },
     { id: "review", label: "Review and run" },
-    { id: "results", label: "Results" }
-]
+    { id: "results", label: "Results" },
+];
 
 const buttonBaseClass =
     "inline-flex min-h-12 min-w-[132px] items-center justify-center gap-2 " +
@@ -145,7 +131,7 @@ const buttonBaseClass =
 const primaryButtonClass =
     `${buttonBaseClass} border border-egm-green bg-egm-green text-white text-lg ` +
     "hover:bg-egm-green-dark disabled:border-egm-disabled " +
-    "disabled:bg-egm-disabled disabled:text-white"
+    "disabled:bg-egm-disabled disabled:text-white";
 
 const secondaryButtonClass =
     `${buttonBaseClass} border border-egm-border-strong bg-white text-black text-lg ` +
@@ -160,6 +146,9 @@ const backButtonClass =
 
 export function App() {
     const [step, setStep] = useState<Step>("welcome");
+    const [models, setModels] = useState<ModelInfo[]>([]);
+    const [modelsLoading, setModelsLoading] = useState<boolean>(true);
+    const [modelsError, setModelsError] = useState<string>("");
     const [modelId, setModelId] = useState<string>("");
     const [files, setFiles] = useState<File[]>([]);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -172,8 +161,7 @@ export function App() {
     const [progress, setProgress] = useState<ProgressResponse | null>(null);
     const [resultSummary, setResultSummary] = useState<RunSummary | null>(null);
 
-    const selectedModel =
-        DEFAULT_MODELS.find((model) => model.id === modelId) ?? DEFAULT_MODELS[0];
+    const selectedModel = models.find((model) => model.id === modelId) ?? null;
 
     function startNewRun() {
         setModelId("");
@@ -214,6 +202,39 @@ export function App() {
         setProgress(null);
         setResultSummary(null);
     }
+
+    useEffect(() => {
+        let isMounted = true;
+
+        async function loadModels() {
+            try {
+                setModelsLoading(true);
+                setModelsError("");
+
+                const nextModels = await requestModels();
+
+                if (!isMounted) {
+                    return;
+                }
+
+                setModels(nextModels);
+            } catch {
+                if (isMounted) {
+                    setModelsError("Unable to load available models.");
+                }
+            } finally {
+                if (isMounted) {
+                    setModelsLoading(false);
+                }
+            }
+        }
+
+        void loadModels();
+
+        return () => {
+            isMounted = false;
+        };
+    }, []);
 
     function handleFilesChange(event: ChangeEvent<HTMLInputElement>) {
         const selectedFiles = event.currentTarget.files
@@ -434,14 +455,16 @@ export function App() {
                             
                             {step === "select-model" ? (
                                 <SelectModelScreen
-                                    models={DEFAULT_MODELS}
+                                    models={models}
+                                    modelsLoading={modelsLoading}
+                                    modelsError={modelsError}
                                     selectedModelId={modelId}
                                     onSelectModel={selectModel}
                                     canContinue={modelId.length > 0}
                                     onBack={() => setStep("welcome")}
                                     onContinue={() => setStep("choose-input")}
                                 />
-                            ) : step === "choose-input" ? (
+                            ) : step === "choose-input" && selectedModel !== null ? (
                                 <ChooseInputScreen 
                                     selectedModel={selectedModel}
                                     files={files}
@@ -463,7 +486,7 @@ export function App() {
                                     onBack={() => setStep("choose-input")}
                                     onContinue={() => setStep("review")}
                                 />
-                            ) : step === "review" ? (
+                            ) : step === "review" && selectedModel !== null ? (
                                 <ReviewScreen
                                     selectedModel={selectedModel}
                                     files={files}
@@ -476,7 +499,7 @@ export function App() {
                                     onDryRun={runDryRun}
                                     onRun={startRun}
                                 />
-                            ) : (
+                            ) : step === "results" && selectedModel !== null ? (
                                 <ResultsScreen
                                     selectedModel={selectedModel}
                                     files={files}
@@ -486,6 +509,17 @@ export function App() {
                                     isBusy={isBusy}
                                     onOpenOutputFolder={openOutputFolder}
                                     onStartNewRun={startNewRun}
+                                />
+                            ) : (
+                                <SelectModelScreen
+                                    models={models}
+                                    modelsLoading={modelsLoading}
+                                    modelsError={modelsError}
+                                    selectedModelId={modelId}
+                                    onSelectModel={selectModel}
+                                    canContinue={modelId.length > 0}
+                                    onBack={() => setStep("welcome")}
+                                    onContinue={() => setStep("choose-input")}
                                 />
                             )}
                         </section>
@@ -566,6 +600,8 @@ function WelcomeScreen({ onStart }: { onStart: () => void }) {
 
 function SelectModelScreen({
     models,
+    modelsLoading,
+    modelsError,
     selectedModelId,
     onSelectModel,
     canContinue,
@@ -573,6 +609,8 @@ function SelectModelScreen({
     onContinue,
 }: {
     models: ModelInfo[];
+    modelsLoading: boolean;
+    modelsError: string;
     selectedModelId: string;
     onSelectModel: (modelId: string) => void;
     canContinue: boolean;
@@ -586,66 +624,115 @@ function SelectModelScreen({
                 subtitle="Choose the workflow you want to run."
             />
 
-            <div
-                aria-label="Available models"
-                className="mt-8 flex flex-col gap-4"
-                role="group"
-            >
-                {models.map((model) => {
-                    const selected = model.id === selectedModelId;
+            {modelsLoading ? (
+                <div
+                    className="
+                        rounded-2xl border border-egm-card-border bg-white
+                        px-5 py-4 text-base text-egm-body-copy
+                    "
+                    role="status"
+                >
+                    Loading available models...
+                </div>
+            ) : modelsError ? (
+                <div
+                    className="
+                        mt-8 rounded-xl border border-egm-danger-border
+                        bg-egm-danger-soft px-5 py-4 text-base text-egm-danger
+                    "
+                    role="alert"
+                >
+                    {modelsError}
+                </div>
+            ) : models.length === 0 ? (
+                <div
+                    className="
+                        mt-8 rounded-2xl border border-egm-card-border bg-white
+                        px-5 py-4 text-base text-egm-body-copy
+                    "
+                >
+                    No models are available from the local backend.
+                </div>
+            ) : (
+                <div
+                    aria-label="Available models"
+                    className="mt-8 flex flex-col gap-4"
+                    role="group"
+                >
+                    {models.map((model) => {
+                        const selected = model.id === selectedModelId;
 
-                    return (
-                        <button
-                            key={model.id}
-                            aria-pressed={selected}
-                            className={[
-                                "flex min-h-[168px] w-full items-start rounded-2xl",
-                                "px-6 py-6 text-left transition-colors",
-                                selected
-                                    ? "border-2 border-black bg-egm-green-tint"
-                                    : "border border-egm-card-border hover:bg-egm-hover bg-white"
-                            ].join(" ")}
-                            type="button"
-                            onClick={() => onSelectModel(model.id)}
-                        >
-                            <span>
-                                <span
-                                    className={[
-                                        "flex h-7 w-7 shrink-0 items-center",
-                                        "justify-center rounded-full border-[1px]",
-                                        selected
-                                            ? "bg-egm-green"
-                                            : "bg-white"
-                                    ].join(" ")}
-                                >
-                                    <span className="h-4 w-4 rounded-full bg-white" />
+                        return (
+                            <button
+                                key={model.id}
+                                aria-pressed={selected}
+                                className={[
+                                    "flex min-h-[168px] w-full items-start rounded-2xl",
+                                    "px-6 py-6 text-left transition-colors",
+                                    selected
+                                        ? `
+                                            border-2 border-black bg-egm-green-tint
+                                        `
+                                        : `
+                                            border border-egm-card-border 
+                                            hover:bg-egm-hover bg-white
+                                        ` 
+                                ].join(" ")}
+                                type="button"
+                                onClick={() => onSelectModel(model.id)}
+                            >
+                                <span>
+                                    <span
+                                        className={[
+                                            "flex h-7 w-7 shrink-0 items-center",
+                                            "justify-center rounded-full border-[1px]",
+                                            selected
+                                                ? "bg-egm-green"
+                                                : "bg-white"
+                                        ].join(" ")}
+                                    >
+                                        <span 
+                                            className="
+                                                h-4 w-4 rounded-full bg-white
+                                            " 
+                                        />
+                                    </span>
                                 </span>
-                            </span>
-                            <span className="ml-5 flex flex-col">
-                                <span className="text-2xl font-medium leading-none">
-                                    {model.name}
-                                </span>
+                                <span className="ml-5 flex flex-col">
+                                    <span className="text-2xl font-medium leading-none">
+                                        {model.name}
+                                    </span>
 
-                                <span className="mt-4 text-base leading-6 text-egm-body-copy">
-                                    {model.description}
-                                </span>
+                                    <span 
+                                        className="
+                                            mt-4 text-base leading-6 text-egm-body-copy
+                                        "
+                                    >
+                                        {model.description}
+                                    </span>
 
-                                <span className="mt-6 text-base leading-6 text-egm-secondary-copy">
-                                    {model.acceptedInputLabel}
-                                    <br />
-                                    {model.outputLabel}
+                                    <span 
+                                        className="
+                                            mt-6 text-base leading-6 
+                                            text-egm-secondary-copy
+                                            "
+                                        >
+                                        {modelInputLabel(model)}
+                                        <br />
+                                        {modelOutputLabel(model)}
+                                    </span>
                                 </span>
-                            </span>
-                        </button>
-                    )
-                })}
-            </div>
+                            </button>
+                        )
+                    })}
+                </div>
+            )}
 
             <FooterActions
                 onBack={onBack}
                 onContinue={onContinue}
                 continueLabel="Continue"
-                continueDisabled={!canContinue}
+                continueDisabled={!canContinue || modelsLoading || modelsError.length > 0}
             />
         </>
     );
@@ -751,6 +838,18 @@ function inputLabelFromFiles(files: File[]): string {
     return `${files.length} files`;
 }
 
+async function requestModels(): Promise<ModelInfo[]> {
+    const response = await fetch("/api/models");
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}.`);
+    }
+
+    const body = (await response.json()) as ModelsResponse;
+
+    return body.models;
+}
+
 async function requestNativeOutputFolder(): Promise<SelectOutputFolderResponse | null> {
     const response = await fetch("/api/select-output-folder", {
         method: "POST",
@@ -789,6 +888,18 @@ async function requestOpenOutputFolder({
     }
 
     return (await response.json()) as OpenOutputFolderResponse;
+}
+
+function modelInputLabel(model: ModelInfo): string {
+    return withLabelPrefix("Input", model.acceptedInputLabel);
+}
+
+function modelOutputLabel(model: ModelInfo): string {
+    return withLabelPrefix("Output", model.outputLabel);
+}
+
+function withLabelPrefix(prefix: string, value: string): string {
+    return value.startsWith(`${prefix}:`) ? value : `${prefix}: ${value}`;
 }
 
 function startingProgressEvents(modelId: string): ProgressEvent[] {
@@ -876,10 +987,7 @@ function ChooseInputScreen({
     onBack: () => void;
     onContinue: () => void;
 }) {
-    const subtitle =
-        selectedModel.id === HAND_OBJECT_MODEL_ID
-            ? "Select an image or folder of images"
-            : "Select a video or folder of videos";
+    const subtitle = `Select ${selectedModel.acceptedInputLabel}`;
 
     return (
         <>
@@ -918,7 +1026,7 @@ function ChooseInputScreen({
                     type="button"
                     onClick={() => fileInputRef.current?.click()}
                 >
-                    Choose input files
+                    Choose input
                 </button>
 
                 <p className="mt-5 text-sm leading-6 text-egm-secondary-copy">

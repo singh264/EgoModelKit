@@ -142,7 +142,7 @@ def create_app(
                 {
                     "id": HAND_OBJECT_CONTACT_MODEL_ID,
                     "name": "Hand-object contact",
-                    "description": "Detect hands, objects, and hand-object contact in images.",
+                    "description": "Detects hands, objects, and hand-object contact in images.",
                     "acceptedInputLabel": "single image or folder of images",
                     "outputLabel": "detection visualizations and structured results",
                 },
@@ -150,8 +150,8 @@ def create_app(
                     "id": ADL_RECOGNITION_MODEL_ID,
                     "name": "Activity recognition (ADL)",
                     "description": (
-                        "Process egocentric video clips for "
-                        "activity of daily living (ADL) recognition"
+                        "Processes egocentric video clips for "
+                        "activity of daily living (ADL) recognition."
                     ),
                     "acceptedInputLabel": "single MP4 video or folder of MP4 videos",
                     "outputLabel": "predictions and processed frame-level files"

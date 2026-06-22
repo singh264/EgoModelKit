@@ -1,6 +1,6 @@
 import { act, createEvent, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 
@@ -31,6 +31,62 @@ function dropWithoutFileList(target: HTMLElement) {
     fireEvent(target, dropEvent);
 }
 
+function modelsResponse() {
+    return {
+        models: [
+            {
+                id: "hand-object-contact",
+                name: "Hand-object contact",
+                description: "Detects hands, objects, and hand-object contact in images.",
+                acceptedInputLabel: "an image or folder of images",
+                outputLabel: "detection visualizations and structured results",
+            },
+            {
+                id: "adl-recognition",
+                name: "Activity recognition (ADL)",
+                description:
+                    "Processes egocentric video clips for " +
+                    "activity of daily living (ADL) recognition.",
+                acceptedInputLabel: "a video or folder of videos",
+                outputLabel: "predictions and processed frame-level files",
+            },
+        ],
+    };
+}
+
+function okJson(body: unknown) {
+    return {
+        ok: true,
+        status: 200,
+        json: async () => body,
+    }
+}
+
+function stubFetchWithModels(
+    handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<unknown> =
+        async (input) => {
+            throw new Error(`Unexpected fetch call: ${String(input)}`);
+        },
+) {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+
+        if (url === "api/models" || url === "/api/models") {
+            return okJson(modelsResponse());
+        }
+
+        return handler(input, init);
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    return fetchMock;
+}
+
+beforeEach(() => {
+    stubFetchWithModels();
+});
+
 async function navigateToOutputStep(
     user: ReturnType<typeof userEvent.setup>,
     {
@@ -41,10 +97,18 @@ async function navigateToOutputStep(
         file?: File;
     } = {},
 ) {
+    const existingFetch = globalThis.fetch;
+
+    if (existingFetch && vi.isMockFunction(existingFetch)) {
+        stubFetchWithModels((input, init) => existingFetch(input, init));
+    } else {
+        stubFetchWithModels();
+    }
+
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Start New Run" }));
-    await user.click(screen.getByRole("button", { name: modelName }));
+    await user.click(await screen.findByRole("button", { name: modelName }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
     await user.upload(screen.getByLabelText("Choose input files"), file);
@@ -190,7 +254,7 @@ async function startRunWithProgressResponses(
         });
     }
 
-    vi.stubGlobal("fetch", fetchMock);
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
 
     await navigateToOutputStep(user);
 
@@ -198,7 +262,7 @@ async function startRunWithProgressResponses(
     await user.click(screen.getByRole("button", { name: "Continue" }));
     await user.click(screen.getByRole("button", { name: "Run Model" }));    
     
-    return fetchMock;
+    return wrappedFetchMock;
 }
 
 async function renderCompletedResultsWithFetchMock(
@@ -209,39 +273,42 @@ async function renderCompletedResultsWithFetchMock(
         json: () => Promise<unknown>;
     },
 ) {
-    const fetchMock = vi.fn(async (url: string) => {
-        if (url === "/api/select-output-folder") {
-            return {
-                ok: true,
-                status: 200,
-                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+    const fetchMock = vi.fn(
+        async (input: RequestInfo | URL, _init?: RequestInit) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                }
             }
-        }
 
-        if (url === "/api/runs") {
-            return {
-                ok: true,
-                status: 200,
-                json: async () => startRunResponse(),
+            if (url === "/api/runs") {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => startRunResponse(),
+                }
             }
-        }
 
-        if (url === "/api/runs/run-1/progress") {
-            return {
-                ok: true,
-                status: 200,
-                json: async () => progressResponse({ status: "completed" }),
-            };
-        }
+            if (url === "/api/runs/run-1/progress") {
+                return {
+                    ok: true,
+                    status: 200,
+                    json: async () => progressResponse({ status: "completed" }),
+                };
+            }
 
-        if (url === "/api/open-output-folder") {
-            return openOutputFolderResponse;
-        }
+            if (url === "/api/open-output-folder") {
+                return openOutputFolderResponse;
+            }
 
-        throw new Error(`Unexpected fetch call: ${url}`);
+            throw new Error(`Unexpected fetch call: ${url}`);
     });
 
-    vi.stubGlobal("fetch", fetchMock);
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
 
     await navigateToOutputStep(user);
     await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -257,7 +324,7 @@ async function renderCompletedResultsWithFetchMock(
         await screen.findByRole("heading", { name: "Run completed" })
     ).toBeInTheDocument();
 
-    return fetchMock;
+    return wrappedFetchMock;
 }
 
 async function renderCompletedResultsWithCustomProgress(
@@ -294,7 +361,7 @@ async function renderCompletedResultsWithCustomProgress(
         throw new Error(`Unexpected fetch call: ${url}`);
     });
 
-    vi.stubGlobal("fetch", fetchMock);
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
 
     await navigateToOutputStep(user);
     await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -310,7 +377,7 @@ async function renderCompletedResultsWithCustomProgress(
         await screen.findByRole("heading", { name: "Run completed" })
     ).toBeInTheDocument();
 
-    return fetchMock;
+    return wrappedFetchMock;
 }
 
 describe("App", () => {
@@ -387,7 +454,7 @@ describe("App", () => {
         ).toHaveAttribute("aria-pressed", "false");
 
         expect(
-            screen.getByText("Detects hands, object, and hand-object contact in images."),
+            screen.getByText("Detects hands, objects, and hand-object contact in images."),
         ).toBeInTheDocument();
 
         expect(
@@ -408,6 +475,47 @@ describe("App", () => {
         expect(
             screen.getByText(/Output: predictions and processed frame-level files/),
         ).toBeInTheDocument();
+    });
+
+   it("does not duplicate input and output label prefixes from backend models", async () => {
+        const user = userEvent.setup();
+
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input);
+
+                if (url === "/api/models") {
+                    return okJson({
+                        models: [
+                            {
+                                id: "prefixed-model",
+                                name: "Prefixed model",
+                                description: "Uses labels already formatted by the backend.",
+                                acceptedInputLabel: "Input: prepared images",
+                                outputLabel: "Output: prepared results",
+                            },
+                        ],
+                    });
+                }
+
+                throw new Error(`Unexpected fetch call: ${url}`);
+            }),
+        );
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        expect(
+            await screen.findByRole("button", { name: /Prefixed model/ }),
+        ).toBeInTheDocument();
+
+        expect(screen.getByText(/Input: prepared images/)).toBeInTheDocument();
+        expect(screen.getByText(/Output: prepared results/)).toBeInTheDocument();
+
+        expect(screen.queryByText(/Input: Input:/)).not.toBeInTheDocument();
+        expect(screen.queryByText(/Output: Output:/)).not.toBeInTheDocument();
     });
 
     it("selects a model and enables continue", async () => {
@@ -449,8 +557,150 @@ describe("App", () => {
         expect(adlModel).toHaveAttribute("aria-pressed", "true");
     });
 
+    it("loads model choices from the backend model endpoint", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = stubFetchWithModels(async () => {
+            throw new Error("No other calls expected."); 
+        });
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        expect(
+            screen.getByRole("button", { name: /Hand-object contact/}),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByRole("button", { name: /Activity recognition \(ADL\)/ })
+        ).toBeInTheDocument();
+    });
+
+    it("shows a loading state while backend models are loading", async () => {
+        const user = userEvent.setup();
+
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(
+                () =>
+                    new Promise(() => {
+                        // keep pending
+                    }),
+            ),
+        );
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "Loading available models...",
+        );
+
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+   it("shows an empty model list message when the backend returns no models", async () => {
+        const user = userEvent.setup();
+
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input);
+
+                if (url === "/api/models") {
+                    return okJson({ models: [] });
+                }
+
+                throw new Error(`Unexpected fetch call: ${url}`);
+            }),
+        );
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        expect(
+            await screen.findByText("No models are available from the local backend."),
+        ).toBeInTheDocument();
+
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("shows a graceful error when backend models cannot be loaded", async () => {
+        const user = userEvent.setup();
+
+        vi.stubGlobal(
+            "fetch",
+            vi.fn(async () => ({
+                ok: false,
+                status: 500,
+                json: async() => ({}),
+            })),
+        );
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+            "Unable to load available models.",
+        );
+
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("ignores backend model responses after unmounting", async () => {
+        let resolveModels!: (response: ReturnType<typeof okJson>) => void;
+
+        const pendingModels = new Promise<ReturnType<typeof okJson>>((resolve) => {
+            resolveModels = resolve;
+        });
+
+        const fetchMock = vi.fn(() => pendingModels);
+
+        vi.stubGlobal("fetch", fetchMock);
+
+        const { unmount } = render(<App />);
+
+        unmount();
+
+        await act(async () => {
+            resolveModels(okJson(modelsResponse()));
+            await pendingModels;
+            await Promise.resolve();
+        });
+
+        expect(fetchMock).toHaveBeenCalledWith("/api/models");
+    });
+
+   it("ignores backend model errors after unmounting", async () => {
+        let rejectModels!: (reason?: unknown) => void;
+
+        const pendingModels = new Promise<ReturnType<typeof okJson>>((_, reject) => {
+            rejectModels = reject;
+        });
+
+        const fetchMock = vi.fn(() => pendingModels);
+
+        vi.stubGlobal("fetch", fetchMock);
+
+        const { unmount } = render(<App />);
+
+        unmount();
+
+        await act(async () => {
+            rejectModels(new Error("Model request failed."));
+            await pendingModels.catch(() => undefined);
+            await Promise.resolve();
+        });
+
+        expect(fetchMock).toHaveBeenCalledWith("/api/models");
+    });
+
     it("continues from hand-object model selection to an image input screen", async () => {
-        const user = userEvent.setup()
+        const user = userEvent.setup();
 
         render(<App />);
 
@@ -497,6 +747,58 @@ describe("App", () => {
 
         expect(screen.getByRole("button", {name: "Continue" })).toBeDisabled();
     });
+
+    it(
+        "uses the fallback model screen actions when the selected model is unavailable",
+        async () => {
+            const user = userEvent.setup();
+
+            const unavailableSelectedModelList = modelsResponse().models.slice(0, 1);
+
+            unavailableSelectedModelList.find = vi.fn(() => undefined);
+
+            vi.stubGlobal(
+                "fetch",
+                vi.fn(async (input: RequestInfo | URL) => {
+                    const url = String(input);
+
+                    if (url === "/api/models") {
+                        return okJson({
+                            models: unavailableSelectedModelList,
+                        });
+                    }
+
+                    throw new Error(`Unexpected fetch call: ${url}`);
+                }),
+            )
+
+            render(<App />);
+
+            await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+            await user.click(
+                await screen.findByRole("button", { name: /Hand-object contact/ })
+            );
+
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+
+            expect(
+                screen.getByRole("heading", { name: "Select a model" })
+            ).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+
+            expect(
+                screen.getByRole("heading", { name: "Select a model" })
+            ).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "Back" }));
+
+            expect(
+                screen.getByRole("heading", { name: "EgoModelKit" }),
+            ).toBeInTheDocument();
+        }
+    );
 
     it("selects one input file and enables continue", async () => {
         const user = userEvent.setup();
@@ -585,7 +887,7 @@ describe("App", () => {
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
-        await user.click(screen.getByRole("button", { name: "Choose input files" }));
+        await user.click(screen.getByRole("button", { name: "Choose input" }));
 
         expect(inputClickSpy).toHaveBeenCalledOnce();
 
@@ -943,14 +1245,14 @@ describe("App", () => {
                 json: async () => dryRunResponse(),
             });
 
-        vi.stubGlobal("fetch", fetchMock);
+        const wrappedFetchMock = stubFetchWithModels(fetchMock);
         
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Dry Run" }));
 
-        expect(fetchMock).toHaveBeenLastCalledWith(
+        expect(wrappedFetchMock).toHaveBeenLastCalledWith(
             "/api/dry-run",
             expect.objectContaining({
                 method: "POST",
@@ -958,7 +1260,7 @@ describe("App", () => {
             }),
         );
 
-        const dryRunRequest = fetchMock.mock.calls[1][1] as RequestInit;
+        const dryRunRequest = wrappedFetchMock.mock.calls[1][1] as RequestInit;
         const formData = dryRunRequest.body as FormData;
 
         expect(formData.get("modelId")).toBe("hand-object-contact");
@@ -990,7 +1292,7 @@ describe("App", () => {
                 json: async () => ({}),
             });
 
-        vi.stubGlobal("fetch", fetchMock);
+        const wrappedFetchMock = stubFetchWithModels(fetchMock);
 
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -1017,14 +1319,14 @@ describe("App", () => {
                 json: async () => startRunResponse(),
             });
 
-        vi.stubGlobal("fetch", fetchMock);
+        const wrappedFetchMock = stubFetchWithModels(fetchMock);
 
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Run Model" }));
     
-        expect(fetchMock).toHaveBeenCalledWith(
+        expect(wrappedFetchMock).toHaveBeenCalledWith(
             "/api/runs",
             expect.objectContaining({
                 method: "POST",
@@ -1064,7 +1366,7 @@ describe("App", () => {
                 json: async () => startRunResponse("adl-run-1"),
             });
 
-        vi.stubGlobal("fetch", fetchMock);
+        stubFetchWithModels(fetchMock);
         
         await navigateToOutputStep(user, {
             modelName: /Activity recognition \(ADL\)/,
@@ -1097,14 +1399,14 @@ describe("App", () => {
                 json: async () => ({}),
             });
 
-        vi.stubGlobal("fetch", fetchMock);
+        const wrappedFetchMock = stubFetchWithModels(fetchMock);
         
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Run Model" }));
 
-        expect(await screen.getByRole("alert")).toHaveTextContent(
+        expect(await screen.findByRole("alert")).toHaveTextContent(
             "Unable to start model run",
         );
 
@@ -1296,7 +1598,10 @@ describe("App", () => {
         expect(screen.getByText("/tmp/egomodelkit-results/run-1")).toBeInTheDocument();
         expect(screen.getByText("Completed")).toBeInTheDocument();
 
-        expect(fetchMock).toHaveBeenCalledWith("/api/runs/run-1/progress");
+        expect(fetchMock).toHaveBeenCalledWith(
+            "/api/runs/run-1/progress",
+            undefined
+        );
     });
 
     it("shows a graceful failed results screen when progress reports failure", async () => {
@@ -1355,7 +1660,7 @@ describe("App", () => {
                     json: async () => ({}),
                 });
             
-            vi.stubGlobal("fetch", fetchMock);
+            stubFetchWithModels(fetchMock);
 
             await navigateToOutputStep(user);
             await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -1413,7 +1718,7 @@ describe("App", () => {
             throw new Error(`Unexpected fetch call: ${url}`);
         });
 
-        vi.stubGlobal("fetch", fetchMock);
+        const wrappedFetchMock = stubFetchWithModels(fetchMock);
 
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -1429,7 +1734,10 @@ describe("App", () => {
             await screen.findByRole("heading", { name: "Run completed" })
         ).toBeInTheDocument();
 
-        expect(fetchMock).toHaveBeenCalledWith("/api/runs/run%201/progress");
+        expect(wrappedFetchMock).toHaveBeenCalledWith(
+            "/api/runs/run%201/progress",
+            undefined,
+        );
     });
 
     it(
@@ -1443,31 +1751,35 @@ describe("App", () => {
                 rejectProgress = reject;
             });
 
-            const fetchMock = vi.fn((url: string) => {
-                if (url === "/api/select-output-folder") {
-                    return Promise.resolve({
-                        ok: true,
-                        status: 200,
-                        json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
-                    });
+            const fetchMock = vi.fn(
+                (input: RequestInfo | URL, _init?: RequestInit) => {
+                    const url = String(input);
+
+                    if (url === "/api/select-output-folder") {
+                        return Promise.resolve({
+                            ok: true,
+                            status: 200,
+                            json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                        });
+                    }
+
+                    if (url === "/api/runs") {
+                        return Promise.resolve({
+                            ok: true,
+                            status: 200,
+                            json: async () => startRunResponse(),
+                        });
+                    }
+
+                    if (url === "/api/runs/run-1/progress") {
+                        return pendingProgressResponse;
+                    }
+
+                    return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
                 }
+            );
 
-                if (url === "/api/runs") {
-                    return Promise.resolve({
-                        ok: true,
-                        status: 200,
-                        json: async () => startRunResponse(),
-                    });
-                }
-
-                if (url === "/api/runs/run-1/progress") {
-                    return pendingProgressResponse;
-                }
-
-                return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
-            });
-
-            vi.stubGlobal("fetch", fetchMock);
+            stubFetchWithModels(fetchMock);
 
             await navigateToOutputStep(user);
             await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -1506,31 +1818,35 @@ describe("App", () => {
             resolveProgress = resolve;
         });
 
-        const fetchMock = vi.fn((url: string) => {
-            if (url === "/api/select-output-folder") {
-                return Promise.resolve({
-                    ok: true,
-                    status: 200,
-                    json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
-                });
-            }
-            
-            if (url === "/api/runs") {
-                return Promise.resolve({
-                    ok: true,
-                    status: 200,
-                    json: async () => startRunResponse(),
-                });
-            }
+        const fetchMock = vi.fn(
+            (input: RequestInfo | URL, _init?: RequestInit) => {
+                const url = String(input);
 
-            if (url === "/api/runs/run-1/progress") {
-                return pendingProgressResponse;
-            }
+                if (url === "/api/select-output-folder") {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+                    });
+                }
+                
+                if (url === "/api/runs") {
+                    return Promise.resolve({
+                        ok: true,
+                        status: 200,
+                        json: async () => startRunResponse(),
+                    });
+                }
 
-            return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
-        });
+                if (url === "/api/runs/run-1/progress") {
+                    return pendingProgressResponse;
+                }
+
+                return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
+            }
+        );
         
-        vi.stubGlobal("fetch", fetchMock);
+        stubFetchWithModels(fetchMock);
 
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -1719,7 +2035,7 @@ describe("App", () => {
                 throw new Error(`Unexpected fetch call: ${url}`);
             });
 
-            vi.stubGlobal("fetch", fetchMock);
+            stubFetchWithModels(fetchMock);
 
             await navigateToOutputStep(user);
             await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
