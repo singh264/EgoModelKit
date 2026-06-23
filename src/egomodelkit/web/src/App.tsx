@@ -39,6 +39,7 @@ type ModelInfo = {
     name: string;
     description: string;
     acceptedInputLabel: string;
+    supportedInputExtensions: string[];
     outputLabel: string;
 };
 
@@ -151,6 +152,7 @@ export function App() {
     const [modelsError, setModelsError] = useState<string>("");
     const [modelId, setModelId] = useState<string>("");
     const [files, setFiles] = useState<File[]>([]);
+    const [ignoredInputNames, setIgnoredInputNames] = useState<string[]>([]);
     const fileInputRef = useRef<HTMLInputElement | null>(null);
     const [outputRoot, setOutputRoot] = useState<string>("");
     const [privacyOpen, setPrivacyOpen] = useState<boolean>(false);
@@ -166,6 +168,7 @@ export function App() {
     function startNewRun() {
         setModelId("");
         setFiles([]);
+        setIgnoredInputNames([]);
         setOutputRoot("");
         setPrivacyOpen(false);
         setErrorMessage("");
@@ -177,6 +180,7 @@ export function App() {
     function goHome() {
         setModelId("");
         setFiles([]);
+        setIgnoredInputNames([]);
         setOutputRoot("");
         setPrivacyOpen(false);
         setErrorMessage("");
@@ -189,6 +193,7 @@ export function App() {
         if (nextModelId !== modelId) {
             setModelId(nextModelId);
             setFiles([]);
+            setIgnoredInputNames([]);
             setOutputRoot("");
             setPrivacyOpen(false);
             setErrorMessage("");
@@ -236,16 +241,32 @@ export function App() {
         };
     }, []);
 
+    function selectInput(nextFiles: File[]) {
+        const supportedInputExtensions = selectedModel?.supportedInputExtensions ?? [];
+
+        const supportedFiles = filterSupportedInputFiles(
+            nextFiles,
+            supportedInputExtensions,
+        );
+
+        const ignoredNames = nextFiles
+            .filter((file) => !isSupportedInputFile(file, supportedInputExtensions))
+            .map((file) => file.name);
+
+        setFiles(supportedFiles);
+        setIgnoredInputNames(ignoredNames);
+        setOutputRoot("");
+        setPrivacyOpen(false);
+        setErrorMessage("");
+        clearReviewState();
+    }
+
     function handleFilesChange(event: ChangeEvent<HTMLInputElement>) {
         const selectedFiles = event.currentTarget.files
             ? Array.from(event.currentTarget.files)
             : [];
         
-        setFiles(selectedFiles);
-        setOutputRoot("");
-        setPrivacyOpen(false);
-        setErrorMessage("");
-        clearReviewState();
+        selectInput(selectedFiles);
     }
 
     function handleDrop(event: DragEvent<HTMLDivElement>) {
@@ -259,11 +280,7 @@ export function App() {
             return;
         }
 
-        setFiles(droppedFiles);
-        setOutputRoot("");
-        setPrivacyOpen(false);
-        setErrorMessage("");
-        clearReviewState();
+        selectInput(droppedFiles);
     }
 
     async function chooseOutputFolder() {
@@ -468,6 +485,7 @@ export function App() {
                                 <ChooseInputScreen 
                                     selectedModel={selectedModel}
                                     files={files}
+                                    ignoredInputNames={ignoredInputNames}
                                     fileInputRef={fileInputRef}
                                     onFilesChange={handleFilesChange}
                                     onDrop={handleDrop}
@@ -831,11 +849,31 @@ function FooterActions({
 }
 
 function inputLabelFromFiles(files: File[]): string {
-    if (files.length === 1) {
-        return files[0].name;
-    }
+    return files.map((file) => file.name).join(", ");
+}
 
-    return `${files.length} files`;
+function filterSupportedInputFiles(
+    files: File[],
+    supportedInputExtensions: string[],
+): File[] {
+    return files.filter((file) =>
+        isSupportedInputFile(file, supportedInputExtensions),
+    );
+}
+
+function isSupportedInputFile(
+    file: File,
+    supportedInputExtensions: string[],
+): boolean {
+    const lowerCaseName = file.name.toLowerCase();
+
+    return supportedInputExtensions.some((extension) =>
+        lowerCaseName.endsWith(extension.toLowerCase()),
+    );
+}
+
+function supportedInputAccept(model: ModelInfo): string {
+    return model.supportedInputExtensions.join(",");
 }
 
 async function requestModels(): Promise<ModelInfo[]> {
@@ -900,6 +938,30 @@ function modelOutputLabel(model: ModelInfo): string {
 
 function withLabelPrefix(prefix: string, value: string): string {
     return value.startsWith(`${prefix}:`) ? value : `${prefix}: ${value}`;
+}
+
+function selectedLabelFromFiles(files: File[]): string {
+    if (files.length === 1) {
+        return "Selected: 1 file";
+    }
+
+    return `Selected: ${files.length} files`;
+}
+
+function ignoredLabelFromFileNames(fileNames: string[]): string {
+    if (fileNames.length === 1) {
+        return "Ignored: 1 file";
+    }
+
+    return `Ignored: ${fileNames.length} files`;
+}
+
+function ignorelDescriptionFromFileNames(fileNames: string[]): string {
+    if (fileNames.length === 1) {
+        return "This file is not supported by the selected model";
+    }
+
+    return "These files are not supported by the selected model";
 }
 
 function startingProgressEvents(modelId: string): ProgressEvent[] {
@@ -971,6 +1033,7 @@ async function postMultipart<T>(
 function ChooseInputScreen({
     selectedModel,
     files,
+    ignoredInputNames,
     fileInputRef,
     onFilesChange,
     onDrop,
@@ -980,6 +1043,7 @@ function ChooseInputScreen({
 } : {
     selectedModel: ModelInfo;
     files: File[];
+    ignoredInputNames: string[];
     fileInputRef: RefObject<HTMLInputElement | null>;
     onFilesChange: (event: ChangeEvent<HTMLInputElement>) => void;
     onDrop: (event: DragEvent<HTMLDivElement>) => void;
@@ -1030,16 +1094,17 @@ function ChooseInputScreen({
                 </button>
 
                 <p className="mt-5 text-sm leading-6 text-egm-secondary-copy">
-                    Supported files depend on the selected model.
+                    Supported files: {selectedModel.supportedInputExtensions.join(", ")}
                 </p>
 
                 <input
                     ref={fileInputRef}
+                    accept={supportedInputAccept(selectedModel)}
                     aria-label="Choose input files"
                     className="hidden"
                     multiple
                     type="file"
-                    onChange={onFilesChange} 
+                    onChange={onFilesChange}
                 />
             </div>
 
@@ -1048,17 +1113,46 @@ function ChooseInputScreen({
                     No input selected yet.
                 </p>
             ) : (
-                <>
-                    <div
-                        className="
-                            mt-6 rounded-2xl border border-egm-card-border 
-                            bg-egm-success-soft px-6 py-4 text-base text-egm-body-copy
-                        "
-                    >
-                        Selected: {inputLabelFromFiles(files)}
-                    </div>
-                </>
+                <div
+                    className="
+                        mt-6 rounded-2xl border border-egm-card-border 
+                        bg-egm-success-soft px-6 py-4 text-base text-egm-body-copy
+                    "
+                >
+                    <p className="font-semibold text-egm-strong-copy">
+                        {selectedLabelFromFiles(files)}
+                    </p>
+                    
+                    <ul className="mt-3 list-disc space-y-1 pl-5">
+                        {files.map((file, index) => (
+                            <li key={`${file.name}-${index}`}>{file.name}</li>
+                        ))}
+                    </ul>
+                </div>
             )}
+
+            {ignoredInputNames.length > 0 ? (
+                <div
+                    className="
+                        mt-4 rounded-2xl border border-egm-card-border bg-white
+                        px-6 py-4 text-base text-egm-body-copy
+                    "
+                >
+                    <p className="font-semibold text-egm-strong-copy">
+                        {ignoredLabelFromFileNames(ignoredInputNames)}
+                    </p>
+                    
+                    <p className="mt-2 text-sm leading-6 text-egm-secondary-copy">
+                        {ignorelDescriptionFromFileNames(ignoredInputNames)}
+                    </p>
+                    
+                    <ul className="mt-3 list-disc space-y-1 pl-5">
+                        {ignoredInputNames.map((fileName, index) => (
+                            <li key={`${fileName}-${index}`}>{fileName}</li>
+                        ))}
+                    </ul>
+                </div>
+            ) : null}
 
             <FooterActions
                 onBack={onBack}

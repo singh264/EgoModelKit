@@ -38,7 +38,8 @@ function modelsResponse() {
                 id: "hand-object-contact",
                 name: "Hand-object contact",
                 description: "Detects hands, objects, and hand-object contact in images.",
-                acceptedInputLabel: "an image or folder of images",
+                acceptedInputLabel: "an image or multiple images",
+                supportedInputExtensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"],
                 outputLabel: "detection visualizations and structured results",
             },
             {
@@ -47,7 +48,8 @@ function modelsResponse() {
                 description:
                     "Processes egocentric video clips for " +
                     "activity of daily living (ADL) recognition.",
-                acceptedInputLabel: "a video or folder of videos",
+                acceptedInputLabel: "a video or multiple videos",
+                supportedInputExtensions: [".mp4"],
                 outputLabel: "predictions and processed frame-level files",
             },
         ],
@@ -493,6 +495,7 @@ describe("App", () => {
                                 name: "Prefixed model",
                                 description: "Uses labels already formatted by the backend.",
                                 acceptedInputLabel: "Input: prepared images",
+                                supportedInputExtensions: [".jpg"],
                                 outputLabel: "Output: prepared results",
                             },
                         ],
@@ -713,7 +716,7 @@ describe("App", () => {
         ).toBeInTheDocument();
 
         expect(
-            screen.getByText("Select an image or folder of images"),
+            screen.getByText("Select an image or multiple images")
         ).toBeInTheDocument();
         
         expect(
@@ -738,11 +741,7 @@ describe("App", () => {
         ).toBeInTheDocument();
 
         expect(
-            screen.getByText("Select a video or folder of videos"),
-        ).toBeInTheDocument();
-        
-        expect(
-            screen.getByText("Select a video or folder of videos"),
+            screen.getByText("Select a video or multiple videos"),
         ).toBeInTheDocument();
 
         expect(screen.getByRole("button", {name: "Continue" })).toBeDisabled();
@@ -814,7 +813,8 @@ describe("App", () => {
             new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
         );
 
-        expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();   
     });
 
@@ -833,7 +833,188 @@ describe("App", () => {
         ]);
 
         expect(screen.getByText("Selected: 2 files")).toBeInTheDocument();
+        expect(screen.getByText("frame-1.jpg")).toBeInTheDocument();
+        expect(screen.getByText("frame-2.jpg")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it("filters unsupported files from hand-object input selection", async () => {
+        const user = userEvent.setup({ applyAccept: false });
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(screen.getByLabelText("Choose input files"), [
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+            new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+            new File(["notes"], "notes.txt", { type: "text/plain" }),
+        ]);
+
+        expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("Ignored: 2 files")).toBeInTheDocument();
+        expect(screen.getByText("clip.mp4")).toBeInTheDocument();
+        expect(screen.getByText("notes.txt")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it("filters unsupported files from ADL input selection", async () => {
+        const user = userEvent.setup({ applyAccept: false });
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Activity recognition \(ADL\)/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(screen.getByLabelText("Choose input files"), [
+            new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+            new File(["notes"], "notes.txt", { type: "text/plain" }),
+        ]);
+
+        expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+        expect(screen.getByText("clip.mp4")).toBeInTheDocument();
+        expect(screen.getByText("Ignored: 2 files")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("notes.txt")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+    });
+
+    it(
+        "falls back to no supported extensions when filtering input without model extensions", 
+        async () => {
+            const user = userEvent.setup();
+
+            const supportedInputExtensions = vi
+                .fn()
+                .mockReturnValueOnce([".jpg"])
+                .mockReturnValueOnce([".jpg"])
+                .mockReturnValueOnce(undefined)
+                .mockReturnValue([".jpg"]);
+
+            vi.stubGlobal(
+                "fetch",
+                vi.fn(async (input: RequestInfo | URL) => {
+                    const url = String(input);
+
+                    if (url === "/api/models") {
+                        return okJson({
+                            models: [
+                                {
+                                    id: "missing-filter-extensions",
+                                    name: "Missing filter extensions",
+                                    description:
+                                        "Uses available picker extensions but " +
+                                        "omits them during filtering.",
+                                    acceptedInputLabel: "an image or multiple images",
+                                    get supportedInputExtensions() {
+                                        return supportedInputExtensions();
+                                    },
+                                    outputLabel: "filtered test results",
+                                },
+                            ],
+                        });
+                    }
+
+                    throw new Error(`Unexpected fetch call: ${url}`);
+                }),
+            );
+
+            render(<App />);
+
+            await user.click(screen.getByRole("button", { name: "Start New Run" }));
+            
+            await user.click(
+                await screen.findByRole("button", { name: /Missing filter extensions/ }),
+            );
+            
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+
+            expect(screen.getByText("Supported files: .jpg")).toBeInTheDocument();
+
+            await user.upload(
+                screen.getByLabelText("Choose input files"),
+                new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+            );
+
+            expect(screen.getByText("No input selected yet.")).toBeInTheDocument();
+            expect(screen.getByText("Ignored: 1 file")).toBeInTheDocument();
+            expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+            expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+        }
+    );
+
+    it("rejects input selection with no supported files", async () => {
+        const user = userEvent.setup({ applyAccept: false });
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Activity recognition \(ADL\)/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(screen.getByLabelText("Choose input files"), [
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+            new File(["notes"], "notes.txt", { type: "text/plain" }),
+        ]);
+
+        expect(screen.getByText("No input selected yet.")).toBeInTheDocument();
+        expect(screen.getByText("Ignored: 2 files")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("notes.txt")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+    });
+
+    it("sends only supported selected files to the backend", async () => {
+        const user = userEvent.setup({ applyAccept: false });
+
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => dryRunResponse(),
+            });
+
+        const wrappedFetchMock = stubFetchWithModels(fetchMock);
+
+        render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+
+        await user.upload(screen.getByLabelText("Choose input files"), [
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+            new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+        ]);
+
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        const dryRunCall = wrappedFetchMock.mock.calls.find(
+            ([input]) => String(input) === "/api/dry-run",
+        );
+
+        expect(dryRunCall).toBeDefined();
+
+        const dryRunRequest = dryRunCall?.[1] as RequestInit;
+        const formData = dryRunRequest.body as FormData;
+
+        expect(formData.getAll("files").map((file) => (file as File).name)).toEqual([
+            "frame.jpg",
+        ]);
     });
 
     it("ignores empty input drops", async () => {
@@ -873,13 +1054,13 @@ describe("App", () => {
         fireEvent.dragOver(dropZone)
         dropInputFiles(dropZone, [droppedFile]);
 
-        expect(screen.getByText("Selected: dropped-frame.png")).toBeInTheDocument();
+        expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+        expect(screen.getByText("dropped-frame.png")).toBeInTheDocument();
         expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
     });
 
     it("opens the native file picker from the visible choose-input button", async () => {
         const user = userEvent.setup();
-        const inputClickSpy = vi.spyOn(HTMLInputElement.prototype, "click");
 
         render(<App />);
 
@@ -887,11 +1068,13 @@ describe("App", () => {
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
+        const input = screen.getByLabelText("Choose input files");
+        const inputClickSpy = vi.spyOn(input, "click");
+
         await user.click(screen.getByRole("button", { name: "Choose input" }));
 
         expect(inputClickSpy).toHaveBeenCalledOnce();
-
-        inputClickSpy.mockRestore();
+        expect(input).toHaveAttribute("accept", ".jpg,.jpeg,.png,.bmp,.webp");
     });
 
     it("returns from choose input to the model selection screen", async () => {
@@ -922,7 +1105,7 @@ describe("App", () => {
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
         expect(
-            screen.getByText("Select an image or folder of images"),
+            screen.getByText("Select an image or multiple images"),
         ).toBeInTheDocument();
         
         expect(
@@ -996,7 +1179,8 @@ describe("App", () => {
             screen.getByRole("heading", { name: "Choose input" }),
         ).toBeInTheDocument();
 
-        expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
     });
 
     it("keeps the selected model when selecting the same model again", async () => {
@@ -1029,7 +1213,8 @@ describe("App", () => {
             new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
         );
 
-        expect(screen.getByText("Selected: frame.jpg")).toBeInTheDocument();
+        expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
 
         fireEvent.change(screen.getByLabelText("Choose input files"), {
             target: {

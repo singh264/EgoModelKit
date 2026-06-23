@@ -5,7 +5,7 @@ from typing import Final
 ADL_RECOGNITION_MODEL_ID: Final[str] = "adl-recognition"
 COMBINED_PREDS_FILENAME: Final[str] = "all_preds.pkl"
 
-SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
+ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
 
 ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE: Final[str] = (
     f"Dry run: {ADL_RECOGNITION_MODEL_ID} request is valid."
@@ -30,7 +30,7 @@ def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
     if input_path.is_file():
         if _is_combined_predictions_file(input_path):
             pass
-        elif input_path.suffix.lower() in SUPPORTED_VIDEO_SUFFIXES:
+        elif input_path.suffix.lower() in ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES:
             pass
         else:
             raise AdlRecognitionInputError(
@@ -58,6 +58,6 @@ def _is_combined_predictions_file(input_path: Path) -> bool:
 def _directory_contains_supported_videos(input_dir: Path) -> bool:
     return any(
         child.is_file()
-        and child.suffix.lower() in SUPPORTED_VIDEO_SUFFIXES
+        and child.suffix.lower() in ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES
         for child in input_dir.iterdir()
     )

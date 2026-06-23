@@ -20,12 +20,14 @@ from pydantic import BaseModel, Field
 
 from egomodelkit.models.adl_recognition import (
     ADL_RECOGNITION_MODEL_ID,
+    ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
     AdlRecognitionInputError,
     AdlRecognitionRequest,
     validate_adl_recognition_request,
 )
 from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
+    HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
     HandObjectContactInputError,
     HandObjectContactRequest,
     validate_hand_object_contact_request,
@@ -143,7 +145,10 @@ def create_app(
                     "id": HAND_OBJECT_CONTACT_MODEL_ID,
                     "name": "Hand-object contact",
                     "description": "Detects hands, objects, and hand-object contact in images.",
-                    "acceptedInputLabel": "single image or folder of images",
+                    "acceptedInputLabel": "single image or multiple images",
+                    "supportedInputExtensions": sorted(
+                        HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
+                    ),
                     "outputLabel": "detection visualizations and structured results",
                 },
                 {
@@ -153,7 +158,10 @@ def create_app(
                         "Processes egocentric video clips for "
                         "activity of daily living (ADL) recognition."
                     ),
-                    "acceptedInputLabel": "single MP4 video or folder of MP4 videos",
+                    "supportedInputExtensions": sorted(
+                        ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
+                    ),
+                    "acceptedInputLabel": "single MP4 video or multiple MP4 videos",
                     "outputLabel": "predictions and processed frame-level files"
                 },
             ]

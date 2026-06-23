@@ -31,8 +31,14 @@ from egomodelkit.gui_backend import (
     _validate_gui_request,
     create_app,
 )
-from egomodelkit.models.adl_recognition import ADL_RECOGNITION_MODEL_ID
-from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_MODEL_ID
+from egomodelkit.models.adl_recognition import (
+    ADL_RECOGNITION_MODEL_ID,
+    ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
+)
+from egomodelkit.models.hand_object_contact import (
+    HAND_OBJECT_CONTACT_MODEL_ID,
+    HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
+)
 from egomodelkit.output_contract import build_run_output_layout, create_output_scaffold
 from egomodelkit.runtime.hand_object_contact import HandObjectContactRuntimeError
 
@@ -47,7 +53,27 @@ def test_models_endpoint_return_supported_models() -> None:
     body = response.json()
     model_ids = {model["id"] for model in body["models"]}
     
+    hand_object_model = next(
+        model
+        for model in body["models"]
+        if model["id"] == HAND_OBJECT_CONTACT_MODEL_ID
+    )
+    
+    adl_model = next(
+        model
+        for model in body["models"]
+        if model["id"] == ADL_RECOGNITION_MODEL_ID
+    )
+    
     assert HAND_OBJECT_CONTACT_MODEL_ID in model_ids
+    
+    assert hand_object_model["supportedInputExtensions"] == sorted(
+        HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
+    )
+        
+    assert adl_model["supportedInputExtensions"] == sorted(
+        ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
+    )
 
 def test_output_preview_endpoint_returns_dynamic_tree(tmp_path: Path) -> None:
     client = TestClient(create_app())

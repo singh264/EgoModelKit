@@ -6,7 +6,7 @@ from typing import Final
 
 HAND_OBJECT_CONTACT_MODEL_ID: Final[str] = "hand-object-contact"
 
-SUPPORTED_IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset(
+HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES: Final[frozenset[str]] = frozenset(
     {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 )
 
@@ -36,8 +36,8 @@ def validate_hand_object_contact_request(request: HandObjectContactRequest) -> N
         )
     
     if input_path.is_file():
-        if input_path.suffix.lower() not in SUPPORTED_IMAGE_SUFFIXES:
-            supported_suffixes = ", ".join(sorted(SUPPORTED_IMAGE_SUFFIXES))
+        if input_path.suffix.lower() not in HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES:
+            supported_suffixes = ", ".join(sorted(HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES))
 
             raise HandObjectContactInputError(
                 "Unsupported input image suffix "
@@ -64,6 +64,6 @@ def _directory_contains_supported_images(input_dir: Path) -> bool:
     """ Return whether a directory contains at least one supported image file. """
     return any(
         child.is_file()
-        and child.suffix.lower() in SUPPORTED_IMAGE_SUFFIXES
+        and child.suffix.lower() in HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES
         for child in input_dir.iterdir()
     )

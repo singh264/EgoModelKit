@@ -10,12 +10,12 @@ from typing import Final, Literal
 
 from egomodelkit.models.adl_recognition import (
     ADL_RECOGNITION_MODEL_ID,
+    ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
     COMBINED_PREDS_FILENAME,
-    SUPPORTED_VIDEO_SUFFIXES,
 )
 from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
-    SUPPORTED_IMAGE_SUFFIXES,
+    HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
 )
 
 InputScenario = Literal[
@@ -598,9 +598,9 @@ def _input_names_for_preview(*, model_id: str, input_path: Path) -> list[str]:
         return [input_path.name]
     
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        suffixes = SUPPORTED_IMAGE_SUFFIXES
+        suffixes = HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES
     elif model_id == ADL_RECOGNITION_MODEL_ID:
-        suffixes = SUPPORTED_VIDEO_SUFFIXES
+        suffixes = ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES
     else:
         raise ValueError(f"Unsupported model id: {model_id}")
     
