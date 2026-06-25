@@ -121,9 +121,32 @@ function outputPreview(runId: string) {
     return {
         runId,
         scenario: "single_image",
-        folderTree: "results/",
-        note: "Preview only.",
-        files: [],
+        folderTree:
+            "EgoModelKit Results/\n" +
+            `  ${runId}/\n` +
+            "    README.txt\n" +
+            "    run_summary.json\n" +
+            "    visual_outputs/\n" +
+            "      hand_object_contact/\n" +
+            "        frame_det.png\n" +
+            "    logs/\n" +
+            "      progress.jsonl\n" +
+            "      runtime.log",
+        note: "Frame-level metrics are not generated for a single image.",
+        files: [
+            {
+                name: "README.txt",
+                description: "Explanation of the output folder contents.",
+            },
+            {
+                name: "run_summary.json",
+                description: "Summary of the run and completion status.",
+            },
+            {
+                name: "progress.jsonl",
+                description: "Progress events written during the run.",
+            },
+        ],
     }
 }
 
@@ -1000,6 +1023,11 @@ describe("App", () => {
 
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+
+        await waitFor(() => {
+            expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+        });
+
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Dry Run" }));
 
@@ -1362,7 +1390,7 @@ describe("App", () => {
         );
 
         expect(screen.getByText("No output folder selected")).toBeInTheDocument();
-    });
+    });    
 
     it("toggles the privacy-safe outputs details", async () => {
         const user = userEvent.setup();
@@ -1822,6 +1850,22 @@ describe("App", () => {
         expect(screen.getByText("Failed")).toBeInTheDocument();
     });
 
+    it("keeps the output-preview action disabled when progress reports failure", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({ status: "failed" }),
+        ]);
+
+        expect(
+            await screen.findByRole("heading", { name: "Needs attention" }),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByRole("button", { name: "View Output Preview" }),
+        ).toBeDisabled();
+    });
+
     it(
         "keeps running screen visible and shows an alert when progress polling fails",
         async () => {
@@ -2141,23 +2185,109 @@ describe("App", () => {
         );
     });
 
+    it("opens the output-preview screen from completed results", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = await startRunWithProgressResponses(user, [
+            progressResponse({ status: "completed" }),
+        ]);
+
+        expect(
+            await screen.findByRole("heading", { name: "Run completed" }),
+        ).toBeInTheDocument();
+
+        const previewButton = screen.getByRole("button", {
+            name: "View Output Preview",
+        });
+
+        expect(previewButton).toBeEnabled();
+
+        await user.click(previewButton);
+
+        expect(
+            screen.getByRole("heading", { name: "Output folder preview" }),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Review what EgoModelKit saved for this run."),
+        ).toBeInTheDocument();
+
+        expect(screen.getByText("visual_outputs/")).toBeInTheDocument();
+        expect(screen.getByText("run_summary.json")).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Frame-level metrics are not generated for a single image."),
+        ).toBeInTheDocument();
+
+        const contentsButton = screen.getByRole("button", {
+            name: "What the output folder contains",
+        });
+
+        expect(contentsButton).toHaveAttribute("aria-expanded", "false");
+
+        expect(
+            screen.queryByText("Explanation of the output folder contents."),
+        ).not.toBeInTheDocument();
+
+        await user.click(contentsButton);
+
+        expect(contentsButton).toHaveAttribute("aria-expanded", "true");
+
+        expect(screen.getAllByText("README.txt")).toHaveLength(2);
+
+        expect(
+            screen.getByText("Explanation of the output folder contents."),
+        ).toBeInTheDocument();
+
+        expect(
+            screen.getByText("Progress events written during the run."),
+        ).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Back to Results" }));
+
+        expect(screen.getByRole("heading", { name: "Run completed" })).toBeInTheDocument();
+
+        expect(fetchMock).not.toHaveBeenCalledWith(
+            "/api/output-preview",
+            expect.anything(),
+        );
+    });
+
     it(
-        "keeps the output-preview action disabled until the output preview page is added",
+        "opens the output-preview screen from the start-run preview when progress omits it",
         async () => {
             const user = userEvent.setup();
 
-            await startRunWithProgressResponses(user, [
-                progressResponse({ status: "completed" }),
-            ]);
+            await renderCompletedResultsWithCustomProgress(user, {
+                runId: "run-1",
+                status: "completed",
+                errorMessage: null,
+                outputFolder: "/tmp/egomodelkit-results/run-1",
+                events: [
+                    progressEvent({
+                        stage: "finalize",
+                        displayText: "Saving detection outputs...",
+                        current: 4,
+                        total: 4,
+                    }),
+                ],
+            });
+
+            const previewButton = screen.getByRole("button", {
+                name: "View Output Preview",
+            });
+
+            expect(previewButton).toBeEnabled();
+
+            await user.click(previewButton);
 
             expect(
-                await screen.findByRole("heading", { name: "Run completed" }),
+                screen.getByRole("heading", { name: "Output folder preview" }),
             ).toBeInTheDocument();
-    
-            expect(
-                screen.getByRole("button", { name: "View Output Preview" }),
-            ).toBeDisabled();
-        }
+
+            expect(screen.getByText("visual_outputs/")).toHaveClass("text-egm-green");
+            expect(screen.getByText("run_summary.json")).toHaveClass("text-black");
+        },
     );
 
     it(

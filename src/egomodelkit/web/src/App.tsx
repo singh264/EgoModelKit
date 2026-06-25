@@ -1,9 +1,11 @@
 import { 
     Check, 
     ChevronDown,
-    ChevronLeft, 
+    ChevronLeft,
+    ChevronRight, 
     ChevronUp,
     CircleCheck,
+    FileText,
     Folder,
     Info, 
     Shield, 
@@ -24,7 +26,10 @@ type Step =
     | "choose-input" 
     | "choose-output"
     | "review"
-    | "results";
+    | "results"
+    | "output-preview";
+
+type StepperStep = Exclude<Step, "welcome" | "output-preview">;
 
 type ReviewMode = "ready" | "dry-run-complete" | "running";
 
@@ -115,7 +120,7 @@ type ProgressResponse = {
 const HAND_OBJECT_MODEL_ID = "hand-object-contact";
 const ADL_MODEL_ID = "adl-recognition";
 
-const STEPS: Array<{ id: Exclude<Step, "welcome">; label: string }> = [
+const STEPS: Array<{ id: StepperStep; label: string }> = [
     { id: "select-model", label: "Select model" },
     { id: "choose-input", label: "Choose input" },
     { id: "choose-output", label: "Choose output" },
@@ -162,8 +167,16 @@ export function App() {
     const [runId, setRunId] = useState<string>("");
     const [progress, setProgress] = useState<ProgressResponse | null>(null);
     const [resultSummary, setResultSummary] = useState<RunSummary | null>(null);
+    const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(null);
 
     const selectedModel = models.find((model) => model.id === modelId) ?? null;
+
+    const stepperCurrentStep: StepperStep =
+        step === "output-preview"
+            ? "results"
+            : step === "welcome"
+                ? "select-model"
+                : step;
 
     function startNewRun() {
         setModelId("");
@@ -206,6 +219,7 @@ export function App() {
         setRunId("");
         setProgress(null);
         setResultSummary(null);
+        setOutputPreview(null);
     }
 
     useEffect(() => {
@@ -310,6 +324,12 @@ export function App() {
         }
     }
 
+    function viewOutputPreview() {
+        setErrorMessage("");
+        setOutputPreview(progress?.outputPreview ?? outputPreview);
+        setStep("output-preview");
+    }
+
     async function openOutputFolder() {
         try {
             setIsBusy(true);
@@ -342,6 +362,7 @@ export function App() {
 
             setRunId(body.runId);
             setResultSummary(body.summary);
+            setOutputPreview(body.outputPreview);
             setProgress(null);
             setReviewMode("dry-run-complete");
         } catch {
@@ -365,6 +386,7 @@ export function App() {
 
             setRunId(body.runId);
             setResultSummary(body.summary);
+            setOutputPreview(body.outputPreview);
 
             setProgress({
                 runId: body.runId,
@@ -400,6 +422,10 @@ export function App() {
                 }
 
                 setProgress(body);
+
+                setOutputPreview((currentOutputPreview) => (
+                    body.outputPreview ?? currentOutputPreview
+                ));
 
                 if (body.status === "completed" || body.status === "failed") {
                     setReviewMode("ready");
@@ -454,7 +480,7 @@ export function App() {
                             grid-cols-1 gap-8 px-6 pt-16 pb-0 
                             md:grid-cols-[220px_minmax(0,1fr)] md:pt-14
                         ">
-                        <Stepper currentStep={step} />
+                        <Stepper currentStep={stepperCurrentStep} />
 
                         <section aria-live="polite" className="flex min-h-0 min-w-0 flex-col">
                             {errorMessage ? (
@@ -525,8 +551,20 @@ export function App() {
                                     resultSummary={resultSummary}
                                     progress={progress}
                                     isBusy={isBusy}
+                                    canViewOutputPreview={
+                                        progress?.status === "completed" &&
+                                        Boolean(progress?.outputPreview ?? outputPreview)
+                                    }
                                     onOpenOutputFolder={openOutputFolder}
                                     onStartNewRun={startNewRun}
+                                    onViewOutputPreview={viewOutputPreview}
+                                />
+                            ) : step === "output-preview" && outputPreview !== null ? ( 
+                                <OutputPreviewScreen 
+                                    outputPreview={outputPreview}
+                                    isBusy={isBusy}
+                                    onBack={() => setStep("results")}
+                                    onOpenOutputFolder={openOutputFolder}
                                 />
                             ) : (
                                 <SelectModelScreen
@@ -756,7 +794,7 @@ function SelectModelScreen({
     );
 }
 
-function Stepper({ currentStep }: { currentStep: Exclude<Step, "welcome"> }) {
+function Stepper({ currentStep }: { currentStep: StepperStep }) {
     const currentIndex = STEPS.findIndex((step) => step.id === currentStep);
 
     return (
@@ -1604,8 +1642,10 @@ function ResultsScreen({
     resultSummary,
     progress,
     isBusy,
+    canViewOutputPreview,
     onOpenOutputFolder,
     onStartNewRun,
+    onViewOutputPreview,
 } : {
     selectedModel: ModelInfo;
     files: File[];
@@ -1613,8 +1653,10 @@ function ResultsScreen({
     resultSummary: RunSummary | null;
     progress: ProgressResponse | null;
     isBusy: boolean;
+    canViewOutputPreview: boolean;
     onOpenOutputFolder: () => void;
     onStartNewRun: () => void;
+    onViewOutputPreview: () => void;
 }) {
     const failed = progress?.status === "failed";
     
@@ -1661,7 +1703,12 @@ function ResultsScreen({
                     Start New Run
                 </button>
 
-                <button className={secondaryButtonClass} disabled type="button">
+                <button 
+                    className={secondaryButtonClass} 
+                    disabled={!canViewOutputPreview}
+                    onClick={onViewOutputPreview}
+                    type="button"
+                >
                     View Output Preview
                 </button>
             </div>
@@ -1819,5 +1866,168 @@ function progressPercentage(events: ProgressEvent[]): number {
     return Math.max(
         0,
         Math.min(100,Math.round((current / total) * 100)),
+    );
+}
+
+function OutputPreviewScreen({
+    outputPreview,
+    isBusy,
+    onBack,
+    onOpenOutputFolder,
+} : {
+    outputPreview: OutputPreview;
+    isBusy: boolean;
+    onBack: () => void;
+    onOpenOutputFolder: () => void;
+}) {
+    const [contentsOpen, setContentsOpen] = useState<boolean>(false);
+
+    return (
+        <>
+            <PageHeading 
+                title="Output folder preview"
+                subtitle="Review what EgoModelKit saved for this run."
+            />
+
+            <div
+                className="
+                    mt-8 rounded-xl border border-egm-blue-border bg-egm-blue-soft
+                    px-5 py-4 text-base text-egm-body-copy
+                "
+            >
+                Logs and technical files are kept separately for reproducibility
+                and troubleshooting.
+            </div>
+
+            <section
+                className="
+                    mt-8 rounded-2xl border border-egm-card-border bg-white px-6
+                    py-7 text-base text-egm-body-copy
+                "
+            >
+                <h2 className="text-xl font-normal leading-none text-black">
+                    Output folder structure
+                </h2>
+
+                <div
+                    aria-label="Output folder structure"
+                    className="
+                        mt-6 max-h-[420px] overflow-auto rounded-2xl bg-egm-tree-bg
+                        px-6 py-5 font-mono text-sm leading-6
+                    "
+                >
+                    {outputPreview.folderTree.split("\n").map((line, index) => (
+                        <OutputTreeLine
+                            key={`${line}-${index}`}
+                            line={line}
+                        />
+                    ))}
+                </div>
+
+                <div
+                    className="
+                        mt-6 overflow-hidden rounded-xl border border-egm-card-border
+                        bg-white
+                    "
+                >
+                    <button
+                        aria-expanded={contentsOpen}
+                        className="
+                            flex min-h-14 w-full items-center justify-between px-5
+                            text-left text-base text-egm-body-copy hover:bg-egm-hover
+                            focus-visible:outline-3 focus-visible:outline-offset-3
+                            focus-visible:outline-egm-green
+                        "
+                        type="button"
+                        onClick={() => setContentsOpen((open) => !open)}
+                    >
+                        <span className={contentsOpen ? "font-semibold text-black" : ""}>
+                            What the output folder contains
+                        </span>
+
+                        {contentsOpen ? (
+                            <ChevronUp aria-hidden="true" size={22} strokeWidth={2.0} />
+                        ) : (
+                            <ChevronDown aria-hidden="true" size={22} strokeWidth={2.0} />
+                        )}
+                    </button>
+
+                    {contentsOpen ? (
+                        <dl
+                            className="
+                                border-t border-egm-card-border px-5 py-4 text-base
+                                leading-6
+                            "
+                        >
+                            {outputPreview.files.map((file) => (
+                                <div className="mb-4 last:mb-0" key={file.name}>
+                                    <dt className="font-semibold text-egm-green">
+                                        {file.name}
+                                    </dt>
+                                    <dd className="m-0 text-egm-body-copy">
+                                        {file.description}
+                                    </dd>
+                                </div>
+                            ))}
+                        </dl>
+                    ) : null}
+                </div>
+
+                <p
+                    className="
+                        mt-6 rounded-xl bg-egm-tree-bg px-5 py-4 text-base
+                        text-egm-body-copy
+                    "
+                >
+                    {outputPreview.note}
+                </p>
+            </section>
+
+            <div
+                className="
+                    sticky bottom-0 z-10 mt-auto flex flex-wrap justify-start gap-4
+                    bg-egm-bg pt-8 pb-4
+                "
+            >
+                <button className={primaryButtonClass} type="button" onClick={onBack}>
+                    Back to Results
+                </button>
+
+                <button
+                    className={secondaryButtonClass}
+                    disabled={isBusy}
+                    type="button"
+                    onClick={onOpenOutputFolder}
+                >
+                    <Folder aria-hidden="true" />
+                    Open Output Folder
+                </button>
+            </div>
+        </>
+    )
+}
+
+function OutputTreeLine({ line } : { line: string }) {
+    const trimmedLine = line.trimStart();
+    const depth = line.length - trimmedLine.length;
+    const isFolder = trimmedLine.endsWith("/");
+
+    return (
+        <div 
+            className="flex items-center gap-2 py-0.5 text-sm"
+            style={{ paddingLeft: `${depth * 12}px` }}    
+        >
+            {isFolder ? (
+                <>
+                    <ChevronRight aria-hidden="true" className="h-3 w-3 text-egm-green" />
+                    <span className="font-medium text-egm-green">{trimmedLine}</span>
+                </>
+            ) : (
+                <>
+                    <FileText aria-hidden="true" className="h-3 w-3 text-black" />
+                    <span className="text-black">{trimmedLine}</span>            
+                </>
+            )}
+        </div>
     );
 }
