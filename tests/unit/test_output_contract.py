@@ -19,6 +19,7 @@ from egomodelkit.output_contract import (
     build_run_id,
     build_run_output_layout,
     create_output_scaffold,
+    finalize_runtime_outputs,
     infer_input_scenario,
     infer_input_scenario_from_names,
     output_file_descriptions,
@@ -53,8 +54,8 @@ def test_run_output_layout_exposes_all_backend_paths(tmp_path: Path) -> None:
     assert layout.technical_dir == tmp_path / "run-1" / "technical"
     assert layout.model_outputs_dir == tmp_path / "run-1" / "technical" / "model_outputs"
     
-    assert layout.post_processing_intermediate_dir == (
-        tmp_path / "run-1" / "technical" / "post_processing_intermediate"
+    assert layout.post_processing_dir == (
+        tmp_path / "run-1" / "technical" / "post_processing"
     )
     
     assert layout.intermediate_files_dir == (
@@ -203,8 +204,13 @@ def test_create_output_scaffold_creates_hand_object_and_adl_contract_files(
 
     assert adl_layout.results_dir.is_dir()
     assert adl_layout.model_outputs_dir.is_dir()
-    assert adl_layout.post_processing_intermediate_dir.is_dir()
+    assert adl_layout.post_processing_dir.is_dir()
     assert adl_layout.intermediate_files_dir.is_dir()
+    assert adl_layout.adl_extracted_frames_dir.is_dir()
+    assert adl_layout.adl_detic_outputs_dir.is_dir()
+    assert adl_layout.adl_shan_outputs_dir.is_dir()
+    assert "metric_status" in adl_layout.video_level_metrics_path.read_text()
+    assert "pending" in adl_layout.video_level_metrics_summary_path.read_text()
     assert "results/video_level_metrics.csv" in adl_layout.readme_path.read_text()
     
 def test_create_output_scaffold_rejects_unsupported_model(tmp_path: Path) -> None:
@@ -250,7 +256,8 @@ def test_output_folder_tree_covers_directory_and_adl_scenarios() -> None:
     
     assert "a_det.png" in output_folder_tree(hand_directory)
     assert "        ..." in output_folder_tree(hand_directory)
-    assert "clip/" in output_folder_tree(adl_single)
+    assert "        extracted_frames/" in output_folder_tree(adl_single)
+    assert "          clip/" not in output_folder_tree(adl_single)
     assert "          ..." in output_folder_tree(adl_directory)
     assert "all_preds.pkl" in output_folder_tree(adl_combined)
 
@@ -301,6 +308,162 @@ def test_output_file_descriptions_and_notes_cover_remaining_scenarios() -> None:
         "visual_outputs/hand_object_contact" in 
         run_readme_text(model_id = HAND_OBJECT_CONTACT_MODEL_ID, context = hand_directory)
     )
+
+def test_finalize_runtime_outputs_moves_hand_object_visuals(tmp_path: Path) -> None:
+    image = tmp_path / "frame.jpg"
+    image.write_bytes(b"fake-image")
+    layout = build_run_output_layout(tmp_path / "results", run_id = "run-hand")
+
+    create_output_scaffold(
+        layout = layout,
+        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
+        input_path = image,
+        scenario = "hand-object-single-image",
+    )
+
+    existing_visual_destination = (
+        layout.visual_outputs_dir / "hand_object_contact" / "frame_det.png"
+    )
+    
+    existing_visual_destination.mkdir(parents = True)
+
+    (layout.run_dir / "frame_det.png").write_bytes(b"visual")
+    (layout.run_dir / "frame_shan.json").write_text("{}", encoding = "utf-8")
+    (layout.run_dir / "frame_shan.pkl").write_bytes(b"pickle")
+    (layout.run_dir / "runtime-scratch.tmp").write_text("remove me", encoding = "utf-8")
+
+    finalize_runtime_outputs(
+        layout = layout,
+        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
+        input_path = image,
+        scenario = "hand-object-single-image",
+    )
+
+    assert (
+        layout.visual_outputs_dir / "hand_object_contact" / "frame_det.png"
+    ).read_bytes() == b"visual"
+
+    assert not (layout.run_dir / "frame_det.png").exists()
+    assert not (layout.run_dir / "frame_shan.json").exists()
+    assert not (layout.run_dir / "frame_shan.pkl").exists()
+    assert not (layout.run_dir / "runtime-scratch.tmp").exists()
+    assert (layout.model_outputs_dir / "frame_shan.json").exists()
+    assert (layout.model_outputs_dir / "frame_shan.pkl").exists()
+    
+def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metric_stubs(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake-video")
+    layout = build_run_output_layout(tmp_path / "results", run_id = "run-adl")
+
+    create_output_scaffold(
+        layout = layout,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = video,
+        scenario = "adl-single-video",
+    )
+
+    (layout.run_dir / "adl_predictions.csv").write_text(
+        "input,prediction\nclip.mp4,meal\n",
+        encoding = "utf-8",
+    )
+    
+    (layout.run_dir / "adl_predictions_summary.csv").write_text(
+        "input,summary\nclip.mp4,summary\n",
+        encoding = "utf-8",
+    )
+    
+    (layout.run_dir / "all_preds.pkl").write_bytes(b"pickle")
+
+    runtime_adl_dir = (
+        layout.run_dir
+        / "adl_recognition_work"
+        / "egoviz_data"
+        / "meal-preparation-cleanup"
+    )
+
+    (runtime_adl_dir / "subclips" / "clip_001").mkdir(parents = True)
+    (runtime_adl_dir / "subclips" / "clip_001" / "frame_001.jpg").write_bytes(b"jpg")
+
+    (runtime_adl_dir / "detic_raw" / "clip_001").mkdir(parents = True)
+    
+    (runtime_adl_dir / "detic_raw" / "clip_001" / "frame_001_detic.pkl").write_bytes(
+        b"detic",
+    )
+
+    layout.adl_detic_outputs_dir.rmdir()
+
+    (runtime_adl_dir / "subclips_shan" / "clip_001").mkdir(parents = True)
+    (runtime_adl_dir / "subclips_shan" / "clip_001" / "frame_001_shan.pkl").write_bytes(
+        b"shan",
+    )
+
+    finalize_runtime_outputs(
+        layout = layout,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = video,
+        scenario = "adl-single-video",
+    )
+
+    assert (layout.model_outputs_dir / "predictions.csv").exists()
+    assert (layout.model_outputs_dir / "predictions_summary.csv").exists()
+    assert (layout.model_outputs_dir / "all_preds.pkl").read_bytes() == b"pickle"
+    assert (layout.adl_extracted_frames_dir / "clip_001" / "frame_001.jpg").exists()
+    assert (layout.adl_detic_outputs_dir / "clip_001" / "frame_001_detic.pkl").exists()
+    assert (layout.adl_shan_outputs_dir / "clip_001" / "frame_001_shan.pkl").exists()
+    assert "stub" in layout.video_level_metrics_path.read_text(encoding = "utf-8")
+    assert "clip.mp4" in layout.frame_level_predictions_path.read_text(encoding = "utf-8")
+    assert "segment_status" in layout.interaction_segments_path.read_text(encoding = "utf-8")
+
+def test_finalize_runtime_outputs_tolerates_missing_adl_runtime_work(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake-video")
+    layout = build_run_output_layout(tmp_path / "results", run_id = "run-adl-missing")
+
+    create_output_scaffold(
+        layout = layout,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = video,
+        scenario = "adl-single-video",
+    )
+
+    runtime_work_dir = layout.run_dir / "adl_recognition_work"
+    runtime_work_dir.mkdir(parents = True)
+    (runtime_work_dir / "subclips").write_text("not a directory", encoding = "utf-8")
+
+    existing_predictions = layout.model_outputs_dir / "predictions.csv"
+    existing_predictions.write_text("old\n", encoding = "utf-8")
+
+    (layout.run_dir / "adl_predictions.csv").write_text(
+        "input,prediction\nclip.mp4,meal\n",
+        encoding = "utf-8",
+    )
+
+    finalize_runtime_outputs(
+        layout = layout,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = video,
+        scenario = "adl-single-video",
+    )
+
+    assert existing_predictions.read_text(encoding = "utf-8").startswith("input")
+    assert list(layout.adl_extracted_frames_dir.iterdir()) == []
+
+def test_finalize_runtime_outputs_rejects_unsupported_model(tmp_path: Path) -> None:
+    input_file = tmp_path / "input.bin"
+    input_file.write_bytes(b"fake")
+    layout = build_run_output_layout(tmp_path, run_id = "run-bad")
+
+    with pytest.raises(ValueError, match = "Unsupported model id"):
+        finalize_runtime_outputs(
+            layout = layout,
+            model_id = "unknown",
+            input_path = input_file,
+            scenario = cast(InputScenario, "hand-object-single-image"),
+        )
 
 def test_write_run_summary_updates_existing_summary(tmp_path: Path) -> None:
     input_file = tmp_path / "frame.jpg"

@@ -40,6 +40,7 @@ from egomodelkit.output_contract import (
     build_run_id,
     build_run_output_layout,
     create_output_scaffold,
+    finalize_runtime_outputs,
     output_file_descriptions,
     output_folder_tree,
     output_preview_note,
@@ -406,8 +407,15 @@ def _execute_run(
             )
         else:
             raise ValueError(f"Unsupported model id: {state.model_id}")
-        
+
         runner(state.input_path, state.layout.run_dir, progress)
+
+        finalize_runtime_outputs(
+            layout = state.layout,
+            model_id = state.model_id,
+            input_path = state.input_path,
+            scenario = state.scenario,
+        )
         
         write_run_summary(
             layout = state.layout,

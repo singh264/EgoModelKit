@@ -127,7 +127,9 @@ def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> Non
         assert output_dir.exists()
         
         progress("Fake model step")
-        (output_dir / "fake-output.txt").write_text("done", encoding = "utf-8")
+        (output_dir / "frame_det.png").write_bytes(b"visual")
+        (output_dir / "frame_shan.json").write_text("{}", encoding = "utf-8")
+        (output_dir / "frame_shan.pkl").write_bytes(b"pickle")
 
     client = TestClient(
         create_app(hand_object_runner = fake_runner),
@@ -158,9 +160,180 @@ def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> Non
     
     output_folder = Path(progress_body["outputFolder"])
     
+    run_dir = output_folder / run_id
+
     assert (
-        output_folder / run_id / "fake-output.txt").read_text(encoding = "utf-8"
-    ) == "done"
+        run_dir / "visual_outputs" / "hand_object_contact" / "frame_det.png"
+    ).read_bytes() == b"visual"
+
+    assert (
+        run_dir / "technical" / "model_outputs" / "frame_shan.json"
+    ).read_text(encoding = "utf-8") == "{}"
+
+    assert (
+        run_dir / "technical" / "model_outputs" / "frame_shan.pkl"
+    ).read_bytes() == b"pickle"
+
+    assert not (run_dir / "frame_det.png").exists()
+    assert not (run_dir / "frame_shan.json").exists()
+    assert not (run_dir / "frame_shan.pkl").exists()
+
+def test_run_endpoint_organizes_hand_object_runtime_outputs(tmp_path: Path) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        assert output_dir.is_dir()
+        
+        progress("Fake hand-object model step")
+        
+        (output_dir / "frame_det.png").write_bytes(b"visual")
+        (output_dir / "frame_shan.json").write_text("{}", encoding = "utf-8")
+        (output_dir / "frame_shan.pkl").write_bytes(b"pickle")
+        (output_dir / "frame_extra.json").write_text("{}", encoding = "utf-8")
+
+    client = TestClient(create_app(hand_object_runner = fake_runner))
+
+    start_response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    assert start_response.status_code == 200
+
+    run_id = start_response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert progress_body["status"] == "completed"
+
+    run_dir = Path(progress_body["outputFolder"]) / run_id
+
+    assert (
+        run_dir / "visual_outputs" / "hand_object_contact" / "frame_det.png"
+    ).read_bytes() == b"visual"
+
+    assert (
+        run_dir / "technical" / "model_outputs" / "frame_shan.json"
+    ).read_text(encoding = "utf-8") == "{}"
+
+    assert (
+        run_dir / "technical" / "model_outputs" / "frame_shan.pkl"
+    ).read_bytes() == b"pickle"
+    
+    assert (
+        run_dir / "technical" / "model_outputs" / "frame_extra.json"
+    ).exists()
+
+    assert not (run_dir / "frame_det.png").exists()
+    assert not (run_dir / "frame_shan.json").exists()
+    assert not (run_dir / "frame_shan.pkl").exists()
+    assert not (run_dir / "frame_extra.json").exists()
+
+def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        assert output_dir.name.startswith("run-")
+        
+        progress("Fake ADL model step")
+        
+        (output_dir / "adl_predictions.csv").write_text(
+            "input,prediction\nclip.mp4,meal\n",
+            encoding = "utf-8",
+        )
+        
+        (output_dir / "adl_predictions_summary.csv").write_text(
+            "input,summary\nclip.mp4,summary\n",
+            encoding = "utf-8",
+        )
+        
+        (output_dir / "all_preds.pkl").write_bytes(b"pickle")
+        
+        runtime_adl_dir = (
+            output_dir
+            / "adl_recognition_work"
+            / "egoviz_data"
+            / "meal-preparation-cleanup"
+        )
+        
+        (runtime_adl_dir / "subclips" / "clip_001").mkdir(parents = True)
+        (runtime_adl_dir / "subclips" / "clip_001" / "frame_001.jpg").write_bytes(b"jpg")
+
+        (runtime_adl_dir / "detic").mkdir(parents = True)
+        (runtime_adl_dir / "detic" / "clip_001_frame_001_detic.pkl").write_bytes(b"detic")
+
+        (runtime_adl_dir / "shan").mkdir(parents = True)
+        (runtime_adl_dir / "shan" / "clip_001_frame_001_shan.pkl").write_bytes(b"shan")
+
+    client = TestClient(create_app(adl_runner = fake_runner))
+
+    start_response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
+    )
+
+    assert start_response.status_code == 200
+
+    run_id = start_response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert progress_body["status"] == "completed"
+
+    run_dir = Path(progress_body["outputFolder"]) / run_id
+
+    assert (run_dir / "technical" / "model_outputs" / "predictions.csv").exists()
+    assert (run_dir / "technical" / "model_outputs" / "predictions_summary.csv").exists()
+    assert (run_dir / "technical" / "model_outputs" / "all_preds.pkl").exists()
+
+    assert (
+        run_dir
+        / "technical"
+        / "intermediate_files"
+        / "extracted_frames"
+        / "clip_001"
+        / "frame_001.jpg"
+    ).exists()
+
+    assert (
+        run_dir
+        / "technical"
+        / "intermediate_files"
+        / "detic_outputs"
+        / "clip_001_frame_001_detic.pkl"
+    ).exists()
+
+    assert (
+        run_dir
+        / "technical"
+        / "intermediate_files"
+        / "shan_outputs"
+        / "clip_001_frame_001_shan.pkl"
+    ).exists()
+
+    assert (
+        run_dir
+        / "technical"
+        / "post_processing"
+        / "frame_level_predictions.csv"
+    ).exists()
+
+    assert not (run_dir / "adl_predictions.csv").exists()
+    assert not (run_dir / "adl_predictions_summary.csv").exists()
+    assert not (run_dir / "all_preds.pkl").exists()
+    assert not (run_dir / "adl_recognition_work").exists()
 
 def test_open_output_folder_uses_tracked_run(
     tmp_path: Path,
