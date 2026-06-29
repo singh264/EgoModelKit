@@ -108,12 +108,27 @@ type ProgressEvent = {
     displayText: string;
 };
 
+type RuntimeStatus = {
+    modelName: string;
+    currentStep: number | null;
+    totalSteps: number | null;
+};
+
+type RuntimeBuildStage = {
+    stageId: string;
+    modelName: string;
+    current: number;
+    total: number;
+};
+
 type ProgressResponse = {
     runId: string;
     status: GuiRunStatus;
     errorMessage: string | null;
     outputFolder: string;
     events: ProgressEvent[];
+    runtimeStatus: RuntimeStatus | null;
+    runtimeBuildStages: RuntimeBuildStage[];
     outputPreview: OutputPreview;
 };
 
@@ -393,7 +408,9 @@ export function App() {
                 status: "running",
                 errorMessage: null,
                 outputFolder: body.summary.outputFolder,
-                events: startingProgressEvents(modelId),
+                events: [],
+                runtimeStatus: null,
+                runtimeBuildStages: [],
                 outputPreview: body.outputPreview,
             });
 
@@ -1002,39 +1019,6 @@ function ignorelDescriptionFromFileNames(fileNames: string[]): string {
     return "These files are not supported by the selected model";
 }
 
-function startingProgressEvents(modelId: string): ProgressEvent[] {
-    if (modelId === HAND_OBJECT_MODEL_ID) {
-        return [
-            progressLine("setup", "Preparing image input..."),
-            progressLine("validate", "Checking selected image..."),
-            progressLine(
-                "runtime",
-                "Running hand-object contact model on the image: 1 / 1 image processed",
-            ),
-            progressLine("finalize", "Saving detection outputs..."),
-        ];
-    }
-
-    return [
-        progressLine("setup", "Preparing video input..."),
-        progressLine("extract", "Extracting frames..."),
-        progressLine("runtime", "Running hand-object contact model..."),
-        progressLine("runtime", "Running Detic object detection..."),
-        progressLine("finalize", "Saving activity recognition outputs..."),
-    ];
-}
-
-function progressLine(stage: string, displayText: string): ProgressEvent {
-    return {
-        stage,
-        message: displayText,
-        current: null,
-        total: null,
-        unit: null,
-        displayText,
-    }
-}
-
 async function postMultipart<T>(
     url: string,
     {
@@ -1394,7 +1378,9 @@ function ReviewScreen({
             {reviewMode === "running" ? (
                 <RunningPanel 
                     events={progress?.events ?? []} 
-                    runId={runId} 
+                    runId={runId}
+                    runtimeStatus={progress?.runtimeStatus ?? null}
+                    runtimeBuildStages={progress?.runtimeBuildStages ?? []}
                 />
             ) : null}
 
@@ -1567,12 +1553,16 @@ function DryRunCompletePanel({ runId } : { runId: string; }) {
 
 function RunningPanel({
     events, 
-    runId, 
+    runId,
+    runtimeStatus,
+    runtimeBuildStages,
 } : {
     events: ProgressEvent[];
     runId: string;
+    runtimeStatus: RuntimeStatus | null;
+    runtimeBuildStages: RuntimeBuildStage[];
 }) {
-    const percent = progressPercentage(events);
+    const percent = getPercentage(events, runtimeBuildStages);
     
     return (
         <>
@@ -1596,12 +1586,26 @@ function RunningPanel({
                     <p className="mt-4 text-base leading-6 text-egm-secondary-copy">
                         Run ID: {runId}
                     </p>
-                    
+
+                    {runtimeStatus ? (
+                        <p
+                            className="mt-6 text-sm font-medium leading-5 text-egm-danger"
+                            role="status"
+                        >
+                            Building Docker image for {runtimeStatus.modelName}
+                            {typeof runtimeStatus.currentStep === "number" &&
+                            typeof runtimeStatus.totalSteps === "number" &&
+                            runtimeStatus.totalSteps > 0
+                                ? ` [${runtimeStatus.currentStep} / ${runtimeStatus.totalSteps}]`
+                                : ""}
+                        </p>
+                    ) : null}
+
                     <ul 
                         aria-label="Run progress log"
                         className="
-                            mt-6 max-h-40 space-y-1 overflow-y-auto rounded-xl bg-egm-tree-bg
-                            px-4 py-3 text-base leading-6  text-egm-body-copy
+                            mt-6 space-y-1 rounded-xl bg-egm-tree-bg px-4 py-3
+                            text-base leading-6 text-egm-body-copy
                         "
                         role="log"
                     >
@@ -1846,27 +1850,63 @@ async function requestProgress(runId: string): Promise<ProgressResponse> {
     return (await response.json()) as ProgressResponse;
 }
 
-function progressPercentage(events: ProgressEvent[]): number {
-    const eventWithTotal = [...events]
-        .reverse()
-        .find(
-            (event) =>
-                typeof event.current === "number" &&
-                typeof event.total === "number" &&
-                event.total > 0,
-        )
-    
-    const current = eventWithTotal?.current;
-    const total = eventWithTotal?.total;
+function getPercentage(
+    events: ProgressEvent[],
+    runtimeBuildStages: RuntimeBuildStage[],
+): number {
+    const fractions = [
+        ...runtimeBuildStages.map(stageFraction),
+        ...events
+            .filter(isVisibleProgressStage)
+            .map(eventFraction),
+    ];
 
-    if (typeof current !== "number" || typeof total !== "number" || total <= 0) {
-        return events.length > 0 ? 8 : 0;
+    if (fractions.length === 0) {
+        return 0;
     }
 
-    return Math.max(
-        0,
-        Math.min(100,Math.round((current / total) * 100)),
-    );
+    const total = fractions.reduce((sum, fraction) => sum + fraction, 0);
+
+    return Math.round(100 * total / fractions.length);
+}
+
+function isVisibleProgressStage(event: ProgressEvent): boolean {
+    return event.stage !== "current_video";
+}
+
+function eventFraction(event: ProgressEvent): number {
+    if (
+        typeof event.current === "number" &&
+        typeof event.total === "number" &&
+        event.total > 0
+    ) {
+        return boundedFraction(event.current, event.total);
+    }
+
+    if (event.displayText.toLowerCase().includes("waiting")) {
+        return 0;
+    }
+
+    return 1;
+}
+
+function stageFraction(stage: RuntimeBuildStage): number {
+    return boundedFraction(stage.current, stage.total);
+}
+
+function boundedFraction(
+    current: number | null,
+    total: number | null,
+): number {
+    if (
+        typeof current !== "number" ||
+        typeof total !== "number" ||
+        total <= 0
+    ) {
+        return 0;
+    }
+
+    return Math.max(0, Math.min(1, current / total));
 }
 
 function OutputPreviewScreen({

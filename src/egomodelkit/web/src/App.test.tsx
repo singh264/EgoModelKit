@@ -222,12 +222,16 @@ function progressResponse({
             total: 4,
         }),
     ],
+    runtimeStatus = null,
+    runtimeBuildStages = [],
 } : {
     runId?: string;
     status?: string;
     errorMessage?: string | null;
     outputFolder?: string;
     events?: object[];
+    runtimeStatus?: object | null;
+    runtimeBuildStages?: object[] | null;
 }) {
     return {
         runId,
@@ -235,6 +239,8 @@ function progressResponse({
         errorMessage,
         outputFolder,
         events,
+        runtimeStatus,
+        runtimeBuildStages,
         outputPreview: outputPreview(runId),
     }
 }
@@ -1549,8 +1555,6 @@ describe("App", () => {
 
         expect(screen.getByText("Running model...")).toBeInTheDocument();
         expect(screen.getByText("Run ID: run-1")).toBeInTheDocument();
-        expect(screen.getByText("Preparing image input...")).toBeInTheDocument();
-        expect(screen.getByText("Saving detection outputs...")).toBeInTheDocument();
         expect(screen.getByText("Overall progress estimate")).toBeInTheDocument();
 
         expect(
@@ -1563,7 +1567,7 @@ describe("App", () => {
         expect(screen.getByRole("button", { name: "Run Model" })).toBeDisabled();
     });
 
-    it("starts an ADL model run with video-oriented progress messages", async () => {
+    it("starts an ADL model run without frontend-generated progress rows", async () => {
         const user = userEvent.setup();
 
         const fetchMock = vi
@@ -1590,10 +1594,21 @@ describe("App", () => {
         await user.click(screen.getByRole("button", { name: "Continue" }));
         await user.click(screen.getByRole("button", { name: "Run Model" }));
 
+        expect(screen.getByText("Running model...")).toBeInTheDocument();
         expect(screen.getByText("Run ID: adl-run-1")).toBeInTheDocument();
-        expect(screen.getByText("Preparing video input...")).toBeInTheDocument();
-        expect(screen.getByText("Extracting frames...")).toBeInTheDocument();
-        expect(screen.getByText("Running Detic object detection...")).toBeInTheDocument();
+        expect(screen.getByText("Overall progress estimate")).toBeInTheDocument();
+
+        expect(
+            screen.queryByText("Preparing video input..."),
+        ).not.toBeInTheDocument();
+
+        expect(
+            screen.queryByText("Extracting frames..."),
+        ).not.toBeInTheDocument();
+
+        expect(
+            screen.queryByText("Running Detic object detection..."),
+        ).not.toBeInTheDocument();
     });
 
     it("shows an error when starting the model run fails", async () => {
@@ -1657,9 +1672,9 @@ describe("App", () => {
 
         expect(
             screen.getByRole("log", { name: "Run progress log" }),
-        ).toHaveClass("max-h-40", "overflow-y-auto");
+        ).not.toHaveClass("max-h-40", "overflow-y-auto");
         
-        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "50%" });
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "38%" });
     });
 
     it("returns from review screen to the selected output folder screen", async () => {
@@ -1696,7 +1711,7 @@ describe("App", () => {
                 await screen.findByText("Backend: running without numeric progress"),
             ).toBeInTheDocument();
 
-            expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "8%" });
+            expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "100%" });
         }
     );
 
@@ -1712,7 +1727,7 @@ describe("App", () => {
 
         expect(await screen.findByText("Running model...")).toBeInTheDocument();
 
-        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "0%" });
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({ width: "0%" });    
     });
 
     it("shows zero progress when backend progress omits events", async () => {
@@ -2367,6 +2382,110 @@ describe("App", () => {
             ).toBeInTheDocument();
 
             expect(screen.getByText("Not available")).toBeInTheDocument();
+        }
+    );
+
+    it("counts Docker image builds as independent progress stages", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "running",
+                runtimeStatus: {
+                    modelName: "Detic",
+                    currentStep: 2,
+                    totalSteps: 4,
+                },
+                runtimeBuildStages: [
+                    {
+                        stageId: "docker:Detic",
+                        modelName: "Detic",
+                        current: 2,
+                        total: 4,
+                    },
+                ],
+                events: [
+                    progressEvent({
+                        stage: "run_detic",
+                        displayText: "Running object detection model: waiting",
+                    }),
+                ],
+            }),
+        ]);
+
+        expect(
+            await screen.findByRole("status"),
+        ).toHaveTextContent("Building Docker image for Detic [2 / 4]");
+
+        expect(
+            screen.getByRole("log", { name: "Run progress log" }),
+        ).not.toHaveTextContent("Building Docker image");
+
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({
+            width: "25%",
+        });
+    });
+
+    it("treats Docker stages with invalid totals as zero progress", async () => {
+        const user = userEvent.setup();
+
+        await startRunWithProgressResponses(user, [
+            progressResponse({
+                status: "running",
+                runtimeBuildStages: [
+                    {
+                        stageId: "docker:missing-current",
+                        modelName: "Missing current",
+                        current: null,
+                        total: 4,
+                    },
+                    {
+                        stageId: "docker:missing-total",
+                        modelName: "Missing total",
+                        current: 2,
+                        total: null,
+                    },
+                    {
+                        stageId: "docker:zero-total",
+                        modelName: "Zero total",
+                        current: 2,
+                        total: 0,
+                    },
+                ],
+                events: [],
+            }),
+        ]);
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        expect(screen.getByTestId("progress-bar-fill")).toHaveStyle({
+            width: "0%",
+        });
+    });
+
+    it(
+        "shows Docker build status without step counts when runtime status omits totals", 
+        async () => {
+            const user = userEvent.setup();
+
+            await startRunWithProgressResponses(user, [
+                progressResponse({
+                    status: "running",
+                    runtimeStatus: {
+                        modelName: "EgoVizML",
+                        currentStep: null,
+                        totalSteps: null,
+                    },
+                    runtimeBuildStages: [],
+                    events: [],
+                }),
+            ]);
+
+            const status = await screen.findByRole("status");
+
+            expect(status).toHaveTextContent("Building Docker image for EgoVizML");
+            expect(status).not.toHaveTextContent("[");
+            expect(status).not.toHaveTextContent("]");
         }
     );
 });

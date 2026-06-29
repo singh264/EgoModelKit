@@ -51,14 +51,14 @@ HAND_OBJECT_DETECTOR_PIN: Final[ExternalModelCodePin] = ExternalModelCodePin(
     model_id = "hand-object-detector",
     fork_repository_url = f"{PROJECT_GITHUB_BASE_URL}/hand_object_detector",
     upstream_repository_url = "https://github.com/ddshan/hand_object_detector",
-    commit_sha = "70146cabaeffb41ecc02e6edb605fc021dbdb555",
+    commit_sha = "cf4f2f1a72d25b23166e1c3059854e4b0d1c4739",
 )
 
 EGOVIZML_PIN: Final[ExternalModelCodePin] = ExternalModelCodePin(
     model_id = "egovizml",
     fork_repository_url = f"{PROJECT_GITHUB_BASE_URL}/EgoVizML",
     upstream_repository_url = "https://github.com/adeshkadambi/EgoVizML",
-    commit_sha = "b3c24d065179289cd0d99091de06ba6fe54083c8",
+    commit_sha = "c3e4117be73f9c1ac2684dd6d4229f32876d25ec",
 )
 
 DETIC_PIN: Final[ExternalModelCodePin] = ExternalModelCodePin(

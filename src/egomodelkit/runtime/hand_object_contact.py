@@ -23,6 +23,7 @@ from egomodelkit.runtime.preflight import (
 )
 
 CommandRunner = Callable[[list[str]], int]
+StreamingCommandRunner = Callable[[list[str], ProgressReporter], int]
 
 SHAN_FORK_REPOSITORY_URL: Final[str] = HAND_OBJECT_DETECTOR_PIN.fork_repository_url
 SHAN_FORK_COMMIT_SHA: Final[str] = HAND_OBJECT_DETECTOR_PIN.commit_sha
@@ -126,6 +127,7 @@ def ensure_runtime_image(
     *,
     runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Build the hidden hand-object-contact runtime image only when missing. """
@@ -161,7 +163,10 @@ def ensure_runtime_image(
         str(container_dir),
     ]
     
-    exit_code = command_runner(build_command)
+    if streaming_command_runner is None:
+        exit_code = command_runner(build_command)
+    else:
+        exit_code = streaming_command_runner(build_command, progress)
     
     if exit_code != 0:
         raise HandObjectContactRuntimeError(
@@ -208,6 +213,7 @@ def run_hand_object_contact(
     *,
     runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> list[str]:
     """ Run hand-object-contact behind EgoModelKit's run command. """
@@ -226,6 +232,7 @@ def run_hand_object_contact(
     ensure_runtime_image(
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress
     )
     
@@ -235,8 +242,12 @@ def run_hand_object_contact(
     )
     
     progress("Starting hand-object-contact inference.")
-    exit_code = command_runner(run_command)
     
+    if streaming_command_runner is None:
+        exit_code = command_runner(run_command)
+    else:
+        exit_code = streaming_command_runner(run_command, progress)
+
     if exit_code != 0:
         raise HandObjectContactRuntimeError(
             f"hand-object-contact inference runtime failed with exit code {exit_code}."

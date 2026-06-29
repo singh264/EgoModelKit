@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+import egomodelkit.runtime.adl_recognition as adl_runtime
 from egomodelkit.models.adl_recognition import (
     AdlRecognitionRequest,
 )
@@ -665,3 +666,161 @@ def test_detic_dockerfile_downloads_weights_with_gdown() -> None:
     assert "gdown --fuzzy" in dockerfile_text
     assert "DETIC_WEIGHTS_FILENAME" in dockerfile_text
     assert "test -s" in dockerfile_text
+
+def test_ensure_core_runtime_image_reports_build_failure() -> None:
+    calls: list[list[str]] = []
+
+    def runner(command: list[str]) -> int:
+        calls.append(command)
+
+        if command[1:3] == ["image", "inspect"]:
+            return 1
+
+        return 23
+
+    runtime_spec = _test_runtime_spec()
+
+    with pytest.raises(
+        AdlRecognitionRuntimeError,
+        match = "adl-recognition core runtime image build failed with exit code 23",
+    ):
+        ensure_core_runtime_image(
+            runtime_spec = runtime_spec,
+            command_runner = runner,
+        )
+
+    assert calls[0] == [
+        runtime_spec.docker_executable,
+        "image",
+        "inspect",
+        runtime_spec.core_image_tag,
+    ]
+    
+    assert calls[1][:2] == [runtime_spec.docker_executable, "build"]
+    
+def test_ensure_core_runtime_image_uses_streaming_runner_when_building() -> None:
+    messages: list[str] = []
+    streamed_commands: list[list[str]] = []
+
+    def inspect_runner(command: list[str]) -> int:
+        assert command[1:3] == ["image", "inspect"]
+        return 1
+
+    def streaming_runner(command: list[str], progress) -> int:
+        streamed_commands.append(command)
+        progress("streamed build output")
+
+        return 0
+
+    runtime_spec = _test_runtime_spec()
+
+    ensure_core_runtime_image(
+        runtime_spec = runtime_spec,
+        command_runner = inspect_runner,
+        streaming_command_runner = streaming_runner,
+        progress = messages.append,
+    )
+
+    assert streamed_commands[0][:2] == [runtime_spec.docker_executable, "build"]
+    assert "streamed build output" in messages
+    assert "Packaged adl-recognition core runtime image is ready." in messages
+
+def test_run_adl_recognition_reports_empty_extracted_frame_images(
+    tmp_path: Path,
+) -> None:
+    input_path = tmp_path / "video.mp4"
+    input_path.write_bytes(b"fake-video")
+
+    output_dir = tmp_path / "results"
+    request = AdlRecognitionRequest(input_path = input_path, output_dir = output_dir)
+    runtime_spec = _test_runtime_spec()
+
+    def runner(command: list[str]) -> int:
+        if "--stage" in command and command[command.index("--stage") + 1] == "extract":
+            frame_dir = (
+                output_dir
+                / runtime_spec.work_dir_name
+                / runtime_spec.egoviz_data_dir_name
+                / runtime_spec.staged_adl_dir_name
+                / "subclips"
+                / "video001--1"
+            )
+            
+            frame_dir.mkdir(parents = True)
+            (frame_dir / "frame_0.JPG").write_bytes(b"fake-frame")
+
+        return 0
+
+    with pytest.raises(
+        AdlRecognitionRuntimeError,
+        match = "ADL frame extraction completed but no extracted frame images were found",
+    ):
+        run_adl_recognition(
+            request,
+            runtime_spec = runtime_spec,
+            command_runner = runner,
+        )
+
+def test_run_stage_uses_streaming_command_runner() -> None:
+    messages: list[str] = []
+    calls: list[list[str]] = []
+
+    def streaming_runner(command: list[str], progress) -> int:
+        calls.append(command)
+        progress("streamed output")
+
+        return 0
+
+    adl_runtime._run_stage(
+        ["docker", "run"],
+        command_runner = lambda _command: 99,
+        streaming_command_runner = streaming_runner,
+        stage_name = "streaming stage",
+        progress = messages.append,
+    )
+
+    assert calls == [["docker", "run"]]
+    
+    assert messages == [
+        "Starting streaming stage.",
+        "streamed output",
+        "Finished streaming stage.",
+    ]
+
+def test_global_frame_progress_forwards_unrelated_and_offsets_matching_updates() -> None:
+    messages: list[str] = []
+    
+    report = adl_runtime._global_frame_progress(
+        messages.append,
+        source_kind = "detic_frame_processed",
+        offset = 20,
+        total = 60,
+    )
+
+    report("plain runtime output")
+    report('EGOMODELKIT_PROGRESS {"kind": "hand_object_image_processed", "current": 1}')
+    report('EGOMODELKIT_PROGRESS {"kind": "detic_frame_processed", "current": "5"}')
+
+    assert messages[:2] == [
+        "plain runtime output",
+        'EGOMODELKIT_PROGRESS {"kind": "hand_object_image_processed", "current": 1}',
+    ]
+    
+    assert messages[2] == (
+        'EGOMODELKIT_PROGRESS {"current": 25, '
+        '"kind": "detic_frame_processed", "total": 60}'
+    )
+    
+def test_adl_payload_int_covers_float_string_and_missing_values() -> None:
+    payload = {
+        "integer": 3,
+        "floating": 4.9,
+        "digits": "5",
+        "letters": "five",
+    }
+
+    assert adl_runtime._payload_int(payload, "integer") == 3
+    assert adl_runtime._payload_int(payload, "floating") == 4
+    assert adl_runtime._payload_int(payload, "digits") == 5
+    assert adl_runtime._payload_int(payload, "letters") == 0
+    assert adl_runtime._payload_int(payload, "missing") == 0

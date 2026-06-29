@@ -13,6 +13,7 @@ from egomodelkit.models.adl_recognition import (
     validate_adl_recognition_request,
 )
 from egomodelkit.models.hand_object_contact import HandObjectContactRequest
+from egomodelkit.progress import external_progress_line, parse_external_progress_line
 from egomodelkit.runtime.commands import subprocess_runner
 from egomodelkit.runtime.external_code import (
     DETECTRON2_PIN,
@@ -33,6 +34,8 @@ from egomodelkit.runtime.preflight import (
 )
 
 CommandRunner = Callable[[list[str]], int]
+StreamingCommandRunner = Callable[[list[str], ProgressReporter], int]
+
 AdlRecognitionStage = Literal["extract", "predict", "finalize"]
 
 EGOVIZML_REPOSITORY_URL: Final[str] = EGOVIZML_PIN.fork_repository_url
@@ -182,6 +185,7 @@ def ensure_core_runtime_image(
     *,
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Build the ADL core image only when it is missing. """
@@ -192,6 +196,7 @@ def ensure_core_runtime_image(
         build_arguments = _core_docker_build_arguments(runtime_spec),
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress,
         runtime_name = "adl-recognition core",
     )
@@ -200,6 +205,7 @@ def ensure_detic_runtime_image(
     *,
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Build the ADL Detic image only when it is missing. """
@@ -210,6 +216,7 @@ def ensure_detic_runtime_image(
         build_arguments = _detic_docker_build_arguments(runtime_spec),
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress,
         runtime_name = "adl-recognition Detic",
     )
@@ -222,6 +229,7 @@ def _ensure_runtime_image(
     build_arguments: list[str],
     runtime_spec: AdlRecognitionRuntimeSpec,
     command_runner: CommandRunner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     progress: ProgressReporter,
     runtime_name: str,
 ) -> None:
@@ -254,7 +262,10 @@ def _ensure_runtime_image(
         str(context_dir),
     ]
     
-    exit_code = command_runner(build_command)
+    if streaming_command_runner is None:
+        exit_code = command_runner(build_command)
+    else:
+        exit_code = streaming_command_runner(build_command, progress)
     
     if exit_code != 0:
         raise AdlRecognitionRuntimeError(
@@ -357,6 +368,7 @@ def _repair_output_ownership(
     *,
     runtime_spec: AdlRecognitionRuntimeSpec,
     command_runner: CommandRunner,
+    streaming_command_runner: StreamingCommandRunner | None,
     progress: ProgressReporter,
 ) -> list[str]:
     command = build_output_ownership_repair_command(
@@ -367,6 +379,7 @@ def _repair_output_ownership(
     _run_stage(
         command,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         stage_name = "ADL output ownership repair",
         progress = progress,
     )
@@ -378,6 +391,7 @@ def run_adl_recognition(
     *,
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> list[list[str]]:
     """ Run ADL recognition behind EgoModelKit's run command. """
@@ -396,6 +410,7 @@ def run_adl_recognition(
     ensure_core_runtime_image(
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress,
     )
     
@@ -411,6 +426,7 @@ def run_adl_recognition(
         _run_stage(
             command,
             command_runner = command_runner,
+            streaming_command_runner = streaming_command_runner,
             stage_name = "adl-recognition prediction",
             progress = progress,
         )
@@ -421,6 +437,7 @@ def run_adl_recognition(
             request.output_dir,
             runtime_spec = runtime_spec,
             command_runner = command_runner,
+            streaming_command_runner = streaming_command_runner,
             progress = progress,
         )
         
@@ -439,6 +456,7 @@ def run_adl_recognition(
     _run_stage(
         extract_command,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         stage_name = "ADL video frame extraction",
         progress = progress,
     )
@@ -449,6 +467,7 @@ def run_adl_recognition(
         request.output_dir,
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress,
     )
     
@@ -457,26 +476,100 @@ def run_adl_recognition(
     frame_dirs = _subclip_frame_dirs(
         request.output_dir,
         runtime_spec = runtime_spec,
-    )
+    )    
     
     if not frame_dirs:
         raise AdlRecognitionRuntimeError(
             "ADL frame extraction completed but no subclip frame directories were found."
         )
     
+    global_frame_total = _total_frame_count(frame_dirs)
+
+    if global_frame_total <= 0:
+        raise AdlRecognitionRuntimeError(
+            "ADL frame extraction completed but no extracted frame images were found."
+        )
+    
+    progress(
+        external_progress_line(
+            "adl_frame_extracted",
+            current = global_frame_total,
+            total = global_frame_total,
+        )
+    )
+    
     ensure_detic_runtime_image(
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress,
     )
     
+    hand_object_frames_done = 0
+    detic_frames_done = 0
+
     for frame_dir in frame_dirs:
-        shan_output_dir = _shan_output_dir(
+        frame_count = _frame_count(frame_dir)
+
+        detic_output_dir = _detic_output_dir(
             request.output_dir,
             frame_dir.name,
             runtime_spec = runtime_spec,
         )
+
+        detic_output_dir.mkdir(parents=True, exist_ok=True)
+
+        detic_command = build_detic_run_command(
+            frame_dir = frame_dir,
+            output_dir = detic_output_dir,
+            runtime_spec = runtime_spec,
+        )
+
+        next_detic_frames_done = detic_frames_done + frame_count
+
+        _run_stage(
+            detic_command,
+            command_runner = command_runner,
+            streaming_command_runner = streaming_command_runner,
+            stage_name = f"Detic inference for {frame_dir.name}",
+            progress = _global_frame_progress(
+                progress,
+                source_kind = "detic_frame_processed",
+                offset = detic_frames_done,
+                total = global_frame_total,
+            ),
+        )
+
+        progress(
+            external_progress_line(
+                "detic_frame_processed",
+                current = next_detic_frames_done,
+                total = global_frame_total,
+            )
+        )
+
+        detic_frames_done = next_detic_frames_done
         
+        executed_commands.append(detic_command)
+
+        ownership_repair_command = _repair_output_ownership(
+            request.output_dir,
+            runtime_spec = runtime_spec,
+            command_runner = command_runner,
+            streaming_command_runner = streaming_command_runner,
+            progress = progress,
+        )
+
+        executed_commands.append(ownership_repair_command)
+
+        shan_output_dir = _shan_output_dir(
+            request.output_dir,
+            frame_dir.name,
+            runtime_spec=runtime_spec,
+        )
+
+        next_hand_object_frames_done = hand_object_frames_done + frame_count
+
         shan_command_result = run_hand_object_contact(
             HandObjectContactRequest(
                 input_path = frame_dir,
@@ -484,53 +577,38 @@ def run_adl_recognition(
             ),
             runtime_spec = runtime_spec.hand_object_contact_runtime_spec,
             command_runner = command_runner,
-            progress = progress,
+            streaming_command_runner = streaming_command_runner,
+            progress = _global_frame_progress(
+                progress,
+                source_kind = "hand_object_image_processed",
+                offset=hand_object_frames_done,
+                total=global_frame_total,
+            ),
         )
-        
+
+        progress(
+            external_progress_line(
+                "hand_object_image_processed",
+                current = next_hand_object_frames_done,
+                total = global_frame_total,
+            )
+        )
+
+        hand_object_frames_done = next_hand_object_frames_done
+
         _append_executed_command_result(
             executed_commands,
             shan_command_result,
         )
-        
+
         ownership_repair_command = _repair_output_ownership(
             request.output_dir,
             runtime_spec = runtime_spec,
             command_runner = command_runner,
+            streaming_command_runner = streaming_command_runner,
             progress = progress,
         )
-        
-        executed_commands.append(ownership_repair_command)
-                
-        detic_output_dir = _detic_output_dir(
-            request.output_dir,
-            frame_dir.name,
-            runtime_spec = runtime_spec
-        )
-        
-        detic_output_dir.mkdir(parents = True, exist_ok = True)
-        
-        detic_command = build_detic_run_command(
-            frame_dir = frame_dir,
-            output_dir = detic_output_dir,
-            runtime_spec = runtime_spec,
-        )
-        
-        _run_stage(
-            detic_command,
-            command_runner = command_runner,
-            stage_name = f"Detic inference for {frame_dir.name}",
-            progress = progress,
-        )
-        
-        executed_commands.append(detic_command)
-        
-        ownership_repair_command = _repair_output_ownership(
-            request.output_dir,
-            runtime_spec = runtime_spec,
-            command_runner = command_runner,
-            progress = progress,
-        )
-        
+
         executed_commands.append(ownership_repair_command)
     
     finalize_command = build_core_run_command(
@@ -542,6 +620,7 @@ def run_adl_recognition(
     _run_stage(
         finalize_command,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         stage_name = "ADL prediction finalization",
         progress = progress,
     )
@@ -552,6 +631,7 @@ def run_adl_recognition(
         request.output_dir,
         runtime_spec = runtime_spec,
         command_runner = command_runner,
+        streaming_command_runner = streaming_command_runner,
         progress = progress,
     )
     
@@ -565,12 +645,16 @@ def _run_stage(
     command: list[str],
     *,
     command_runner: CommandRunner,
+    streaming_command_runner: StreamingCommandRunner | None = None,
     stage_name: str,
     progress: ProgressReporter,
 ) -> None:
     progress(f"Starting {stage_name}.")
     
-    exit_code = command_runner(command)
+    if streaming_command_runner is None:
+        exit_code = command_runner(command)
+    else:
+        exit_code = streaming_command_runner(command, progress)
     
     if exit_code != 0:
         raise AdlRecognitionRuntimeError(
@@ -640,6 +724,56 @@ def _staged_adl_dir(
         output_dir,
         runtime_spec = runtime_spec,
     ) / runtime_spec.staged_adl_dir_name
+
+def _frame_count(frame_dir: Path) -> int:
+    """ Return the number of extracted frame images in one subclip folder. """
+    return len(sorted(frame_dir.glob("*.jpg")))
+
+def _total_frame_count(frame_dirs: list[Path]) -> int:
+    """ Return the total frames across all subclips. """
+    return sum(_frame_count(frame_dir) for frame_dir in frame_dirs)
+
+def _global_frame_progress(
+    progress: ProgressReporter,
+    *,
+    source_kind: str,
+    offset: int,
+    total: int,
+) -> ProgressReporter:
+    """ Convert per-subclip model progress into global all-subclip progress. """
+    def report(message: str) -> None:
+        update = parse_external_progress_line(message)
+
+        if update is None or update.kind != source_kind:
+            progress(message)
+            
+            return
+
+        current = _payload_int(update.payload, "current")
+
+        progress(
+            external_progress_line(
+                source_kind,
+                current = offset + current,
+                total = total,
+            )
+        )
+
+    return report
+
+def _payload_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, float):
+        return int(value)
+
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+
+    return 0
 
 def _subclip_frame_dirs(
     output_dir: Path,

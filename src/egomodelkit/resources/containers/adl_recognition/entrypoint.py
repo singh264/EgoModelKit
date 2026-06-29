@@ -234,7 +234,7 @@ def _stage_input_videos(
         if path.suffix.lower() not in SUPPORTED_VIDEO_SUFFIXES:
             continue
         
-        staged_path = adl_dir / f"video{staged_count + 1:03d}.{EGOVIZML_STAGED_VIDEO_SUFFIX}"
+        staged_path = adl_dir / f"video{staged_count + 1:03d}{EGOVIZML_STAGED_VIDEO_SUFFIX}"
         shutil.copy2(path, staged_path)
         staged_count += 1
     

@@ -2,7 +2,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from egomodelkit.progress import ProgressEvent, read_progress_events, write_progress_event
+from egomodelkit.progress import (
+    ExternalProgressUpdate,
+    ProgressEvent,
+    parse_external_progress_line,
+    read_progress_events,
+    write_progress_event,
+)
 
 
 def test_progress_event_display_text_with_counts() -> None:
@@ -14,7 +20,7 @@ def test_progress_event_display_text_with_counts() -> None:
         unit = "frames",
     )
 
-    assert event.display_text == "Extracting frames: 240 / 1200 frames"
+    assert event.display_text == "Extracting frames: 240 / 1,200 frames"
 
 def test_progress_event_display_text_without_counts_or_unit() -> None:
     assert (
@@ -65,3 +71,45 @@ def test_progress_log_round_trip_skips_malformed_lines(tmp_path: Path) -> None:
             ),
         ]
     )
+
+def test_parse_external_progress_line_reads_model_payload() -> None:
+    update = parse_external_progress_line(
+        'EGOMODELKIT_PROGRESS {"kind": "detic_frame_processed", "current": 3, "total": 10}'
+    )
+
+    assert update == ExternalProgressUpdate(
+        kind = "detic_frame_processed",
+        payload = {"current": 3, "total": 10},
+    )
+
+def test_parse_external_progress_line_ignores_plain_or_malformed_lines() -> None:
+    assert parse_external_progress_line("plain runtime log") is None
+    assert parse_external_progress_line("EGOMODELKIT_PROGRESS not-json") is None
+    assert parse_external_progress_line('EGOMODELKIT_PROGRESS {"current": 1}') is None
+
+def test_progress_event_display_text_omits_unknown_zero_total() -> None:
+    event = ProgressEvent(
+        stage = "extract_frames",
+        message = "Extracting frames: waiting",
+        current = 0,
+        total = 0,
+        unit = "frames",
+    )
+
+    assert event.display_text == "Extracting frames: waiting"
+
+def test_parse_external_progress_line_reads_payload_after_tqdm_prefix() -> None:
+    update = parse_external_progress_line(
+        '95%|█████████▌| 19/20 [00:23<00:01]'
+        'EGOMODELKIT_PROGRESS {"kind": "detic_frame_processed", "current": 20, "total": 20}'
+    )
+
+    assert update == ExternalProgressUpdate(
+        kind = "detic_frame_processed",
+        payload = {"current": 20, "total": 20},
+    )
+
+def test_parse_external_progress_line_ignores_json_arrays() -> None:
+    assert parse_external_progress_line(
+        'EGOMODELKIT_PROGRESS ["not", "an", "object"]'
+    ) is None

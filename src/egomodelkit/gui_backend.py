@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import shutil
 import subprocess
 import tempfile
@@ -46,12 +47,21 @@ from egomodelkit.output_contract import (
     output_preview_note,
     write_run_summary,
 )
-from egomodelkit.progress import ProgressEvent, write_progress_event
+from egomodelkit.progress import (
+    ExternalProgressUpdate,
+    ProgressEvent,
+    parse_external_progress_line,
+    write_progress_event,
+    write_runtime_log_line,
+)
 from egomodelkit.runtime.adl_recognition import (
     AdlRecognitionRuntimeError,
     run_adl_recognition,
 )
-from egomodelkit.runtime.commands import subprocess_runner
+from egomodelkit.runtime.commands import (
+    streaming_subprocess_runner,
+    subprocess_runner,
+)
 from egomodelkit.runtime.hand_object_contact import (
     HandObjectContactRuntimeError,
     run_hand_object_contact,
@@ -96,6 +106,21 @@ class StagedInput:
     input_path: Path
     input_names: tuple[str, ...]
 
+@dataclass(frozen = True, slots = True)
+class RuntimeStatus:
+    """ Temporary red-line Docker build status shown under Running model. """
+    model_name: str
+    current_step: int | None = None
+    total_steps: int | None = None
+
+@dataclass(frozen = True, slots = True)
+class RuntimeBuildStage:
+    """ One Docker image build counted as one progress-bar stage. """
+    stage_id: str
+    model_name: str
+    current: int
+    total: int
+
 @dataclass(slots = True)
 class GuiRunState:
     """ In-memory state for one local GUI run. """
@@ -109,7 +134,10 @@ class GuiRunState:
     staged_root: Path
     output_preview: dict[str, object]
     error_message: str | None = None
-    progress_events: list[ProgressEvent] = field(default_factory = list)
+    runtime_status: RuntimeStatus | None = None
+    active_runtime_stage_id: str | None = None
+    runtime_build_stages: dict[str, RuntimeBuildStage] = field(default_factory=dict)
+    progress_events: list[ProgressEvent] = field(default_factory=list)
     lock: threading.Lock = field(default_factory = threading.Lock)
 
 def create_app(
@@ -288,10 +316,7 @@ def create_app(
             
             runs[run_id] = state
             
-            _record_progress(
-                state,
-                ProgressEvent(stage = "setup", message = "Preparing input"),
-            )
+            _initialize_wireframe_progress(state)
             
             thread = threading.Thread(
                 target = _execute_run,
@@ -388,10 +413,13 @@ def _execute_run(
     """ Execute one run in a background thread. """
     try:
         def progress(message: str) -> None:
-            _record_progress(
-                state,
-                ProgressEvent(stage = "runtime", message = message),
-            )
+            update = parse_external_progress_line(message)
+
+            if update is not None:
+                _record_external_progress_update(state, update)
+                return
+
+            _record_runtime_output(state, message)
         
         if state.model_id == HAND_OBJECT_CONTACT_MODEL_ID:
             runner = (
@@ -417,17 +445,16 @@ def _execute_run(
             scenario = state.scenario,
         )
         
+        _record_final_output_progress(state)
+        
+        _finish_runtime_build_stage(state)
+        
         write_run_summary(
             layout = state.layout,
             model_id = state.model_id,
             input_path = state.input_path,
             scenario = state.scenario,
             status = "completed",
-        )
-        
-        _record_progress(
-            state,
-            ProgressEvent(stage = "completed", message = "Run completed"),
         )
         
         with state.lock:
@@ -447,6 +474,7 @@ def _execute_run(
         )
         
         with state.lock:
+            state.runtime_status = None
             state.status = "failed"
             state.error_message = str(exc)
     finally:
@@ -461,6 +489,7 @@ def _run_hand_object_contact_for_gui(
     run_hand_object_contact(
         HandObjectContactRequest(input_path = input_path, output_dir = output_dir),
         command_runner = subprocess_runner,
+        streaming_command_runner = streaming_subprocess_runner,
         progress = progress,
     )
 
@@ -473,6 +502,7 @@ def _run_adl_recognition_for_gui(
     run_adl_recognition(
         AdlRecognitionRequest(input_path = input_path, output_dir = output_dir),
         command_runner = subprocess_runner,
+        streaming_command_runner = streaming_subprocess_runner,
         progress = progress,
     )
 
@@ -551,12 +581,568 @@ def _record_progress(state: GuiRunState, event: ProgressEvent) -> None:
     
     write_progress_event(state.layout.progress_log_path, event)
 
+def _initialize_wireframe_progress(state: GuiRunState) -> None:
+    """ Create the exact visible running-card rows from the approved wireframes. """
+    for event in _initial_wireframe_events(state):
+        _upsert_progress_event(state, event)
+
+def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
+    if state.scenario == "hand-object-single-image":
+        return [
+            ProgressEvent(stage = "prepare_input", message = "Preparing image input..."),
+            ProgressEvent(stage = "check_input", message = "Checking selected image..."),
+            ProgressEvent(
+                stage="run_hand_object",
+                message="Running hand-object contact model on the image: waiting",
+            ),
+            ProgressEvent(
+                stage = "save_outputs", 
+                message = "Saving detection outputs: waiting",
+            ),
+        ]
+
+    if state.scenario == "hand-object-image-directory":
+        return [
+            ProgressEvent(stage = "prepare_input", message = "Preparing image inputs..."),
+            ProgressEvent(stage = "check_input", message = "Checking images: waiting"),
+            ProgressEvent(
+                stage="run_hand_object", 
+                message = "Running hand-object contact model on the images: waiting",
+            ),
+            ProgressEvent(
+                stage = "save_outputs", 
+                message = "Saving detection outputs: waiting",
+            ),
+        ]
+
+    if state.scenario == "adl-single-video":
+        return [
+            ProgressEvent(stage = "prepare_input", message = "Preparing video input..."),
+            ProgressEvent(stage = "extract_frames", message = "Extracting frames: waiting"),
+            ProgressEvent(
+                stage = "run_detic",
+                message="Running object detection model on extracted frames: waiting",
+            ),
+            ProgressEvent(
+                stage="run_hand_object", 
+                message="Running hand-object contact on extracted frames: waiting",
+            ),
+            ProgressEvent(
+                stage = "combine_predictions", 
+                message = "Combining predictions: waiting"),
+            ProgressEvent(
+                stage = "calculate_metrics",
+                message = "Calculating video-level summary metrics: waiting",
+            ),
+            ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
+        ]
+
+    if state.scenario == "adl-video-directory":
+        return [
+            ProgressEvent(stage = "prepare_input", message = "Preparing video inputs..."),
+            ProgressEvent(stage = "check_input", message = "Checking video: waiting"),
+            ProgressEvent(
+                stage="extract_frames", 
+                message="Extracting frames across all videos: waiting"
+            ),
+            ProgressEvent(
+                stage = "run_detic", 
+                message = "Running object detection model: waiting"
+            ),
+            ProgressEvent(
+                stage = "run_hand_object",
+                message = "Running hand-object contact on extracted frames: waiting",
+            ),
+            ProgressEvent(
+                stage = "combine_predictions", 
+                message = "Combining predictions: waiting"),
+            ProgressEvent(
+                stage = "calculate_metrics",
+                message = "Calculating video-level summary metrics: waiting",
+            ),
+            ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
+        ]
+
+    if state.scenario == "adl-combined-predictions":
+        return [
+            ProgressEvent(
+                stage = "prepare_input", 
+                message = "Preparing combined predictions input..."),
+            ProgressEvent(
+                stage = "combine_predictions", 
+                message = "Combining predictions: waiting"),
+            ProgressEvent(
+                stage = "calculate_metrics",
+                message = "Calculating video-level summary metrics: waiting",
+            ),
+            ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
+        ]
+
+    raise ValueError(f"Unsupported progress scenario: {state.scenario}")
+
+def _record_external_progress_update(
+    state: GuiRunState,
+    update: ExternalProgressUpdate,
+) -> None:
+    """ Map in-container progress updates to exact wireframe visible rows. """
+    payload = update.payload
+
+    if update.kind in {"hand_object_images_discovered", "hand_object_images_checked"}:
+        total = _payload_int(payload, "total")
+
+        if state.scenario == "hand-object-single-image":
+            _upsert_progress_event(
+                state,
+                ProgressEvent(stage = "check_input", message = "Checking selected image..."),
+            )
+        elif state.scenario == "hand-object-image-directory":
+            _upsert_progress_event(
+                state,
+                ProgressEvent(
+                    stage = "check_input",
+                    message = "Checking images",
+                    current = total,
+                    total = total,
+                    unit = "valid images",
+                ),
+            )
+
+        return
+
+    if update.kind == "hand_object_image_processed":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+
+        if state.model_id == HAND_OBJECT_CONTACT_MODEL_ID:
+            if state.scenario == "hand-object-single-image":
+                _upsert_progress_event(
+                    state,
+                    ProgressEvent(
+                        stage = "run_hand_object",
+                        message = "Running hand-object contact model on the image",
+                        current = current,
+                        total = total,
+                        unit = "image processed",
+                    ),
+                )
+            else:
+                _upsert_progress_event(
+                    state,
+                    ProgressEvent(
+                        stage = "run_hand_object",
+                        message = "Running hand-object contact model on the images",
+                        current = current,
+                        total = total,
+                        unit = "images processed",
+                    ),
+                )
+        else:
+            _upsert_progress_event(
+                state,
+                ProgressEvent(
+                    stage = "run_hand_object",
+                    message = "Running hand-object contact on extracted frames",
+                    current = current,
+                    total = total,
+                    unit = "frames",
+                ),
+            )
+
+        return
+
+    if update.kind == "hand_object_output_saved":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+
+        if state.scenario == "hand-object-image-directory":
+            _upsert_progress_event(
+                state,
+                ProgressEvent(
+                    stage = "save_outputs",
+                    message = "Saving detection outputs",
+                    current = current,
+                    total = total,
+                    unit = "images",
+                ),
+            )
+
+        return
+
+    if update.kind == "adl_video_checked":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+
+        if state.scenario == "adl-video-directory":
+            _upsert_progress_event(
+                state,
+                ProgressEvent(
+                    stage = "check_input",
+                    message = "Checking videos",
+                    current = current,
+                    total = total,
+                    unit = "valid videos",
+                ),
+            )
+
+        return
+
+    if update.kind == "adl_frame_extracted":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+
+        message = (
+            "Extracting frames across all videos"
+            if state.scenario == "adl-video-directory"
+            else "Extracting frames"
+        )
+
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage = "extract_frames",
+                message = message,
+                current = current,
+                total = total,
+                unit = "frames",
+            ),
+        )
+
+        return
+
+    if update.kind == "detic_frame_processed":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+
+        message = (
+            "Running object detection model"
+            if state.scenario == "adl-video-directory"
+            else "Running object detection model on extracted frames"
+        )
+
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage = "run_detic",
+                message = message,
+                current = current,
+                total = total,
+                unit = "frames",
+            ),
+        )
+
+        return
+
+    if update.kind == "adl_prediction_frames_discovered":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage = "combine_predictions",
+                message = "Combining predictions: waiting",
+            ),
+        )
+
+        return
+
+    if update.kind == "adl_prediction_frame_processed":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage = "combine_predictions",
+                message = "Combining predictions",
+                current = current,
+                total = total,
+                unit = "frames",
+            ),
+        )
+
+        return
+
+    if update.kind == "adl_predictions_combining":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage = "combine_predictions",
+                message = "Combining predictions: waiting",
+            ),
+        )
+
+        return
+
+    if update.kind == "adl_predictions_combined":
+        return
+
+def _display_video_name_from_payload(payload: dict[str, object]) -> str:
+    """ Return a clean user-facing video label. """
+    display_video = payload.get("displayVideo")
+
+    if isinstance(display_video, str) and display_video:
+        return display_video
+
+    video = str(payload.get("video", "unknown"))
+
+    path = Path(video)
+    suffix = path.suffix
+    stem = path.name[: -len(suffix)] if suffix else path.name
+
+    return f"{stem.rstrip('.')}{suffix}"
+
+def _stage_has_numeric_progress(state: GuiRunState, stage: str) -> bool:
+    """ Return true when a visible stage already has real current/total progress. """
+    with state.lock:
+        return any(
+            event.stage == stage
+            and event.current is not None
+            and event.total is not None
+            and event.total > 0
+            for event in state.progress_events
+        )
+        
+def _record_final_output_progress(state: GuiRunState) -> None:
+    """ Mark final wireframe rows complete once output finalization is reached. """
+    if state.model_id == ADL_RECOGNITION_MODEL_ID:
+        return
+
+    if not _stage_has_numeric_progress(state, "save_outputs"):
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="save_outputs",
+                message="Saving detection outputs",
+                current=1,
+                total=1,
+            ),
+        )
+
+def _record_runtime_output(state: GuiRunState, message: str) -> None:
+    """ Write raw runtime output to runtime.log and update Docker build state. """
+    write_runtime_log_line(state.layout.runtime_log_path, message)
+    _update_docker_build_progress(state, message)
+
+def _update_docker_build_progress(state: GuiRunState, message: str) -> None:
+    """ Track Docker image builds as simple equal-weight progress stages. """
+    model_name = _docker_model_name_from_message(message)
+    normalized = message.lower()
+
+    if model_name is not None and "missing; preparing it now" in normalized:
+        _start_runtime_build_stage(state, model_name)
+        
+        return
+
+    if model_name is not None and "runtime image is already available" in normalized:
+        with state.lock:
+            state.runtime_status = None
+            state.active_runtime_stage_id = None
+            
+        return
+
+    if model_name is not None and "runtime image is ready" in normalized:
+        _finish_runtime_build_stage(state)
+        
+        return
+
+    docker_step = _docker_build_step_counts(message)
+
+    if docker_step is not None:
+        current, total = docker_step
+        
+        _update_active_runtime_build_stage(
+            state,
+            current=current,
+            total=total,
+        )
+
+def _start_runtime_build_stage(state: GuiRunState, model_name: str) -> None:
+    """ Start counting one Docker image build as one progress stage. """
+    stage_id = f"docker:{model_name}"
+
+    with state.lock:
+        state.active_runtime_stage_id = stage_id
+        
+        state.runtime_status = RuntimeStatus(
+            model_name = model_name,
+            current_step = None,
+            total_steps = None,
+        )
+        
+        state.runtime_build_stages[stage_id] = RuntimeBuildStage(
+            stage_id = stage_id,
+            model_name = model_name,
+            current = 0,
+            total = 1,
+        )
+
+def _update_active_runtime_build_stage(
+    state: GuiRunState,
+    *,
+    current: int,
+    total: int,
+) -> None:
+    """ Update the active Docker build without allowing progress to go backward. """
+    with state.lock:
+        stage_id = state.active_runtime_stage_id
+
+        if stage_id is None:
+            return
+
+        existing = state.runtime_build_stages[stage_id]
+        next_total = max(existing.total, total)
+        next_current = max(existing.current, min(current, next_total))
+
+        state.runtime_build_stages[stage_id] = RuntimeBuildStage(
+            stage_id = stage_id,
+            model_name = existing.model_name,
+            current = next_current,
+            total = next_total,
+        )
+        
+        state.runtime_status = RuntimeStatus(
+            model_name = existing.model_name,
+            current_step = next_current,
+            total_steps = next_total,
+        )
+
+def _finish_runtime_build_stage(state: GuiRunState) -> None:
+    """ Mark the active Docker build stage complete and clear the red line. """
+    with state.lock:
+        stage_id = state.active_runtime_stage_id
+
+        if stage_id is not None:
+            existing = state.runtime_build_stages[stage_id]
+            
+            state.runtime_build_stages[stage_id] = RuntimeBuildStage(
+                stage_id = stage_id,
+                model_name = existing.model_name,
+                current = existing.total,
+                total = existing.total,
+            )
+
+        state.runtime_status = None
+        state.active_runtime_stage_id = None
+
+def _docker_model_name_from_message(message: str) -> str | None:
+    """ Extract the Docker image's readable model name from EgoModelKit logs. """
+    normalized = message.lower()
+
+    if "hand-object-contact runtime image" in normalized:
+        return "hand-object-detector"
+
+    if "adl-recognition core runtime image" in normalized:
+        return "EgoVizML"
+
+    if "adl-recognition detic runtime image" in normalized:
+        return "Detic"
+
+    return None
+
+def _docker_build_step_counts(message: str) -> tuple[int, int] | None:
+    """ Extract Dockerfile step counts from BuildKit or classic Docker output. """
+    buildkit_match = re.search(r"\[\s*(\d+)/(\d+)\]", message)
+
+    if buildkit_match is not None:
+        return int(buildkit_match.group(1)), int(buildkit_match.group(2))
+
+    classic_match = re.search(r"Step\s+(\d+)/(\d+)", message)
+
+    if classic_match is not None:
+        return int(classic_match.group(1)), int(classic_match.group(2))
+
+    return None
+
+def _stage_from_external_progress_kind(kind: str) -> str | None:
+    """ Return the visible stage updated by one external progress kind. """
+    if kind in {"hand_object_images_discovered", "hand_object_images_checked"}:
+        return "check_input"
+
+    if kind == "hand_object_image_processed":
+        return "run_hand_object"
+
+    if kind == "hand_object_output_saved":
+        return "save_outputs"
+
+    if kind == "adl_video_checked":
+        return "check_input"
+
+    if kind == "adl_frame_extracted":
+        return "extract_frames"
+
+    if kind == "detic_frame_processed":
+        return "run_detic"
+
+    if kind in {
+        "adl_prediction_frames_discovered",
+        "adl_prediction_frame_processed",
+        "adl_predictions_combining",
+        "adl_predictions_combined",
+    }:
+        return "combine_predictions"
+
+    return None
+
+def _upsert_progress_event(state: GuiRunState, event: ProgressEvent) -> None:
+    """ Insert or replace one visible progress row by stage without going backward. """
+    with state.lock:
+        for index, existing_event in enumerate(state.progress_events):
+            if existing_event.stage == event.stage:
+                state.progress_events[index] = _merge_progress_event(
+                    existing_event,
+                    event,
+                )
+                
+                break
+        else:
+            state.progress_events.append(event)
+
+    write_progress_event(state.layout.progress_log_path, event)
+
+def _merge_progress_event(
+    existing_event: ProgressEvent,
+    next_event: ProgressEvent,
+) -> ProgressEvent:
+    """ Keep the newest message, but never reduce numeric progress. """
+    if (
+        existing_event.current is None
+        or existing_event.total is None
+        or next_event.current is None
+        or next_event.total is None
+    ):
+        return next_event
+
+    if existing_event.total != next_event.total:
+        return next_event
+
+    return ProgressEvent(
+        stage = next_event.stage,
+        message = next_event.message,
+        current = max(existing_event.current, next_event.current),
+        total = next_event.total,
+        unit = next_event.unit,
+    )
+
+def _payload_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+
+    if isinstance(value, int):
+        return value
+
+    if isinstance(value, float):
+        return int(value)
+
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+
+    return 0
+
 def _progress_response(state: GuiRunState) -> dict[str, object]:
     """ Convert run state into a JSON-safe progress response. """
     with state.lock:
         status = state.status
         error_message = state.error_message
         events = list(state.progress_events)
+        runtime_status = state.runtime_status
+        runtime_build_stages = list(state.runtime_build_stages.values())
     
     return {
         "runId": state.run_id,
@@ -573,6 +1159,24 @@ def _progress_response(state: GuiRunState) -> dict[str, object]:
                 "displayText": event.display_text,
             }
             for event in events
+        ],
+        "runtimeStatus": (
+            None
+            if runtime_status is None
+            else {
+                "modelName": runtime_status.model_name,
+                "currentStep": runtime_status.current_step,
+                "totalSteps": runtime_status.total_steps,
+            }
+        ),
+        "runtimeBuildStages": [
+            {
+                "stageId": stage.stage_id,
+                "modelName": stage.model_name,
+                "current": stage.current,
+                "total": stage.total,
+            }
+            for stage in runtime_build_stages
         ],
         "outputPreview": state.output_preview,
     }

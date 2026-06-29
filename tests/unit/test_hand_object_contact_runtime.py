@@ -315,3 +315,65 @@ def test_build_run_command_supports_directory_input(tmp_path: Path) -> None:
     assert command[input_arg_index + 1] == str(
         DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.container_input_dir
     )
+
+def test_ensure_runtime_image_uses_streaming_runner_when_building() -> None:
+    messages: list[str] = []
+    streamed_commands: list[list[str]] = []
+
+    def inspect_runner(command: list[str]) -> int:
+        assert command[1:3] == ["image", "inspect"]
+        return 1
+
+    def streaming_runner(command: list[str], progress) -> int:
+        streamed_commands.append(command)
+        progress("streamed build output")
+
+        return 0
+
+    ensure_runtime_image(
+        command_runner = inspect_runner,
+        streaming_command_runner = streaming_runner,
+        progress = messages.append,
+    )
+
+    assert streamed_commands[0][:2] == [
+        DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.docker_executable,
+        "build",
+    ]
+    
+    assert "streamed build output" in messages
+    assert "Packaged hand-object-contact runtime image is ready." in messages
+
+def test_run_hand_object_contact_uses_streaming_runner_for_inference(
+    tmp_path: Path,
+) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"fake-image")
+
+    request = HandObjectContactRequest(
+        input_path = image_path,
+        output_dir = tmp_path / "results",
+    )
+
+    streamed_commands: list[list[str]] = []
+    messages: list[str] = []
+
+    def runner(command: list[str]) -> int:
+        return 0
+
+    def streaming_runner(command: list[str], progress) -> int:
+        streamed_commands.append(command)
+        progress("streamed inference output")
+
+        return 0
+
+    run_command = run_hand_object_contact(
+        request,
+        command_runner = runner,
+        streaming_command_runner = streaming_runner,
+        progress = messages.append,
+    )
+
+    assert streamed_commands == [run_command]
+    assert "streamed inference output" in messages
+    assert "hand-object-contact inference completed." in messages

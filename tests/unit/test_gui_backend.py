@@ -11,6 +11,7 @@ import pytest
 from fastapi import UploadFile
 from fastapi.testclient import TestClient
 
+import egomodelkit.gui_backend as gui_backend
 from egomodelkit.gui_backend import (
     GuiRunState,
     ProgressCallback,
@@ -40,8 +41,38 @@ from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
 )
 from egomodelkit.output_contract import build_run_output_layout, create_output_scaffold
+from egomodelkit.progress import ExternalProgressUpdate, ProgressEvent
 from egomodelkit.runtime.hand_object_contact import HandObjectContactRuntimeError
 
+
+def _progress_line(kind: str, **payload: object) -> str:
+    import json
+
+    return "EGOMODELKIT_PROGRESS " + json.dumps(
+        {
+            "kind": kind,
+            **payload,
+        },
+        sort_keys = True,
+    )
+
+def _test_run_state(
+    tmp_path: Path,
+    *,
+    model_id: str = HAND_OBJECT_CONTACT_MODEL_ID,
+    scenario: str = "hand-object-single-image",
+) -> GuiRunState:
+    return GuiRunState(
+        run_id = "run-test",
+        model_id = model_id,
+        status = "running",
+        layout = build_run_output_layout(tmp_path / "results", run_id = "run-test"),
+        scenario = scenario,  # type: ignore[arg-type]
+        input_name = "input",
+        input_path = tmp_path / "input",
+        staged_root = tmp_path / "staged",
+        output_preview = {},
+    )
 
 def test_models_endpoint_return_supported_models() -> None:
     client = TestClient(create_app())
@@ -153,10 +184,17 @@ def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> Non
     
     assert progress_body["status"] == "completed"
     
-    assert any(
-        event["displayText"] == "Fake model step"
-        for event in progress_body["events"]
+    visible_lines = [event["displayText"] for event in progress_body["events"]]
+    assert "Fake model step" not in visible_lines
+
+    runtime_log = (
+        Path(progress_body["outputFolder"])
+        / run_id
+        / "logs"
+        / "runtime.log"
     )
+
+    assert "Fake model step" in runtime_log.read_text(encoding="utf-8")
     
     output_folder = Path(progress_body["outputFolder"])
     
@@ -562,7 +600,26 @@ def test_run_endpoint_uses_injected_adl_runner(tmp_path: Path) -> None:
     else:
         raise AssertionError("ADL run did not complete")
     
-    assert any(event["displayText"] == "ADL step" for event in body["events"])
+    visible_lines = [event["displayText"] for event in body["events"]]
+    
+    assert "ADL step" not in visible_lines
+
+    runtime_log = (
+        Path(body["outputFolder"])
+        / run_id
+        / "logs"
+        / "runtime.log"
+    )
+
+    progress_log = (
+        Path(body["outputFolder"])
+        / run_id
+        / "logs"
+        / "progress.jsonl"
+    )
+
+    assert "ADL step" in runtime_log.read_text(encoding="utf-8")
+    assert "ADL step" not in progress_log.read_text(encoding="utf-8")
 
 def test_execute_run_records_failure_and_cleans_staged_root(tmp_path: Path) -> None:
     input_path = tmp_path / "frame.jpg"
@@ -635,16 +692,30 @@ def test_runtime_wrappers_delegate_to_existing_runners(
 ) -> None:
     captured: dict[str, object] = {}
     
-    def fake_hand_object_runner(request, *, command_runner, progress) -> None:
+    def fake_hand_object_runner(
+       request,
+        *,
+        command_runner,
+        streaming_command_runner,
+        progress,
+    ) -> None:
         captured["hand_request"] = request
         captured["hand_command_runner"] = command_runner
-        
+        captured["hand_streaming_command_runner"] = streaming_command_runner
+
         progress("hand progress")
     
-    def fake_adl_runner(request, *, command_runner, progress) -> None:
+    def fake_adl_runner(
+        request,
+        *,
+        command_runner,
+        streaming_command_runner,
+        progress,
+    ) -> None:
         captured["adl_request"] = request
         captured["adl_command_runner"] = command_runner
-        
+        captured["adl_streaming_command_runner"] = streaming_command_runner
+
         progress("adl progress")
     
     monkeypatch.setattr(
@@ -891,3 +962,528 @@ def test_stage_uploaded_files_rejects_truthy_empty_file_iterable() -> None:
     
     with pytest.raises(ValueError, match="Choose an input file"):
         asyncio.run(_stage_uploaded_files(TruthyEmptyUploads()))
+
+def test_run_endpoint_reports_wireframe_hand_object_single_image_progress(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress(_progress_line("hand_object_images_discovered", current = 1, total = 1))
+        progress(_progress_line("hand_object_image_processed", current = 1, total = 1))
+        progress(_progress_line("hand_object_output_saved", current = 1, total = 1))
+        (output_dir / "frame_det.png").write_bytes(b"visual")
+
+    client = TestClient(create_app(hand_object_runner = fake_runner))
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    run_id = response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert [event["displayText"] for event in progress_body["events"]] == [
+        "Preparing image input...",
+        "Checking selected image...",
+        "Running hand-object contact model on the image: 1 / 1 image processed",
+        "Saving detection outputs: 1 / 1",
+    ]
+
+def test_run_endpoint_reports_wireframe_hand_object_image_set_progress(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress(_progress_line("hand_object_images_discovered", current = 25, total = 25))
+        progress(_progress_line("hand_object_image_processed", current = 25, total = 25))
+        progress(_progress_line("hand_object_output_saved", current = 21, total = 25))
+        (output_dir / "frame_det.png").write_bytes(b"visual")
+
+    client = TestClient(create_app(hand_object_runner = fake_runner))
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [
+            ("files", (f"frame-{index:03d}.jpg", b"fake-image", "image/jpeg"))
+            for index in range(25)
+        ],
+    )
+
+    run_id = response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert [event["displayText"] for event in progress_body["events"]] == [
+        "Preparing image inputs...",
+        "Checking images: 25 / 25 valid images",
+        "Running hand-object contact model on the images: 25 / 25 images processed",
+        "Saving detection outputs: 21 / 25 images",
+    ]
+
+def test_run_endpoint_reports_wireframe_adl_single_video_progress(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress(_progress_line("adl_frame_extracted", current = 1200, total = 1200))
+        progress(_progress_line("detic_frame_processed", current = 1200, total = 1200))
+        progress(_progress_line("hand_object_image_processed", current = 1200, total = 1200))
+        progress(_progress_line("adl_prediction_frames_discovered", current = 1200, total = 1200))
+        progress(_progress_line("adl_prediction_frame_processed", current = 1200, total = 1200))
+        progress(_progress_line("adl_predictions_combined"))
+        
+        (output_dir / "adl_predictions.csv").write_text(
+            "input,prediction\nclip.mp4,meal\n",
+            encoding = "utf-8",
+        )
+
+    client = TestClient(create_app(adl_runner = fake_runner))
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("participant-session-01.mp4", b"fake-video", "video/mp4"))],
+    )
+
+    run_id = response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert [event["displayText"] for event in progress_body["events"]] == [
+        "Preparing video input...",
+        "Extracting frames: 1,200 / 1,200 frames",
+        "Running object detection model on extracted frames: 1,200 / 1,200 frames",
+        "Running hand-object contact on extracted frames: 1,200 / 1,200 frames",
+        "Combining predictions: 1,200 / 1,200 frames",
+        "Calculating video-level summary metrics: waiting",
+        "Saving outputs: waiting",
+    ]
+
+def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress(
+            _progress_line(
+                "adl_video_checked",
+                current = 5,
+                total = 5,
+                video = "participant-session-03.mp4",
+            )
+        )
+        progress(_progress_line("adl_frame_extracted", current = 3600, total = 6000))
+        progress(_progress_line("detic_frame_processed", current = 3050, total = 6000))
+        
+        (output_dir / "adl_predictions.csv").write_text(
+            "input,prediction\nparticipant-sessions,meal\n",
+            encoding = "utf-8",
+        )
+
+    client = TestClient(create_app(adl_runner = fake_runner))
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [
+            ("files", (f"participant-session-{index:02d}.mp4", b"fake-video", "video/mp4"))
+            for index in range(1, 6)
+        ],
+    )
+
+    run_id = response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert [event["displayText"] for event in progress_body["events"]] == [
+        "Preparing video inputs...",
+        "Checking videos: 5 / 5 valid videos",
+        "Extracting frames across all videos: 3,600 / 6,000 frames",
+        "Running object detection model: 3,050 / 6,000 frames",
+        "Running hand-object contact on extracted frames: waiting",
+        "Combining predictions: waiting",
+        "Calculating video-level summary metrics: waiting",
+        "Saving outputs: waiting",
+    ]
+
+def test_run_endpoint_writes_technical_progress_without_showing_it(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress("Checking packaged hand-object-contact runtime image.")
+        progress("Packaged hand-object-contact runtime image is already available.")
+        progress(_progress_line("hand_object_images_discovered", current = 1, total = 1))
+        progress(_progress_line("hand_object_image_processed", current = 1, total = 1))
+        (output_dir / "frame_det.png").write_bytes(b"visual")
+
+    client = TestClient(create_app(hand_object_runner=fake_runner))
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    run_id = response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+    visible_lines = [event["displayText"] for event in progress_body["events"]]
+
+    assert "Checking packaged hand-object-contact runtime image." not in visible_lines
+
+    output_folder = Path(progress_body["outputFolder"])
+    runtime_log = output_folder / run_id / "logs" / "runtime.log"
+
+    assert "Checking packaged hand-object-contact runtime image." in runtime_log.read_text(
+        encoding="utf-8",
+    )
+    
+    progress_log = output_folder / run_id / "logs" / "progress.jsonl"
+
+    assert "Checking packaged hand-object-contact runtime image." not in progress_log.read_text(
+        encoding="utf-8",
+    )
+
+def test_run_endpoint_reports_runtime_status_separately_from_progress_rows(
+    tmp_path: Path,
+) -> None:
+    def fake_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress("Checking packaged hand-object-contact runtime image.")
+        
+        progress(
+            "Packaged hand-object-contact runtime image is missing; preparing it now. "
+            "The first run may take longer."
+        )
+        
+        progress(_progress_line("hand_object_images_discovered", current = 1, total = 1))
+        progress(_progress_line("hand_object_image_processed", current = 1, total = 1))
+        
+        (output_dir / "frame_det.png").write_bytes(b"visual")
+
+    client = TestClient(create_app(hand_object_runner = fake_runner))
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    run_id = response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    visible_lines = [event["displayText"] for event in progress_body["events"]]
+
+    assert "Building Docker image for hand-object detector" not in visible_lines
+    assert progress_body["runtimeStatus"] is None
+
+def test_internal_progress(tmp_path: Path) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        scenario = "adl-combined-predictions",
+    )
+
+    assert [event.display_text for event in gui_backend._initial_wireframe_events(state)] == [
+        "Preparing combined predictions input...",
+        "Combining predictions: waiting",
+        "Calculating video-level summary metrics: waiting",
+        "Saving outputs: waiting",
+    ]
+
+    unknown_state = _test_run_state(tmp_path, scenario = "unknown-scenario")
+
+    with pytest.raises(ValueError, match = "Unsupported progress scenario"):
+        gui_backend._initial_wireframe_events(unknown_state)
+
+    gui_backend._record_external_progress_update(
+        state,
+        ExternalProgressUpdate(kind = "adl_predictions_combining", payload = {}),
+    )
+
+    assert any(
+        event.display_text == "Combining predictions: waiting"
+        for event in state.progress_events
+    )
+
+    before_count = len(state.progress_events)
+
+    gui_backend._record_external_progress_update(
+        state,
+        ExternalProgressUpdate(kind = "adl_predictions_combined", payload = {}),
+    )
+
+    assert len(state.progress_events) == before_count
+    
+def test_hand_object_discovery_update_ignores_non_hand_object_scenarios(
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        scenario = "adl-single-video",
+    )
+
+    gui_backend._record_external_progress_update(
+        state,
+        ExternalProgressUpdate(
+            kind = "hand_object_images_discovered",
+            payload = {"total": 3},
+        ),
+    )
+
+    assert state.progress_events == []
+
+def test_external_progress_update_ignores_mismatched_or_unknown_scenarios(
+    tmp_path: Path,
+) -> None:
+    single_image_state = _test_run_state(tmp_path, scenario = "hand-object-single-image")
+    
+    adl_single_state = _test_run_state(
+        tmp_path,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        scenario = "adl-single-video",
+    )
+   
+    before_single_count = len(single_image_state.progress_events)
+    before_adl_count = len(adl_single_state.progress_events)
+
+    gui_backend._record_external_progress_update(
+        single_image_state,
+        ExternalProgressUpdate(
+            kind = "hand_object_images_discovered",
+            payload = {"total": 3},
+        ),
+    )
+    
+    gui_backend._record_external_progress_update(
+        adl_single_state,
+        ExternalProgressUpdate(
+            kind = "adl_video_checked",
+            payload = {"current": 1, "total": 1},
+        ),
+    )
+    
+    gui_backend._record_external_progress_update(
+        adl_single_state,
+        ExternalProgressUpdate(kind = "unknown_kind", payload = {}),
+    )
+
+    assert len(single_image_state.progress_events) == before_single_count + 1
+    assert len(adl_single_state.progress_events) == before_adl_count
+
+def test_display_video_name_from_payload_cleans_fallback_names() -> None:
+    assert (
+        gui_backend._display_video_name_from_payload({"displayVideo": "video1"}) 
+        == "video1"
+    )
+    
+    assert (
+        gui_backend._display_video_name_from_payload({"video": "folder/video002..MP4"})
+        == "video002.MP4"
+    )
+    
+    assert gui_backend._display_video_name_from_payload({}) == "unknown"
+
+def test_final_output_progress_preserves_existing_numeric_hand_object_progress(
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(tmp_path)
+    
+    gui_backend._upsert_progress_event(
+        state,
+        ProgressEvent(
+            stage = "save_outputs",
+            message = "Saving detection outputs",
+            current = 2,
+            total = 3,
+            unit = "images",
+        ),
+    )
+
+    gui_backend._record_final_output_progress(state)
+
+    assert (
+        state.progress_events[-1].display_text 
+        == "Saving detection outputs: 2 / 3 images"
+    )
+
+def test_docker_progress_helpers_cover_runtime_branches(tmp_path: Path) -> None:
+    state = _test_run_state(tmp_path)
+
+    gui_backend._update_docker_build_progress(
+        state,
+        "Packaged adl-recognition core runtime image is missing; preparing it now.",
+    )
+
+    assert state.runtime_status is not None
+    assert state.runtime_status.model_name == "EgoVizML"
+
+    gui_backend._update_docker_build_progress(state, "Step 2/6 : RUN pip install")
+
+    assert state.runtime_status is not None
+    assert state.runtime_status.current_step == 2
+    assert state.runtime_status.total_steps == 6
+
+    gui_backend._update_active_runtime_build_stage(state, current = 1, total = 4)
+
+    assert state.runtime_status.current_step == 2
+    assert state.runtime_status.total_steps == 6
+
+    gui_backend._update_docker_build_progress(
+        state,
+        "Packaged adl-recognition core runtime image is ready.",
+    )
+
+    assert state.runtime_status is None
+    assert state.active_runtime_stage_id is None
+    assert state.runtime_build_stages["docker:EgoVizML"].current == 6
+
+    gui_backend._update_docker_build_progress(
+        state,
+        "Packaged adl-recognition Detic runtime image is already available.",
+    )
+
+    assert (
+        gui_backend._docker_model_name_from_message(
+            "Packaged adl-recognition Detic runtime image is missing; preparing it now."
+        )
+        == "Detic"
+    )
+    
+    assert gui_backend._docker_model_name_from_message("unrelated output") is None
+    assert gui_backend._docker_build_step_counts("#7 [ 3/12] RUN apt-get update") == (
+        3,
+        12,
+    )
+    
+    assert gui_backend._docker_build_step_counts("Step 4/9 : COPY . .") == (4, 9)
+    assert gui_backend._docker_build_step_counts("no docker step here") is None
+
+def test_stage_and_payload_helpers() -> None:
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_object_images_checked"
+    ) == "check_input"
+    
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_object_image_processed"
+    ) == "run_hand_object"
+    
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_object_output_saved"
+    ) == "save_outputs"
+    
+    assert (
+        gui_backend._stage_from_external_progress_kind("adl_video_checked") 
+        == "check_input"
+    )
+    
+    assert gui_backend._stage_from_external_progress_kind(
+        "adl_frame_extracted"
+    ) == "extract_frames"
+    
+    assert gui_backend._stage_from_external_progress_kind(
+        "detic_frame_processed"
+    ) == "run_detic"
+    
+    assert gui_backend._stage_from_external_progress_kind(
+        "adl_prediction_frame_processed"
+    ) == "combine_predictions"
+    
+    assert gui_backend._stage_from_external_progress_kind("unknown") is None
+
+    payload = {
+        "integer": 3,
+        "floating": 4.9,
+        "digits": "5",
+        "letters": "five",
+    }
+
+    assert gui_backend._payload_int(payload, "integer") == 3
+    assert gui_backend._payload_int(payload, "floating") == 4
+    assert gui_backend._payload_int(payload, "digits") == 5
+    assert gui_backend._payload_int(payload, "letters") == 0
+    assert gui_backend._payload_int(payload, "missing") == 0
+
+def test_progress_merge_helpers_cover_remaining_branches() -> None:
+    existing = ProgressEvent(
+        stage = "run_detic",
+        message = "Running object detection model",
+        current = 10,
+        total = 20,
+        unit = "frames",
+    )
+
+    lower_next = ProgressEvent(
+        stage = "run_detic",
+        message = "Running object detection model",
+        current = 5,
+        total = 20,
+        unit = "frames",
+    )
+
+    assert gui_backend._merge_progress_event(existing, lower_next).current == 10
+
+    different_total = ProgressEvent(
+        stage = "run_detic",
+        message = "Running object detection model",
+        current = 5,
+        total = 40,
+        unit = "frames",
+    )
+
+    assert gui_backend._merge_progress_event(existing, different_total) == different_total
+    
+    assert gui_backend._merge_progress_event(
+        ProgressEvent(stage = "run_detic", message = "waiting"),
+        lower_next,
+    ) == lower_next
+
+def test_active_runtime_build_stage_ignores_missing_active_stage(tmp_path: Path) -> None:
+    state = _test_run_state(tmp_path)
+
+    gui_backend._update_active_runtime_build_stage(
+        state,
+        current = 1,
+        total = 2,
+    )
+
+    assert state.runtime_status is None
+    assert state.active_runtime_stage_id is None
+    assert state.runtime_build_stages == {}
