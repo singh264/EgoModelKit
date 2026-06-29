@@ -55,6 +55,7 @@ from egomodelkit.progress import (
     write_runtime_log_line,
 )
 from egomodelkit.runtime.adl_recognition import (
+    DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     AdlRecognitionRuntimeError,
     run_adl_recognition,
 )
@@ -63,10 +64,14 @@ from egomodelkit.runtime.commands import (
     subprocess_runner,
 )
 from egomodelkit.runtime.hand_object_contact import (
+    DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     HandObjectContactRuntimeError,
     run_hand_object_contact,
 )
-from egomodelkit.runtime.preflight import HostPrerequisiteError
+from egomodelkit.runtime.preflight import (
+    HostPrerequisiteError,
+    ensure_host_runtime_ready,
+)
 
 GUI_LOCAL_SERVER_NAME: Final[str] = "127.0.0.1"
 GUI_DEFAULT_SERVER_PORT: Final[int] = 7860
@@ -75,6 +80,7 @@ GUI_UPLOAD_CHUNK_SIZE_BYTES: Final[int] = 1024 * 1024
 GuiRunStatus = Literal["ready", "running", "completed", "failed"]
 ProgressCallback = Callable[[str], None]
 ModelRunner = Callable[[Path, Path, ProgressCallback], None]
+RuntimeReadyChecker = Callable[[str, ProgressCallback], None]
 
 GUI_REQUEST_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
     ValueError,
@@ -145,6 +151,7 @@ def create_app(
     static_dir: Path | None = None,
     hand_object_runner: ModelRunner | None = None,
     adl_runner: ModelRunner | None = None,
+    runtime_checker: RuntimeReadyChecker | None = None,
 ) -> FastAPI:
     """ Create the local FastAPI app used by the React GUI. 
     
@@ -153,6 +160,7 @@ def create_app(
     """
     app = FastAPI(title = "EgoModelKit Local GUI API")
     runs: dict[str, GuiRunState] = {}
+    runtime_ready_checker = runtime_checker or _check_runtime_ready_for_gui
     
     app.add_middleware(
         CORSMiddleware,
@@ -237,6 +245,8 @@ def create_app(
                 input_path = staged.input_path,
                 output_root = output_root,
             )
+            
+            runtime_ready_checker(model_id, _ignore_progress)
             
             run_id = _build_unique_run_id(output_root, runs)
             layout = build_run_output_layout(output_root, run_id = run_id)
@@ -503,6 +513,28 @@ def _run_adl_recognition_for_gui(
         AdlRecognitionRequest(input_path = input_path, output_dir = output_dir),
         command_runner = subprocess_runner,
         streaming_command_runner = streaming_subprocess_runner,
+        progress = progress,
+    )
+
+def _ignore_progress(_: str) -> None:
+    """ Default no-op progress reporter for GUI runtime checks. """
+
+def _check_runtime_ready_for_gui(
+    model_id: str,
+    progress: ProgressCallback = _ignore_progress,
+) -> None:
+    """ Validate that the host can run packaged GPU model containers. """
+    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
+        docker_executable = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.docker_executable
+    elif model_id == ADL_RECOGNITION_MODEL_ID:
+        docker_executable = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC.docker_executable
+    else:
+        raise ValueError(f"Unsupported model id: {model_id}")
+
+    ensure_host_runtime_ready(
+        docker_executable = docker_executable,
+        command_runner = subprocess_runner,
+        require_linux_nvidia_gpu = True,
         progress = progress,
     )
 

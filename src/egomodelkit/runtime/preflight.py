@@ -1,5 +1,6 @@
 """ Host prerequistes checks for EgoModelKit runtime execution. """
 
+import platform
 import shutil
 import sys
 from collections.abc import Callable
@@ -8,13 +9,24 @@ from typing import Final
 CommandRunner = Callable[[list[str]], int]
 ExecutableLocator = Callable[[str], str | None]
 ProgressReporter = Callable[[str], None]
+PlatformDetector = Callable[[], str]
 
 MINIMUM_SUPPORTED_PYTHON_VERSION: Final[tuple[int, int]] = (3, 10)
+SUPPORTED_GPU_HOST_PLATFORM: Final[str] = "Linux"
 
 DOCKER_DAEMON_PROBE_SUFFIX: Final[tuple[str, ...]] = (
     "version",
     "--format",
-    "{{.Server.Version}}"
+    "{{.Server.Version}}",
+)
+
+NVIDIA_DOCKER_GPU_PROBE_SUFFIX: Final[tuple[str, ...]] = (
+    "run",
+    "--rm",
+    "--gpus",
+    "all",
+    "nvidia/cuda:11.3.1-base-ubuntu20.04",
+    "nvidia-smi",
 )
 
 class HostPrerequisiteError(RuntimeError):
@@ -33,6 +45,8 @@ def ensure_host_runtime_ready(
     command_runner: CommandRunner,
     executable_locator: ExecutableLocator = shutil.which,
     python_version: tuple[int, int, int] | None = None,
+    platform_detector: PlatformDetector = platform.system,
+    require_linux_nvidia_gpu: bool = False,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Validate host requirements needed by the current run path. """
@@ -53,6 +67,17 @@ def ensure_host_runtime_ready(
             f"Python {required_version} or newer is required; "
             f"detected Python {detected_version}."
         )
+    
+    if require_linux_nvidia_gpu:
+        detected_platform = platform_detector()
+        progress(f"Host platform detected: {detected_platform}.")
+
+        if detected_platform != SUPPORTED_GPU_HOST_PLATFORM:
+            raise HostPrerequisiteError(
+                "EgoModelKit model runs require a Linux host with an NVIDIA GPU; "
+                f"detected {detected_platform}. Use a Linux NVIDIA GPU machine "
+                "for dry runs and model runs."
+            )
         
     docker_path = executable_locator(docker_executable)
     
@@ -77,3 +102,20 @@ def ensure_host_runtime_ready(
         )
 
     progress("Docker daemon is available.")
+
+    if require_linux_nvidia_gpu:
+        progress("Checking Docker NVIDIA GPU runtime.")
+        
+        gpu_probe_command = [
+            docker_executable,
+            *NVIDIA_DOCKER_GPU_PROBE_SUFFIX,
+        ]
+
+        if command_runner(gpu_probe_command) != 0:
+            raise HostPrerequisiteError(
+                "Docker is available, but the NVIDIA GPU runtime is not available. "
+                "Install NVIDIA drivers and the NVIDIA Container Toolkit on a "
+                "Linux GPU machine, then rerun the same EgoModelKit command."
+            )
+
+        progress("Docker NVIDIA GPU runtime is available.")

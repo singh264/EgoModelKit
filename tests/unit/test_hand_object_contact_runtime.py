@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+import egomodelkit.runtime.hand_object_contact as hand_runtime
 from egomodelkit.models.hand_object_contact import (
     HandObjectContactRequest,
 )
@@ -19,6 +20,18 @@ from egomodelkit.runtime.hand_object_contact import (
     run_hand_object_contact,
 )
 
+
+def _docker_executable_path(_executable: str) -> str:
+    return "/usr/bin/docker"
+
+def _linux_platform() -> str:
+    return "Linux"
+
+def test_hand_object_runtime_check_overrides_are_empty_by_default() -> None:
+    assert hand_runtime._runtime_check_overrides(
+        executable_locator = None,
+        platform_detector = None,
+    ) == {}
 
 def test_ensure_runtime_image_skips_build_when_image_exists() -> None:
     calls: list[list[str]] = []
@@ -202,11 +215,14 @@ def test_run_hand_object_contact_executes_hidden_runtime(tmp_path: Path) -> None
     
     def runner(command: list[str]) -> int:
         calls.append(command)
+        
         return 0
     
     command = run_hand_object_contact(
         request,
         command_runner = runner,
+        executable_locator = _docker_executable_path,
+        platform_detector = _linux_platform,    
     )
     
     assert output_dir.is_dir()
@@ -221,12 +237,22 @@ def test_run_hand_object_contact_executes_hidden_runtime(tmp_path: Path) -> None
 
     assert calls[1] == [
         DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.docker_executable,
+        "run",
+        "--rm",
+        "--gpus",
+        "all",
+        "nvidia/cuda:11.3.1-base-ubuntu20.04",
+        "nvidia-smi",
+    ]
+
+    assert calls[2] == [
+        DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.docker_executable,
         "image",
         "inspect",
         DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.image_tag,
     ]
     
-    assert calls[2] == command
+    assert calls[3] == command
 
 def test_run_hand_object_contact_reports_runtime_failure(tmp_path: Path) -> None:
     image_path = tmp_path / "frame.jpg"
@@ -244,6 +270,9 @@ def test_run_hand_object_contact_reports_runtime_failure(tmp_path: Path) -> None
         if command[1:3] == ["image", "inspect"]:
             return 0
 
+        if command[1:3] == ["run", "--rm"] and "nvidia-smi" in command:
+            return 0
+
         return 17
 
     with pytest.raises(
@@ -253,6 +282,8 @@ def test_run_hand_object_contact_reports_runtime_failure(tmp_path: Path) -> None
         run_hand_object_contact(
             request,
             command_runner = runner,
+            executable_locator = _docker_executable_path,
+            platform_detector = _linux_platform,
         )
 
 def test_run_hand_object_contact_reports_progress_messages(tmp_path: Path) -> None:
@@ -270,6 +301,8 @@ def test_run_hand_object_contact_reports_progress_messages(tmp_path: Path) -> No
         request,
         command_runner = lambda command: 0,
         progress = messages.append,
+        executable_locator = _docker_executable_path,
+        platform_detector = _linux_platform,
     )
 
     assert "Validating hand-object-contact request." in messages
@@ -372,6 +405,8 @@ def test_run_hand_object_contact_uses_streaming_runner_for_inference(
         command_runner = runner,
         streaming_command_runner = streaming_runner,
         progress = messages.append,
+        executable_locator = _docker_executable_path,
+        platform_detector = _linux_platform,
     )
 
     assert streamed_commands == [run_command]

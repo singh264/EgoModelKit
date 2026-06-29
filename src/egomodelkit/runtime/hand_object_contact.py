@@ -18,6 +18,8 @@ from egomodelkit.runtime.external_code import (
     docker_code_label_arguments,
 )
 from egomodelkit.runtime.preflight import (
+    ExecutableLocator,
+    PlatformDetector,
     ProgressReporter,
     ensure_host_runtime_ready,
 )
@@ -214,16 +216,25 @@ def run_hand_object_contact(
     runtime_spec: HandObjectContactRuntimeSpec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
     streaming_command_runner: StreamingCommandRunner | None = None,
+    executable_locator: ExecutableLocator | None = None,
+    platform_detector: PlatformDetector | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> list[str]:
     """ Run hand-object-contact behind EgoModelKit's run command. """
     progress("Validating hand-object-contact request.")
     validate_hand_object_contact_request(request)
 
+    runtime_check_kwargs = _runtime_check_overrides(
+        executable_locator = executable_locator,
+        platform_detector = platform_detector,
+    )
+
     ensure_host_runtime_ready(
         docker_executable = runtime_spec.docker_executable,
         command_runner = command_runner,
+        require_linux_nvidia_gpu = True,
         progress = progress,
+        **runtime_check_kwargs,
     )
 
     request.output_dir.mkdir(parents = True, exist_ok = True)
@@ -255,6 +266,22 @@ def run_hand_object_contact(
 
     progress("hand-object-contact inference completed.")
     return run_command
+
+def _runtime_check_overrides(
+    *,
+    executable_locator: ExecutableLocator | None,
+    platform_detector: PlatformDetector | None,
+) -> dict[str, ExecutableLocator | PlatformDetector]:
+    """ Return optional host-runtime check dependencies for tests. """
+    overrides: dict[str, ExecutableLocator | PlatformDetector] = {}
+
+    if executable_locator is not None:
+        overrides["executable_locator"] = executable_locator
+
+    if platform_detector is not None:
+        overrides["platform_detector"] = platform_detector
+
+    return overrides
 
 def _container_input_path(
     request: HandObjectContactRequest,

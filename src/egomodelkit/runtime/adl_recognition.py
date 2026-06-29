@@ -29,6 +29,8 @@ from egomodelkit.runtime.hand_object_contact import (
     run_hand_object_contact,
 )
 from egomodelkit.runtime.preflight import (
+    ExecutableLocator,
+    PlatformDetector,
     ProgressReporter,
     ensure_host_runtime_ready,
 )
@@ -392,16 +394,25 @@ def run_adl_recognition(
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
     streaming_command_runner: StreamingCommandRunner | None = None,
+    executable_locator: ExecutableLocator | None = None,
+    platform_detector: PlatformDetector | None = None,
     progress: ProgressReporter = _ignore_progress,
 ) -> list[list[str]]:
     """ Run ADL recognition behind EgoModelKit's run command. """
     progress("Validating adl-recognition request.")
     validate_adl_recognition_request(request)
     
+    runtime_check_kwargs = _runtime_check_overrides(
+        executable_locator = executable_locator,
+        platform_detector = platform_detector,
+    )
+    
     ensure_host_runtime_ready(
         docker_executable = runtime_spec.docker_executable,
         command_runner = command_runner,
+        require_linux_nvidia_gpu = True,
         progress = progress,
+        **runtime_check_kwargs,
     )
     
     request.output_dir.mkdir(parents = True, exist_ok = True)
@@ -578,6 +589,8 @@ def run_adl_recognition(
             runtime_spec = runtime_spec.hand_object_contact_runtime_spec,
             command_runner = command_runner,
             streaming_command_runner = streaming_command_runner,
+            executable_locator = executable_locator,
+            platform_detector = platform_detector,
             progress = _global_frame_progress(
                 progress,
                 source_kind = "hand_object_image_processed",
@@ -675,6 +688,22 @@ def _append_executed_command_result(
         return
     
     executed_commands.extend(command_result)
+
+def _runtime_check_overrides(
+    *,
+    executable_locator: ExecutableLocator | None,
+    platform_detector: PlatformDetector | None,
+) -> dict[str, ExecutableLocator | PlatformDetector]:
+    """ Return optional host-runtime check dependencies for tests. """
+    overrides: dict[str, ExecutableLocator | PlatformDetector] = {}
+
+    if executable_locator is not None:
+        overrides["executable_locator"] = executable_locator
+
+    if platform_detector is not None:
+        overrides["platform_detector"] = platform_detector
+
+    return overrides
 
 def _is_combined_predictions_file(input_path: Path) -> bool:
     return (

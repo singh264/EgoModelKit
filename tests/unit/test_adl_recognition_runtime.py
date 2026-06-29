@@ -32,6 +32,18 @@ from egomodelkit.runtime.hand_object_contact import (
 )
 
 
+def _docker_executable_path(_executable: str) -> str:
+    return "/usr/bin/docker"
+
+def _linux_platform() -> str:
+    return "Linux"
+
+def test_adl_runtime_check_overrides_are_empty_by_default() -> None:
+    assert adl_runtime._runtime_check_overrides(
+        executable_locator = None,
+        platform_detector = None,
+    ) == {}
+
 def _test_runtime_spec(docker_executable: str = "docker"):
     return replace(
         DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
@@ -299,6 +311,8 @@ def test_run_adl_recognition_from_all_preds_skips_video_model_stages(tmp_path: P
         request,
         runtime_spec = runtime_spec,
         command_runner = runner,
+        executable_locator = _docker_executable_path,
+        platform_detector = _linux_platform,
     )
     
     assert output_dir.is_dir()
@@ -373,6 +387,8 @@ def test_run_adl_recognition_from_video_orchestrating_existing_runtimes(
         request,
         runtime_spec = runtime_spec,
         command_runner = runner,
+        executable_locator = _docker_executable_path,
+        platform_detector = _linux_platform,
     )
     
     ownership_repair_commands = [
@@ -448,6 +464,8 @@ def test_run_adl_recognition_reports_stage_failure(tmp_path: Path) -> None:
             request,
             runtime_spec = runtime_spec,
             command_runner = runner,
+            executable_locator = _docker_executable_path,
+            platform_detector = _linux_platform,
         )
 
 def test_detic_patch_file_is_inside_detic_build_context() -> None:
@@ -545,6 +563,8 @@ def test_run_adl_recognition_reports_missing_extracted_frames(
             request,
             runtime_spec = runtime_spec,
             command_runner = runner,
+            executable_locator = _docker_executable_path,
+            platform_detector = _linux_platform,
         )
 
 def test_subclip_frame_dirs_returns_only_dirs_containing_jpg_frames(
@@ -759,6 +779,8 @@ def test_run_adl_recognition_reports_empty_extracted_frame_images(
             request,
             runtime_spec = runtime_spec,
             command_runner = runner,
+            executable_locator = _docker_executable_path,
+            platform_detector = _linux_platform,
         )
 
 def test_run_stage_uses_streaming_command_runner() -> None:

@@ -1522,6 +1522,67 @@ describe("App", () => {
         expect(screen.getByText("Ready to start.")).toBeInTheDocument();
     });
 
+    it("shows dry-run runtime-check details from the backend", async () => {
+        const user = userEvent.setup();
+
+        const runtimeError = [
+            "EgoModelKit model runs require a Linux host with an NVIDIA GPU;",
+            "detected Darwin.",
+        ].join(" ");
+        
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 400,
+                json: async () => ({ detail: runtimeError }),
+            });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+    
+        expect(screen.getByRole("alert")).toHaveTextContent(runtimeError);
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("shows the fallback dry-run error when the error body is unreadable", async () => {
+        const user = userEvent.setup();
+        
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/tmp/egomodelkit-results" }),
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 500,
+                json: async () => {
+                    throw new Error("Invalid error body.");
+                },
+            });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(screen.getByRole("alert")).toHaveTextContent("Unable to complete dry run.");
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
     it("starts a hand-object model run and shows the running panel", async () => {
         const user = userEvent.setup();
         

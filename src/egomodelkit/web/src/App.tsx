@@ -380,8 +380,8 @@ export function App() {
             setOutputPreview(body.outputPreview);
             setProgress(null);
             setReviewMode("dry-run-complete");
-        } catch {
-            setErrorMessage("Unable to complete dry run.");
+        } catch (error) {
+            setErrorMessage(userFacingRequestError(error, "Unable to complete dry run."));
             setReviewMode("ready");
         } finally {
             setIsBusy(false);
@@ -1019,6 +1019,32 @@ function ignorelDescriptionFromFileNames(fileNames: string[]): string {
     return "These files are not supported by the selected model";
 }
 
+class ApiRequestError extends Error {
+    constructor(public readonly detail: string | null) {
+        super(detail ?? "Request failed.");
+    }
+}
+
+function userFacingRequestError(error: unknown, fallback: string): string {
+    if (error instanceof ApiRequestError && error.detail !== null) {
+        return error.detail;
+    }
+
+    return fallback;
+}
+
+async function responseErrorDetail(response: Response): Promise<string | null> {
+    try {
+        const body = (await response.json()) as { detail?: unknown };
+
+        return typeof body.detail === "string" && body.detail.length > 0
+            ? body.detail
+            : null;
+    } catch {
+        return null;
+    }
+}
+
 async function postMultipart<T>(
     url: string,
     {
@@ -1046,7 +1072,7 @@ async function postMultipart<T>(
     });
 
     if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}.`);
+        throw new ApiRequestError(await responseErrorDetail(response));
     }
 
     return (await response.json()) as T;

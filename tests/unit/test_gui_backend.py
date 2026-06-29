@@ -16,6 +16,7 @@ from egomodelkit.gui_backend import (
     GuiRunState,
     ProgressCallback,
     _build_unique_run_id,
+    _check_runtime_ready_for_gui,
     _execute_run,
     _input_label,
     _model_display_name,
@@ -54,6 +55,23 @@ def _progress_line(kind: str, **payload: object) -> str:
             **payload,
         },
         sort_keys = True,
+    )
+
+def _ready_runtime_checker(
+    model_id: str,
+    progress: ProgressCallback,
+) -> None:
+    progress(f"Runtime ready for {model_id}.")
+
+def _failing_runtime_checker(
+    model_id: str,
+    progress: ProgressCallback,
+) -> None:
+    progress(f"Runtime unavailable for {model_id}.")
+    
+    raise gui_backend.HostPrerequisiteError(
+        "EgoModelKit model runs require a Linux host with an NVIDIA GPU; "
+        "detected Darwin."
     )
 
 def _test_run_state(
@@ -127,7 +145,7 @@ def test_output_preview_endpoint_returns_dynamic_tree(tmp_path: Path) -> None:
     assert body["files"]
 
 def test_dry_run_validates_uploaded_file(tmp_path: Path) -> None:
-    client = TestClient(create_app())
+    client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
     
     response = client.post(
         "/api/dry-run",
@@ -490,6 +508,97 @@ def test_output_preview_endpoint_reports_bad_request(tmp_path: Path) -> None:
     
     assert response.status_code == 400
     assert "Unsupported model id" in response.json()["detail"]
+
+def test_dry_run_endpoint_checks_local_runtime_before_reporting_ready(
+    tmp_path: Path,
+) -> None:
+    checked_models: list[str] = []
+
+    def runtime_checker(model_id: str, progress: ProgressCallback) -> None:
+        checked_models.append(model_id)
+        progress("Runtime check finished.")
+
+    client = TestClient(create_app(runtime_checker = runtime_checker))
+
+    response = client.post(
+        "/api/dry-run",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    assert response.status_code == 200
+    assert checked_models == [HAND_OBJECT_CONTACT_MODEL_ID]
+    
+def test_dry_run_endpoint_fails_when_runtime_check_fails(tmp_path: Path) -> None:
+    client = TestClient(create_app(runtime_checker = _failing_runtime_checker))
+
+    response = client.post(
+        "/api/dry-run",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    assert response.status_code == 400
+    assert "Linux host with an NVIDIA GPU" in response.json()["detail"]
+
+def test_default_gui_runtime_check_requires_linux_nvidia_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_ready(**kwargs: object) -> None:
+        calls.append(kwargs)
+
+    monkeypatch.setattr(gui_backend, "ensure_host_runtime_ready", fake_ready)
+
+    _check_runtime_ready_for_gui(HAND_OBJECT_CONTACT_MODEL_ID, lambda _message: None)
+    _check_runtime_ready_for_gui(ADL_RECOGNITION_MODEL_ID, lambda _message: None)
+
+    assert [call["require_linux_nvidia_gpu"] for call in calls] == [True, True]
+    assert [call["docker_executable"] for call in calls] == ["docker", "docker"]
+
+def test_default_gui_runtime_check_rejects_unsupported_model() -> None:
+    with pytest.raises(ValueError, match = "Unsupported model id"):
+        _check_runtime_ready_for_gui("unknown", lambda _message: None)
+
+def test_run_endpoint_reports_runtime_check_failure_gracefully(tmp_path: Path) -> None:
+    def failing_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress("Checking host runtime prerequisites.")
+        
+        raise gui_backend.HostPrerequisiteError(
+            "EgoModelKit model runs require a Linux host with an NVIDIA GPU; "
+            "detected Darwin."
+        )
+
+    client = TestClient(create_app(hand_object_runner = failing_runner))
+
+    start_response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(tmp_path / "results"),
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    assert start_response.status_code == 200
+
+    run_id = start_response.json()["runId"]
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    assert progress_body["status"] == "failed"
+    assert "Linux host with an NVIDIA GPU" in progress_body["errorMessage"]
+    assert progress_body["runtimeStatus"] is None
 
 def test_dry_run_endpoint_reports_validation_error(tmp_path: Path) -> None:
     client = TestClient(create_app())
