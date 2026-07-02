@@ -16,6 +16,33 @@ function dropInputFiles(target: HTMLElement, files: File[]) {
     fireEvent(target, dropEvent);
 }
 
+const APP_STATE_STORAGE_KEY = "egomodelkit.gui.state.v1";
+
+function createTestLocalStorage() {
+    const storedValues = new Map<string, string>();
+
+    return {
+        getItem: vi.fn((key: string) => storedValues.get(key) ?? null),
+        setItem: vi.fn((key: string, value: string) => {
+            storedValues.set(key, value);
+        }),
+        removeItem: vi.fn((key: string) => {
+            storedValues.delete(key);
+        }),
+        clear: vi.fn(() => {
+            storedValues.clear();
+        }),
+        key: vi.fn((index: number) => Array.from(storedValues.keys())[index] ?? null),
+        get length() {
+            return storedValues.size;
+        },
+    };
+}
+
+beforeEach(() => {
+    vi.stubGlobal("localStorage", createTestLocalStorage());
+});
+
 afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -109,7 +136,7 @@ async function navigateToOutputStep(
 
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+    await user.click(await screen.findByRole("button", { name: "Start New Run" }));
     await user.click(await screen.findByRole("button", { name: modelName }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -435,10 +462,6 @@ describe("App", () => {
         expect(
             screen.getByRole("button", { name: "Start New Run" }),
         ).toBeEnabled();
-
-        expect(
-            screen.getByRole("button", { name: "View Previous Output Folder" }),
-        ).toBeInTheDocument()
 
         expect(
             screen.getByText(
@@ -1192,10 +1215,6 @@ describe("App", () => {
                 "A new run folder will be created inside the selected output folder."
             ),
         ).toBeInTheDocument();
-
-        expect(
-            screen.getByRole("button", { name: "Privacy-safe outputs" }),
-        ).toBeInTheDocument();
     });
 
     it("returns from output folder screen to the selected input screen", async () => {
@@ -1396,35 +1415,7 @@ describe("App", () => {
         );
 
         expect(screen.getByText("No output folder selected")).toBeInTheDocument();
-    });    
-
-    it("toggles the privacy-safe outputs details", async () => {
-        const user = userEvent.setup();
-
-        await navigateToOutputStep(user);
-
-        const privacyButton = screen.getByRole("button", { name: "Privacy-safe outputs" });
-
-        expect(privacyButton).toHaveAttribute("aria-expanded", "false");
-
-        await user.click(privacyButton);
-
-        expect(privacyButton).toHaveAttribute("aria-expanded", "true");
-        expect(screen.getByText("Run IDs are neutral names.")).toBeInTheDocument();
-        
-        expect(
-            screen.getByText("Logs avoid unnecessary personal details."),
-        ).toBeInTheDocument();
-
-        expect(
-            screen.getByText("Temporary files can be cleaned up after processing."),
-        ).toBeInTheDocument();
-
-        await user.click(privacyButton);
-
-        expect(privacyButton).toHaveAttribute("aria-expanded", "false");
-        expect(screen.queryByText("Run IDs are neutral names.")).not.toBeInTheDocument();
-    });
+    });   
 
     it("continues from selected output folder to the review screen", async () => {
         const user = userEvent.setup();
@@ -1511,7 +1502,7 @@ describe("App", () => {
                 json: async () => ({}),
             });
 
-        const wrappedFetchMock = stubFetchWithModels(fetchMock);
+        stubFetchWithModels(fetchMock);
 
         await navigateToOutputStep(user);
         await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
@@ -1583,6 +1574,507 @@ describe("App", () => {
         expect(screen.getByText("Ready to start.")).toBeInTheDocument();
     });
 
+    it("shows a clear dry-run error when the output folder does not exist", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 405,
+                json: async () => ({}),
+            })
+            .mockResolvedValueOnce({
+                ok: false,
+                status: 400,
+                json: async () => ({
+                    detail: 
+                        "Output folder does not exist. " + 
+                        "Choose an existing folder before continuing.",
+                }),
+            });
+
+        stubFetchWithModels(fetchMock);
+
+        vi.spyOn(window, "prompt").mockReturnValue("/manual/missing-results");
+
+        await navigateToOutputStep(user);
+        
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(screen.getByRole("alert")).toHaveTextContent(
+            "Output folder does not exist. Choose an existing folder before continuing.",
+        );
+
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("shows only Cancel Run while dry run is in progress", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/dry-run") {
+                return new Promise(() => {
+                    // Keep dry run pending.
+                });
+            }
+
+            if (url === "/api/cancel-run") {
+                return okJson({ cancelled: true, runId: null, operationId: "operation-1" });
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(screen.getByRole("button", { name: "Cancel Run" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Dry Run" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Run Model" })).not.toBeInTheDocument();
+    });
+
+    it("restores Dry Run and Run Model buttons after dry run completes", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }))
+            .mockResolvedValueOnce(okJson(dryRunResponse()));
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(
+            await screen.findByRole("heading", {
+                name: "Dry run completed successfully.",
+            }),
+        ).toBeInTheDocument();
+
+        expect(screen.getByRole("button", { name: "Dry Run" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Run Model" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Cancel Run" })).not.toBeInTheDocument();
+    });
+
+    it(
+        "keeps the running screen when header navigation cancellation is declined",
+        async () => {
+            const user = userEvent.setup();
+            const confirmMock = vi.fn(() => false);
+
+            vi.stubGlobal("confirm", confirmMock);
+
+            const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input);
+
+                if (url === "/api/select-output-folder") {
+                    return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+                }
+
+                if (url === "/api/runs") {
+                    return okJson(startRunResponse("run-stay-running"));
+                }
+
+                if (url === "/api/runs/run-stay-running/progress") {
+                    return okJson(
+                        progressResponse({
+                            runId: "run-stay-running",
+                            status: "running",
+                        }),
+                    );
+                }
+
+                throw new Error(`Unexpected fetch call: ${url}`);
+            });
+
+            stubFetchWithModels(fetchMock);
+
+            await navigateToOutputStep(user);
+            
+            await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+            await user.click(screen.getByRole("button", { name: "Continue" }));
+            await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+            expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
+
+            expect(confirmMock).toHaveBeenCalledOnce();
+            expect(screen.getByText("Running model...")).toBeInTheDocument();
+
+            expect(
+                fetchMock.mock.calls.some(([input]) => String(input) === "/api/cancel-run"),
+            ).toBe(false);
+        }
+    );
+
+    it("shows an alert when cancelling the backend operation fails", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/runs") {
+                return okJson(startRunResponse("run-cancel-fails"));
+            }
+
+            if (url === "/api/runs/run-cancel-fails/progress") {
+                return okJson(
+                    progressResponse({
+                        runId: "run-cancel-fails",
+                        status: "running",
+                    }),
+                );
+            }
+
+            if (url === "/api/cancel-run") {
+                return {
+                    ok: false,
+                    status: 500,
+                    json: async () => ({}),
+                };
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Cancel Run" }));
+
+        expect(screen.getByRole("alert")).toHaveTextContent(
+            "Unable to cancel the backend operation.",
+        );
+
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("returns home when polling reports that a run was cancelled", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/runs") {
+                return okJson(startRunResponse("run-backend-cancelled"));
+            }
+
+            if (url === "/api/runs/run-backend-cancelled/progress") {
+                return okJson(
+                    progressResponse({
+                        runId: "run-backend-cancelled",
+                        status: "cancelled",
+                        errorMessage: "Run was cancelled.",
+                    }),
+                );
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(
+            await screen.findByRole("heading", { name: "EgoModelKit" }),
+        ).toBeInTheDocument();
+
+        expect(screen.getByRole("button", { name: "Start New Run" })).toBeInTheDocument();
+    });
+
+    it("does not call the backend when opening output folder without a run id", async () => {
+        window.localStorage.setItem(
+            APP_STATE_STORAGE_KEY,
+            JSON.stringify({
+                step: "output-preview",
+                modelId: "",
+                inputNames: [],
+                ignoredInputNames: [],
+                outputRoot: "/tmp/egomodelkit-results",
+                reviewMode: "ready",
+                runId: "",
+                activeOperationId: "",
+                progress: null,
+                resultSummary: null,
+                outputPreview: outputPreview("preview-only"),
+            }),
+        );
+
+        const fetchMock = stubFetchWithModels();
+        const user = userEvent.setup();
+
+        render(<App />);
+
+        expect(
+            await screen.findByRole("heading", { name: "Output folder preview" }),
+        ).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Open Output Folder" }));
+
+        expect(
+            fetchMock.mock.calls.some(
+                ([input]) => String(input) === "/api/open-output-folder",
+            ),
+        ).toBe(false);
+    });
+
+    it("shows not available for restored results without input names", async () => {
+        window.localStorage.setItem(
+            APP_STATE_STORAGE_KEY,
+            JSON.stringify({
+                step: "results",
+                modelId: "hand-object-contact",
+                inputNames: [],
+                ignoredInputNames: [],
+                outputRoot: "/tmp/egomodelkit-results",
+                reviewMode: "ready",
+                runId: "run-empty-input",
+                activeOperationId: "",
+                progress: progressResponse({
+                    runId: "run-empty-input",
+                    status: "completed",
+                    outputFolder: "/tmp/egomodelkit-results/run-empty-input",
+                }),
+                resultSummary: null,
+                outputPreview: outputPreview("run-empty-input"),
+            }),
+        );
+
+        render(<App />);
+
+        expect(await screen.findByText("Completed successfully")).toBeInTheDocument();
+        expect(screen.getByText("Not available")).toBeInTheDocument();
+    });
+
+    it("summarizes restored multiple input names on the results screen", async () => {
+        window.localStorage.setItem(
+            APP_STATE_STORAGE_KEY,
+            JSON.stringify({
+                step: "results",
+                modelId: "hand-object-contact",
+                inputNames: ["frame-1.jpg", "frame-2.jpg"],
+                ignoredInputNames: [],
+                outputRoot: "/tmp/egomodelkit-results",
+                reviewMode: "ready",
+                runId: "run-restored-results",
+                activeOperationId: "",
+                progress: progressResponse({
+                    runId: "run-restored-results",
+                    status: "completed",
+                    outputFolder: "/tmp/egomodelkit-results/run-restored-results",
+                }),
+                resultSummary: null,
+                outputPreview: outputPreview("run-restored-results"),
+            }),
+        );
+
+        render(<App />);
+
+        expect(await screen.findByText("2 files")).toBeInTheDocument();
+        expect(screen.getByText("Completed successfully")).toBeInTheDocument();
+    });
+
+    it("uses the fallback client operation id when randomUUID is unavailable", async () => {
+        const user = userEvent.setup();
+
+        vi.stubGlobal("crypto", {});
+        vi.spyOn(Date, "now").mockReturnValue(12345);
+        vi.spyOn(Math, "random").mockReturnValue(0.5);
+
+        const fetchMock = vi
+            .fn()
+            .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }))
+            .mockImplementationOnce(async (_input: RequestInfo | URL, init?: RequestInit) => {
+                const formData = init?.body as FormData;
+
+                expect(formData.get("operationId")).toBe("operation-12345-8");
+
+                return okJson(dryRunResponse("dry-run-fallback-operation"));
+            });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(
+            await screen.findByRole("heading", {
+                name: "Dry run completed successfully.",
+            }),
+        ).toBeInTheDocument();
+    });
+
+    it("ignores malformed persisted state", async () => {
+        window.localStorage.setItem(APP_STATE_STORAGE_KEY, "not-json");
+
+        render(<App />);
+
+        expect(
+            await screen.findByRole("heading", { name: "EgoModelKit" }),
+        ).toBeInTheDocument();
+    });
+
+    it("normalizes invalid persisted state fields", async () => {
+        window.localStorage.setItem(
+            APP_STATE_STORAGE_KEY,
+            JSON.stringify({
+                step: "results",
+                modelId: "hand-object-contact",
+                inputNames: "frame.jpg",
+                ignoredInputNames: "ignored.txt",
+                outputRoot: 123,
+                reviewMode: "not-a-review-mode",
+                runId: 456,
+                activeOperationId: 789,
+                progress: { status: "completed" },
+                resultSummary: { status: "completed" },
+                outputPreview: { folderTree: "missing run id" },
+            }),
+        );
+
+        render(<App />);
+
+        expect(await screen.findByText("Completed successfully")).toBeInTheDocument();
+        expect(screen.getAllByText("Not available")).toHaveLength(2);
+    });
+
+    it("ignores persisted state without a valid step", async () => {
+        window.localStorage.setItem(
+            APP_STATE_STORAGE_KEY,
+            JSON.stringify({ step: "not-a-step" }),
+        );
+
+        render(<App />);
+
+        expect(
+            await screen.findByRole("heading", { name: "EgoModelKit" }),
+        ).toBeInTheDocument();
+    });
+
+    it("ignores aborted dry-run requests after cancellation", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/dry-run") {
+                return new Promise((_resolve, reject) => {
+                    init?.signal?.addEventListener("abort", () => {
+                        reject(new DOMException("Aborted", "AbortError"));
+                    });
+                });
+            }
+
+            if (url === "/api/cancel-run") {
+                return okJson({ cancelled: true, runId: null, operationId: "operation-dry-run" });
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+        expect(screen.getByRole("button", { name: "Cancel Run" })).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Cancel Run" }));
+
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
+    it("ignores aborted start-run requests after cancellation", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/runs") {
+                return new Promise((_resolve, reject) => {
+                    init?.signal?.addEventListener("abort", () => {
+                        reject(new DOMException("Aborted", "AbortError"));
+                    });
+                });
+            }
+
+            if (url === "/api/cancel-run") {
+                return okJson({ cancelled: true, runId: null, operationId: "operation-run" });
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(screen.getByRole("button", { name: "Cancel Run" })).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Cancel Run" }));
+
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+        expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    });
+
     it("starts a hand-object model run and shows the running panel", async () => {
         const user = userEvent.setup();
         
@@ -1624,8 +2116,9 @@ describe("App", () => {
 
 
         expect(screen.getByRole("button", { name: "Back" })).toBeDisabled();
-        expect(screen.getByRole("button", { name: "Dry Run" })).toBeDisabled();
-        expect(screen.getByRole("button", { name: "Run Model" })).toBeDisabled();
+        expect(screen.getByRole("button", { name: "Cancel Run" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Dry Run" })).not.toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Run Model" })).not.toBeInTheDocument();
     });
 
     it("starts an ADL model run without frontend-generated progress rows", async () => {
@@ -1700,6 +2193,131 @@ describe("App", () => {
         );
 
         expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    });
+
+    it("cancels the backend run and resets state from Cancel Run", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/runs") {
+                return okJson(startRunResponse("run-cancel"));
+            }
+
+            if (url === "/api/runs/run-cancel/progress") {
+                return okJson(progressResponse({ runId: "run-cancel", status: "running" }));
+            }
+
+            if (url === "/api/cancel-run") {
+                return okJson({
+                    cancelled: true,
+                    runId: "run-cancel",
+                    operationId: "operation-run-cancel",
+                });
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        await user.click(screen.getByRole("button", { name: "Cancel Run" }));
+
+        expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Dry Run" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Run Model" })).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Cancel Run" })).not.toBeInTheDocument();
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            "/api/cancel-run",
+            expect.objectContaining({ method: "POST" }),
+        );
+
+        expect(screen.getByRole("heading", { name: "Review and run" })).toBeInTheDocument();
+    });
+
+    it(
+        "warns and cancels backend operation when heading is clicked during a run", 
+        async () => {
+            const user = userEvent.setup();
+            const confirmMock = vi.fn(() => true);
+
+            vi.stubGlobal("confirm", confirmMock);
+
+            const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+                const url = String(input);
+
+                if (url === "/api/select-output-folder") {
+                    return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+                }
+
+                if (url === "/api/runs") {
+                    return okJson(startRunResponse("run-heading-cancel"));
+                }
+
+                if (url === "/api/runs/run-heading-cancel/progress") {
+                    return okJson(
+                        progressResponse({
+                            runId: "run-heading-cancel",
+                            status: "running",
+                        }),
+                    );
+                }
+
+                if (url === "/api/cancel-run") {
+                    return okJson({
+                        cancelled: true,
+                        runId: "run-heading-cancel",
+                        operationId: "operation-heading-cancel",
+                    });
+                }
+
+                throw new Error(`Unexpected fetch call: ${url}`);
+            }
+        );
+
+        stubFetchWithModels(fetchMock);
+
+        await navigateToOutputStep(user);
+
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        expect(screen.getByRole("button", { name: "Cancel Run" })).toHaveClass(
+            "bg-egm-danger",
+        );
+
+        await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
+
+        expect(confirmMock).toHaveBeenCalledWith(
+            "A model operation is currently in progress. Leaving this page will cancel " +
+            "the backend operation and progress will be lost. Continue?",
+        );
+
+        expect(fetchMock).toHaveBeenCalledWith(
+            "/api/cancel-run",
+            expect.objectContaining({ method: "POST" }),
+        );
+
+        expect(
+            await screen.findByRole("heading", { name: "EgoModelKit" }),
+        ).toBeInTheDocument();
     });
 
     it("polls run progress and shows backend progress events", async () => {
@@ -2050,6 +2668,8 @@ describe("App", () => {
         async () => {
             const user = userEvent.setup();
 
+            vi.stubGlobal("confirm", vi.fn(() => true));    
+
             let rejectProgress!: (reason?: unknown) => void;
 
             const pendingProgressResponse = new Promise((_resolve, reject) => {
@@ -2080,6 +2700,16 @@ describe("App", () => {
                         return pendingProgressResponse;
                     }
 
+                    if (url === "/api/cancel-run") {
+                        return Promise.resolve(
+                            okJson({
+                                cancelled: true,
+                                runId: "run-1",
+                                operationId: "operation-stale",
+                            }),
+                        );
+                    }
+
                     return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
                 }
             );
@@ -2100,7 +2730,9 @@ describe("App", () => {
 
             await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
 
-            expect(screen.getByRole("heading", { name: "EgoModelKit" })).toBeInTheDocument();
+            expect(
+                await screen.findByRole("heading", { name: "EgoModelKit" }),
+            ).toBeInTheDocument();
 
             await act(async () => {
                 rejectProgress(new Error("stale progress failure"));
@@ -2116,6 +2748,8 @@ describe("App", () => {
     
     it("ignores a stale progress response after leaving the running screen", async () => {
         const user = userEvent.setup();
+
+        vi.stubGlobal("confirm", vi.fn(() => true));
 
         let resolveProgress!: (value: unknown) => void;
 
@@ -2147,6 +2781,16 @@ describe("App", () => {
                     return pendingProgressResponse;
                 }
 
+                if (url === "/api/cancel-run") {
+                    return Promise.resolve(
+                        okJson({
+                            cancelled: true,
+                            runId: "run-1",
+                            operationId: "operation-stale",
+                        }),
+                    );
+                }
+
                 return Promise.reject(new Error(`Unexpected fetch call: ${url}`));
             }
         );
@@ -2165,7 +2809,9 @@ describe("App", () => {
 
         await user.click(screen.getByRole("button", { name: "EgoModelKit" }));
 
-        expect(screen.getByRole("heading", { name: "EgoModelKit" })).toBeInTheDocument();
+        expect(
+            await screen.findByRole("heading", { name: "EgoModelKit" }),
+        ).toBeInTheDocument();
 
         await act(async () => {
             resolveProgress({
@@ -2367,6 +3013,43 @@ describe("App", () => {
     );
 
     it(
+        "skips backend cancellation when restored running state has no operation or run id", 
+        async () => {
+            window.localStorage.setItem(
+                APP_STATE_STORAGE_KEY,
+                JSON.stringify({
+                    step: "review",
+                    modelId: "hand-object-contact",
+                    inputNames: ["frame.jpg"],
+                    ignoredInputNames: [],
+                    outputRoot: "/tmp/egomodelkit-results",
+                    reviewMode: "running",
+                    runId: "",
+                    activeOperationId: "",
+                    progress: null,
+                    resultSummary: null,
+                    outputPreview: null,
+                }),
+            );
+
+            const fetchMock = stubFetchWithModels();
+            const user = userEvent.setup();
+
+            render(<App />);
+
+            expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+            await user.click(screen.getByRole("button", { name: "Cancel Run" }));
+
+            expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+
+            expect(
+                fetchMock.mock.calls.some(([input]) => String(input) === "/api/cancel-run"),
+            ).toBe(false);
+        }
+    );
+
+    it(
         "uses the start-run summary output folder when progress has no output folder",
         async () => {
             const user = userEvent.setup();
@@ -2549,4 +3232,88 @@ describe("App", () => {
             expect(status).not.toHaveTextContent("]");
         }
     );
+
+    it("restores a running review screen after refresh", async () => {
+        const user = userEvent.setup();
+
+        const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+            const url = String(input);
+
+            if (url === "/api/select-output-folder") {
+                return okJson({ outputRoot: "/tmp/egomodelkit-results" });
+            }
+
+            if (url === "/api/runs") {
+                return okJson(startRunResponse("run-refresh"));
+            }
+
+            if (url === "/api/runs/run-refresh/progress") {
+                return okJson(
+                    progressResponse({
+                        runId: "run-refresh",
+                        status: "running",
+                        events: [
+                            progressEvent({
+                                stage: "setup",
+                                displayText: "Preparing image input...",
+                            }),
+                        ],
+                    }),
+                );
+            }
+
+            throw new Error(`Unexpected fetch call: ${url}`);
+        });
+
+        stubFetchWithModels(fetchMock);
+
+        const { unmount } = render(<App />);
+
+        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(await screen.findByRole("button", { name: /Hand-object contact/ }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        
+        await user.upload(
+            screen.getByLabelText("Choose input files"),
+            new File(["fake image"], "frame.jpg", { type: "image/jpeg" }),
+        );
+        
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+        await user.click(screen.getByRole("button", { name: "Continue" }));
+        await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+
+        await waitFor(() => {
+            expect(
+                JSON.parse(
+                    window.localStorage.getItem(APP_STATE_STORAGE_KEY) ?? "{}",
+                ),
+            ).toEqual(
+                expect.objectContaining({
+                    step: "review",
+                    reviewMode: "running",
+                    runId: "run-refresh",
+                    inputNames: ["frame.jpg"],
+                }),
+            );
+        });
+
+        unmount();
+
+        render(<App />);
+
+        expect(await screen.findByText("Running model...")).toBeInTheDocument();
+        expect(screen.getByText("Run ID: run-refresh")).toBeInTheDocument();
+        expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+
+        await waitFor(() => {
+            expect(
+                fetchMock.mock.calls.some(
+                    ([input]) => String(input) === "/api/runs/run-refresh/progress",
+                ),
+            ).toBe(true);
+        });
+    });
 });

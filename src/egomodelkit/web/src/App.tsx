@@ -33,7 +33,7 @@ type StepperStep = Exclude<Step, "welcome" | "output-preview">;
 
 type ReviewMode = "ready" | "dry-run-complete" | "running";
 
-type GuiRunStatus = "ready" | "running" | "completed" | "failed";
+type GuiRunStatus = "ready" | "running" | "completed" | "failed" | "cancelled";
 
 const privacyMessage =
     "Your selected files are processed locally by default. " +
@@ -60,6 +60,17 @@ type OpenOutputFolderResponse = {
     opened: boolean;
     runId: string;
     outputFolder: string;
+};
+
+type CancelRunRequest = {
+    runId: string | null;
+    operationId: string | null;
+};
+
+type CancelRunResponse = {
+    cancelled: boolean;
+    runId: string | null;
+    operationId: string;
 };
 
 type OutputPreviewFile = {
@@ -132,6 +143,20 @@ type ProgressResponse = {
     outputPreview: OutputPreview;
 };
 
+type PersistedAppState = {
+    step: Step;
+    modelId: string;
+    inputNames: string[];
+    ignoredInputNames: string[];
+    outputRoot: string;
+    reviewMode: ReviewMode;
+    runId: string;
+    activeOperationId: string;
+    progress: ProgressResponse | null;
+    resultSummary: RunSummary | null;
+    outputPreview: OutputPreview | null;
+};
+
 const HAND_OBJECT_MODEL_ID = "hand-object-contact";
 const ADL_MODEL_ID = "adl-recognition";
 
@@ -142,6 +167,8 @@ const STEPS: Array<{ id: StepperStep; label: string }> = [
     { id: "review", label: "Review and run" },
     { id: "results", label: "Results" },
 ];
+
+const APP_STATE_STORAGE_KEY = "egomodelkit.gui.state.v1";
 
 const buttonBaseClass =
     "inline-flex min-h-12 min-w-[132px] items-center justify-center gap-2 " +
@@ -159,6 +186,10 @@ const secondaryButtonClass =
     "hover:bg-egm-hover disabled:border-egm-disabled disabled:bg-white " +
     "disabled:text-egm-disabled-text";
 
+const dangerButtonClass =
+    `${buttonBaseClass} border border-egm-danger bg-egm-danger text-white text-lg ` +
+    "disabled:border-egm-disabled disabled:bg-egm-disabled disabled:text-white";
+
 const backButtonClass =
     "inline-flex min-h-12 items-center justify-center gap-2 rounded-lg " +
     "border border-transparent bg-transparent pl-0 pr-2 py-3 text-base " +
@@ -166,25 +197,55 @@ const backButtonClass =
     "focus-visible:outline-offset-3 focus-visible:outline-egm-green";
 
 export function App() {
-    const [step, setStep] = useState<Step>("welcome");
+    const initialStateRef = useRef<PersistedAppState | null | undefined>(undefined);
+    if (initialStateRef.current === undefined) {
+        initialStateRef.current = readPersistedAppState();
+    }
+
+    const initialState = initialStateRef.current;
+
+    const [step, setStep] = useState<Step>(initialState?.step ?? "welcome");
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [modelsLoading, setModelsLoading] = useState<boolean>(true);
     const [modelsError, setModelsError] = useState<string>("");
-    const [modelId, setModelId] = useState<string>("");
+    const [modelId, setModelId] = useState<string>(initialState?.modelId ?? "");
     const [files, setFiles] = useState<File[]>([]);
-    const [ignoredInputNames, setIgnoredInputNames] = useState<string[]>([]);
+    const [inputNames, setInputNames] = useState<string[]>(initialState?.inputNames ?? []);
+
+    const [ignoredInputNames, setIgnoredInputNames] = useState<string[]>(
+        initialState?.ignoredInputNames ?? [],
+    );
+    
     const fileInputRef = useRef<HTMLInputElement | null>(null);
-    const [outputRoot, setOutputRoot] = useState<string>("");
-    const [privacyOpen, setPrivacyOpen] = useState<boolean>(false);
+    const activeAbortControllerRef = useRef<AbortController | null>(null);
+    const [outputRoot, setOutputRoot] = useState<string>(initialState?.outputRoot ?? "");    
     const [errorMessage, setErrorMessage] = useState<string>("");
     const [isBusy, setIsBusy] = useState<boolean>(false);
-    const [reviewMode, setReviewMode] = useState<ReviewMode>("ready");
-    const [runId, setRunId] = useState<string>("");
-    const [progress, setProgress] = useState<ProgressResponse | null>(null);
-    const [resultSummary, setResultSummary] = useState<RunSummary | null>(null);
-    const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(null);
+    
+    const [reviewMode, setReviewMode] = useState<ReviewMode>(
+        initialState?.reviewMode ?? "ready",
+    );
+    
+    const [runId, setRunId] = useState<string>(initialState?.runId ?? "");
+    
+    const [activeOperationId, setActiveOperationId] = useState<string>(
+        initialState?.activeOperationId ?? "",
+    );
+
+    const [progress, setProgress] = useState<ProgressResponse | null>(
+        initialState?.progress ?? null,
+    );
+
+    const [resultSummary, setResultSummary] = useState<RunSummary | null>(
+        initialState?.resultSummary ?? null,
+    );
+
+    const [outputPreview, setOutputPreview] = useState<OutputPreview | null>(
+        initialState?.outputPreview ?? null,
+    );
 
     const selectedModel = models.find((model) => model.id === modelId) ?? null;
+    const operationActive = isBusy || reviewMode === "running";
 
     const stepperCurrentStep: StepperStep =
         step === "output-preview"
@@ -196,9 +257,9 @@ export function App() {
     function startNewRun() {
         setModelId("");
         setFiles([]);
+        setInputNames([]);
         setIgnoredInputNames([]);
         setOutputRoot("");
-        setPrivacyOpen(false);
         setErrorMessage("");
         setIsBusy(false);
         clearReviewState();
@@ -208,9 +269,9 @@ export function App() {
     function goHome() {
         setModelId("");
         setFiles([]);
+        setInputNames([]);
         setIgnoredInputNames([]);
         setOutputRoot("");
-        setPrivacyOpen(false);
         setErrorMessage("");
         setIsBusy(false);
         clearReviewState();
@@ -221,9 +282,9 @@ export function App() {
         if (nextModelId !== modelId) {
             setModelId(nextModelId);
             setFiles([]);
+            setInputNames([]);
             setIgnoredInputNames([]);
             setOutputRoot("");
-            setPrivacyOpen(false);
             setErrorMessage("");
             clearReviewState();
         }
@@ -235,6 +296,8 @@ export function App() {
         setProgress(null);
         setResultSummary(null);
         setOutputPreview(null);
+        setActiveOperationId("");
+        activeAbortControllerRef.current = null;
     }
 
     useEffect(() => {
@@ -283,9 +346,9 @@ export function App() {
             .map((file) => file.name);
 
         setFiles(supportedFiles);
+        setInputNames(supportedFiles.map((file) => file.name));
         setIgnoredInputNames(ignoredNames);
         setOutputRoot("");
-        setPrivacyOpen(false);
         setErrorMessage("");
         clearReviewState();
     }
@@ -346,25 +409,100 @@ export function App() {
     }
 
     async function openOutputFolder() {
+        await openOutputFolderForRun(runId);
+    }
+
+    async function openOutputFolderForRun(targetRunId: string) {
+        if (targetRunId.length === 0) {
+            return;
+        }
+
         try {
             setIsBusy(true);
             setErrorMessage("");
 
-            const body = await requestOpenOutputFolder({ runId });
+            const body = await requestOpenOutputFolder({ runId: targetRunId });
 
             if (body === null) {
                 setErrorMessage(
-                    "Opening output folders is not available in this environment."
+                    "Opening output folders is not available in this environment.",
                 );
             }
         } catch {
-            setErrorMessage("Unable to open output folder.")
+            setErrorMessage("Unable to open output folder.");
         } finally {
             setIsBusy(false);
         }
     }
 
+    function confirmNavigateAwayFromActiveOperation(): boolean {
+        if (!operationActive) {
+            return true;
+        }
+
+        return window.confirm(
+            "A model operation is currently in progress. Leaving this page will cancel " +
+            "the backend operation and progress will be lost. Continue?",
+        );
+    }
+
+    async function cancelActiveOperation({
+        returnHome,
+    }: {
+        returnHome: boolean;
+    }) {
+        const operationId = activeOperationId.length > 0 ? activeOperationId : null;
+        const currentRunId = runId.length > 0 ? runId : null;
+
+        try {
+            setErrorMessage("");
+
+            if (operationId !== null || currentRunId !== null) {
+                await requestCancelRun({
+                    runId: currentRunId,
+                    operationId,
+                });
+            }
+        } catch {
+            setErrorMessage("Unable to cancel the backend operation.");
+        } finally {
+            activeAbortControllerRef.current?.abort();
+            activeAbortControllerRef.current = null;
+            setIsBusy(false);
+            setActiveOperationId("");
+            setProgress(null);
+            setReviewMode("ready");
+
+            if (returnHome) {
+                goHome();
+            }
+        }
+    }
+
+    function cancelRunFromReview() {
+        void cancelActiveOperation({ returnHome: false });
+    }
+
+    function navigateHome() {
+        if (!confirmNavigateAwayFromActiveOperation()) {
+            return;
+        }
+
+        if (operationActive) {
+            void cancelActiveOperation({ returnHome: true });
+            return;
+        }
+
+        goHome();
+    }
+
     async function runDryRun() {
+        const operationId = buildClientOperationId();
+        const abortController = new AbortController();
+
+        activeAbortControllerRef.current = abortController;
+        setActiveOperationId(operationId);
+
         try {
             setIsBusy(true);
             setErrorMessage("");
@@ -373,6 +511,8 @@ export function App() {
                 modelId,
                 outputRoot,
                 files,
+                operationId,
+                signal: abortController.signal,
             });
 
             setRunId(body.runId);
@@ -381,14 +521,29 @@ export function App() {
             setProgress(null);
             setReviewMode("dry-run-complete");
         } catch (error) {
-            setErrorMessage(userFacingRequestError(error, "Unable to complete dry run."));
-            setReviewMode("ready");
+            if (!isAbortError(error)) {
+                setErrorMessage(
+                    userFacingRequestError(
+                        error, 
+                        "Unable to complete dry run.")
+                );
+                setReviewMode("ready");
+            }
         } finally {
             setIsBusy(false);
+            setActiveOperationId("");
+            activeAbortControllerRef.current = null;
         }
     }
 
     async function startRun() {
+        const operationId = buildClientOperationId();
+        const abortController = new AbortController();
+        let started = false;
+
+        activeAbortControllerRef.current = abortController;
+        setActiveOperationId(operationId);
+
         try {
             setIsBusy(true);
             setErrorMessage("");
@@ -397,7 +552,11 @@ export function App() {
                 modelId,
                 outputRoot,
                 files,
+                operationId,
+                signal: abortController.signal,
             });
+
+            started = true;
 
             setRunId(body.runId);
             setResultSummary(body.summary);
@@ -415,11 +574,22 @@ export function App() {
             });
 
             setReviewMode("running");
-        } catch {
-            setErrorMessage("Unable to start model run.");
-            setReviewMode("ready");
+        } catch (error) {
+            if (!isAbortError(error)) {
+                setErrorMessage(
+                    userFacingRequestError(
+                        error, 
+                        "Unable to start model run.")
+                );
+                setReviewMode("ready");
+            }
         } finally {
             setIsBusy(false);
+            activeAbortControllerRef.current = null;
+
+            if (!started) {
+                setActiveOperationId("");
+            }
         }
     }
 
@@ -445,8 +615,13 @@ export function App() {
                 ));
 
                 if (body.status === "completed" || body.status === "failed") {
+                    setActiveOperationId("");
                     setReviewMode("ready");
                     setStep("results");
+                }
+
+                if (body.status === "cancelled") {
+                    goHome();
                 }
             } catch {
                 if (isMounted) {
@@ -465,6 +640,34 @@ export function App() {
         };
     }, [reviewMode, runId]);
 
+    useEffect(() => {
+        writePersistedAppState({
+            step,
+            modelId,
+            inputNames,
+            ignoredInputNames,
+            outputRoot,
+            reviewMode,
+            runId,
+            activeOperationId,
+            progress,
+            resultSummary,
+            outputPreview,
+        });
+    }, [
+        step,
+        modelId,
+        inputNames,
+        ignoredInputNames,
+        outputRoot,
+        reviewMode,
+        runId,
+        activeOperationId,
+        progress,
+        resultSummary,
+        outputPreview,
+    ]);
+
     return (
         <div className="min-h-screen bg-egm-bg text-black">
             <div className="flex min-h-screen flex-col">
@@ -481,7 +684,7 @@ export function App() {
                                 focus-visible:outline-offset-3 focus-visible:outline-egm-green
                             "
                             type="button"
-                            onClick={goHome}
+                            onClick={navigateHome}
                         >
                             EgoModelKit
                         </button>
@@ -540,8 +743,6 @@ export function App() {
                                 <ChooseOutputScreen
                                     outputRoot={outputRoot}
                                     isBusy={isBusy}
-                                    privacyOpen={privacyOpen}
-                                    onTogglePrivacy={() => setPrivacyOpen((open) => !open)}
                                     onChooseOutputFolder={chooseOutputFolder}
                                     canContinue={outputRoot.trim().length > 0 && !isBusy}
                                     onBack={() => setStep("choose-input")}
@@ -559,6 +760,8 @@ export function App() {
                                     onBack={() => setStep("choose-output")}
                                     onDryRun={runDryRun}
                                     onRun={startRun}
+                                    inputNames={inputNames}
+                                    onCancelRun={cancelRunFromReview}               
                                 />
                             ) : step === "results" && selectedModel !== null ? (
                                 <ResultsScreen
@@ -575,6 +778,7 @@ export function App() {
                                     onOpenOutputFolder={openOutputFolder}
                                     onStartNewRun={startNewRun}
                                     onViewOutputPreview={viewOutputPreview}
+                                    inputNames={inputNames}
                                 />
                             ) : step === "output-preview" && outputPreview !== null ? ( 
                                 <OutputPreviewScreen 
@@ -650,17 +854,6 @@ function WelcomeScreen({ onStart }: { onStart: () => void }) {
                 onClick={onStart}
             >
                 Start New Run
-            </button>
-
-            <button
-                className="
-                    mx-auto mt-[18px] block border-0 bg-transparent text-sm
-                    font-medium text-black hover:underline focus-visible:outline-3
-                    focus-visible:outline-offset-3 focus-visible:outline-egm-green
-                "
-                type="button"
-            >
-                View Previous Output Folder
             </button>
 
             <p className="mt-7 text-xs font-normal leading-[1.45]">
@@ -903,8 +1096,16 @@ function FooterActions({
     )
 }
 
-function inputLabelFromFiles(files: File[]): string {
-    return files.map((file) => file.name).join(", ");
+function inputLabelFromNames(inputNames: string[]): string {
+    if (inputNames.length === 0) {
+        return "Not available";
+    }
+
+    if (inputNames.length === 1) {
+        return inputNames[0];
+    }
+
+    return `${inputNames.length} files`;
 }
 
 function filterSupportedInputFiles(
@@ -983,6 +1184,22 @@ async function requestOpenOutputFolder({
     return (await response.json()) as OpenOutputFolderResponse;
 }
 
+async function requestCancelRun(request: CancelRunRequest): Promise<CancelRunResponse> {
+    const response = await fetch("/api/cancel-run", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+        },
+        body: JSON.stringify(request),
+    });
+
+    if (!response.ok) {
+        throw new Error(`Request failed with status ${response.status}.`);
+    }
+
+    return (await response.json()) as CancelRunResponse;
+}
+
 function modelInputLabel(model: ModelInfo): string {
     return withLabelPrefix("Input", model.acceptedInputLabel);
 }
@@ -1019,6 +1236,102 @@ function ignorelDescriptionFromFileNames(fileNames: string[]): string {
     return "These files are not supported by the selected model";
 }
 
+function buildClientOperationId(): string {
+    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+        return `operation-${crypto.randomUUID()}`;
+    }
+
+    return `operation-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function isAbortError(error: unknown): boolean {
+    return error instanceof DOMException && error.name === "AbortError";
+}
+
+function readPersistedAppState(): PersistedAppState | null {
+    try {
+        const rawState = window.localStorage.getItem(APP_STATE_STORAGE_KEY);
+
+        if (rawState === null) {
+            return null;
+        }
+
+        return normalizePersistedAppState(JSON.parse(rawState));
+    } catch {
+        return null;
+    }
+}
+
+function writePersistedAppState(state: PersistedAppState): void {
+    try {
+        window.localStorage.setItem(APP_STATE_STORAGE_KEY, JSON.stringify(state));
+    } catch {
+        // Ignore storage failures so the local GUI remains usable.
+    }
+}
+
+function normalizePersistedAppState(value: unknown): PersistedAppState | null {
+    if (!isRecord(value) || !isStep(value.step)) {
+        return null;
+    }
+
+    return {
+        step: value.step,
+        modelId: stringValue(value.modelId),
+        inputNames: stringArrayValue(value.inputNames),
+        ignoredInputNames: stringArrayValue(value.ignoredInputNames),
+        outputRoot: stringValue(value.outputRoot),
+        reviewMode: isReviewMode(value.reviewMode) ? value.reviewMode : "ready",
+        runId: stringValue(value.runId),
+        activeOperationId: stringValue(value.activeOperationId),
+        progress: isProgressResponse(value.progress) ? value.progress : null,
+        resultSummary: isRunSummary(value.resultSummary) ? value.resultSummary : null,
+        outputPreview: isOutputPreview(value.outputPreview) ? value.outputPreview : null,
+    };
+}
+
+function isStep(value: unknown): value is Step {
+    return [
+        "welcome",
+        "select-model",
+        "choose-input",
+        "choose-output",
+        "review",
+        "results",
+        "output-preview",
+    ].includes(String(value));
+}
+
+function isReviewMode(value: unknown): value is ReviewMode {
+    return ["ready", "dry-run-complete", "running"].includes(String(value));
+}
+
+function isProgressResponse(value: unknown): value is ProgressResponse {
+    return isRecord(value) && typeof value.runId === "string";
+}
+
+function isOutputPreview(value: unknown): value is OutputPreview {
+    return isRecord(value) && typeof value.runId === "string";
+}
+
+function isRunSummary(value: unknown): value is RunSummary {
+    return isRecord(value) && typeof value.model === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return typeof value === "object" && value !== null;
+}
+
+function stringValue(value: unknown): string {
+    return typeof value === "string" ? value : "";
+}
+
+function stringArrayValue(value: unknown): string[] {
+    return Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === "string")
+        : [];
+}
+
 class ApiRequestError extends Error {
     constructor(public readonly detail: string | null) {
         super(detail ?? "Request failed.");
@@ -1051,10 +1364,14 @@ async function postMultipart<T>(
         modelId,
         outputRoot,
         files,
+        operationId,
+        signal
     }: {
         modelId: string;
         outputRoot: string;
         files: File[];
+        operationId: string;
+        signal: AbortSignal;
     },
 ): Promise<T> {
     const formData = new FormData();
@@ -1066,9 +1383,12 @@ async function postMultipart<T>(
         formData.append("files", file, file.name);
     }
 
+    formData.append("operationId", operationId);
+
     const response = await fetch(url, {
         method: "POST",
         body: formData,
+        signal,
     });
 
     if (!response.ok) {
@@ -1215,8 +1535,6 @@ function ChooseInputScreen({
 function ChooseOutputScreen({
     outputRoot,
     isBusy,
-    privacyOpen,
-    onTogglePrivacy,
     onChooseOutputFolder,
     canContinue,
     onBack,
@@ -1224,8 +1542,6 @@ function ChooseOutputScreen({
 } : {
     outputRoot: string;
     isBusy: boolean;
-    privacyOpen: boolean;
-    onTogglePrivacy: () => void;
     onChooseOutputFolder: () => void;
     canContinue: boolean;
     onBack: () => void;
@@ -1286,57 +1602,6 @@ function ChooseOutputScreen({
                 A new run folder will be created inside the selected output folder.
             </div>
 
-            <div
-                className="
-                    mt-5 overflow-hidden rounded-xl border border-egm-card-border bg-white
-                "
-            >
-                <button
-                    aria-expanded={privacyOpen}
-                    className="
-                        flex min-h-14 w-full items-center justify-between px-5
-                        text-left text-base text-egm-body-copy hover:bg-egm-hover
-                        focus-visible:outline-3 focus-visible:outline-offset-3
-                        focus-visible:outline-egm-green
-                    "
-                    type="button"
-                    onClick={onTogglePrivacy}
-                >
-                    <span className={privacyOpen ? "font-semibold text-black" : ""}>
-                        Privacy-safe outputs
-                    </span>
-
-                    {privacyOpen ? (
-                        <ChevronUp
-                            aria-hidden="true"
-                            size={22}
-                            strokeWidth={2.0}
-                        />
-                    ) : (
-                        <ChevronDown
-                            aria-hidden="true"
-                            size={22}
-                            strokeWidth={2.0}
-                        />
-                    )}
-                </button>
-
-                {privacyOpen ? (
-                    <div
-                        className="
-                            border-t border-egm-card-border px-7 py-4 text-sm
-                            leading-6 text-egm-body-copy
-                        "
-                    >
-                        <ul className="m-0 list-disc pl-5">
-                            <li>Run IDs are neutral names.</li>
-                            <li>Logs avoid unnecessary personal details.</li>
-                            <li>Temporary files can be cleaned up after processing.</li>
-                        </ul>
-                    </div>
-                ) : null}
-           </div> 
-
            <FooterActions
                 onBack={onBack}
                 onContinue={onContinue}
@@ -1358,6 +1623,8 @@ function ReviewScreen({
     onBack,
     onDryRun,
     onRun,
+    inputNames,
+    onCancelRun,
 } : {
     selectedModel: ModelInfo;
     files: File[];
@@ -1369,8 +1636,10 @@ function ReviewScreen({
     onBack: () => void;
     onDryRun: () => void;
     onRun: () => void;
+    inputNames: string[];
+    onCancelRun: () => void;
 }) {
-    const running = reviewMode === "running";
+    const operationActive = isBusy || reviewMode === "running";
 
     return (
         <>
@@ -1381,7 +1650,7 @@ function ReviewScreen({
 
             <SummaryPanel
                 selectedModel={selectedModel}
-                inputLabel={inputLabelFromFiles(files)}
+                inputLabel={inputLabelFromNames(inputNames)}
                 outputRoot={outputRoot}
             />
 
@@ -1418,7 +1687,7 @@ function ReviewScreen({
             >
                 <button 
                     className={backButtonClass} 
-                    disabled={running}
+                    disabled={operationActive}
                     type="button" 
                     onClick={onBack}
                 >
@@ -1427,22 +1696,32 @@ function ReviewScreen({
                 </button>
 
                 <div className="flex gap-3">
-                    <button
-                        className={secondaryButtonClass}
-                        disabled={running || isBusy}
-                        type="button"
-                        onClick={onDryRun}
-                    >
-                        Dry Run
-                    </button>
-                    <button 
-                        className={primaryButtonClass}
-                        disabled={running || isBusy}
-                        type = "button"
-                        onClick={onRun}
-                    >
-                        Run Model
-                    </button>
+                    {operationActive ? (
+                        <button
+                            className={dangerButtonClass}
+                            type="button"
+                            onClick={onCancelRun}
+                        >
+                            Cancel Run
+                        </button>
+                    ) : (
+                        <>
+                            <button
+                                className={secondaryButtonClass}
+                                type="button"
+                                onClick={onDryRun}
+                            >
+                                Dry Run
+                            </button>
+                            <button
+                                className={primaryButtonClass}
+                                type="button"
+                                onClick={onRun}
+                            >
+                                Run Model
+                            </button>
+                        </>
+                    )}
                 </div>
             </div>
         </>
@@ -1676,6 +1955,7 @@ function ResultsScreen({
     onOpenOutputFolder,
     onStartNewRun,
     onViewOutputPreview,
+    inputNames,
 } : {
     selectedModel: ModelInfo;
     files: File[];
@@ -1687,6 +1967,7 @@ function ResultsScreen({
     onOpenOutputFolder: () => void;
     onStartNewRun: () => void;
     onViewOutputPreview: () => void;
+    inputNames: string[];
 }) {
     const failed = progress?.status === "failed";
     
@@ -1707,6 +1988,7 @@ function ResultsScreen({
                 runId={runId}
                 resultSummary={resultSummary}
                 progress={progress}
+                inputNames={inputNames}
             />
 
             <div 
@@ -1752,12 +2034,14 @@ function ResultsScreenSummaryPanel({
     runId,
     resultSummary,
     progress,
+    inputNames,
 } : {
     selectedModel: ModelInfo;
     files: File[];
     runId: string;
     resultSummary: RunSummary | null;
     progress: ProgressResponse | null;
+    inputNames: string[];
 }) {
     const failed = progress?.status === "failed";
     const statusLabel = failed ? "Failed" : "Completed";
@@ -1815,7 +2099,7 @@ function ResultsScreenSummaryPanel({
                                 border-b border-egm-list-border
                             "
                         >
-                            {inputLabelFromFiles(files)}
+                            {inputLabelFromNames(inputNames)}
                         </dd>
 
                         <dt className="border-b pb-2 border-egm-list-border">

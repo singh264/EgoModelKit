@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Final, Literal
+from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +61,10 @@ from egomodelkit.runtime.adl_recognition import (
     run_adl_recognition,
 )
 from egomodelkit.runtime.commands import (
-    streaming_subprocess_runner,
+    CommandCancelledError,
+    ProcessCancellation,
+    cancellable_streaming_subprocess_runner,
+    cancellable_subprocess_runner,
     subprocess_runner,
 )
 from egomodelkit.runtime.hand_object_contact import (
@@ -77,10 +81,10 @@ GUI_LOCAL_SERVER_NAME: Final[str] = "127.0.0.1"
 GUI_DEFAULT_SERVER_PORT: Final[int] = 7860
 GUI_UPLOAD_CHUNK_SIZE_BYTES: Final[int] = 1024 * 1024
 
-GuiRunStatus = Literal["ready", "running", "completed", "failed"]
+GuiRunStatus = Literal["ready", "running", "completed", "failed", "cancelled"]
 ProgressCallback = Callable[[str], None]
 ModelRunner = Callable[[Path, Path, ProgressCallback], None]
-RuntimeReadyChecker = Callable[[str, ProgressCallback], None]
+RuntimeReadyChecker = Callable[[str, ProgressCallback, Callable[[list[str]], int]], None]
 
 GUI_REQUEST_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
     ValueError,
@@ -100,6 +104,11 @@ class OutputPreviewRequest(BaseModel):
 class OpenOutputFolderRequest(BaseModel):
     """ Request body for opening a completed run folder. """
     run_id: str = Field(alias = "runId")
+
+class CancelRunRequest(BaseModel):
+    """ Request body for cancelling an active GUI operation. """
+    run_id: str | None = Field(default = None, alias = "runId")
+    operation_id: str | None = Field(default = None, alias = "operationId")
 
 class SelectOutputFolderResponse(BaseModel):
     """ Response body for native output-folder selection. """
@@ -128,6 +137,12 @@ class RuntimeBuildStage:
     total: int
 
 @dataclass(slots = True)
+class CancelableGuiOperation:
+    """ One cancelable dry-run or model-run operation. """
+    operation_id: str
+    cancellation: ProcessCancellation = field(default_factory = ProcessCancellation)
+
+@dataclass(slots = True)
 class GuiRunState:
     """ In-memory state for one local GUI run. """
     run_id: str
@@ -138,7 +153,10 @@ class GuiRunState:
     input_name: str
     input_path: Path
     staged_root: Path
+    operation_id: str
+    cancellation: ProcessCancellation
     output_preview: dict[str, object]
+    worker_thread_name: str | None = None
     error_message: str | None = None
     runtime_status: RuntimeStatus | None = None
     active_runtime_stage_id: str | None = None
@@ -160,6 +178,7 @@ def create_app(
     """
     app = FastAPI(title = "EgoModelKit Local GUI API")
     runs: dict[str, GuiRunState] = {}
+    operations: dict[str, CancelableGuiOperation] = {}
     runtime_ready_checker = runtime_checker or _check_runtime_ready_for_gui
     
     app.add_middleware(
@@ -233,12 +252,16 @@ def create_app(
         model_id: Annotated[str, Form(alias = "modelId")],
         output_root_text: Annotated[str, Form(alias = "outputRoot")],
         files: Annotated[list[UploadFile], File()],
+        operation_id_text: Annotated[str | None, Form(alias = "operationId")] = None,
     ) -> dict[str, object]:
         """ Validate uploaded files and output folder without running a model. """
         staged = await _stage_uploaded_files(files)
+        operation = _register_operation(operations, operation_id_text)
         
         try:
             output_root = _normalize_output_root(output_root_text)
+            
+            _validate_existing_output_root(output_root)
             
             _validate_gui_request(
                 model_id = model_id,
@@ -246,7 +269,11 @@ def create_app(
                 output_root = output_root,
             )
             
-            runtime_ready_checker(model_id, _ignore_progress)
+            runtime_ready_checker(
+                model_id,
+                _ignore_progress,
+                _command_runner_for_operation(operation),
+            )
             
             run_id = _build_unique_run_id(output_root, runs)
             layout = build_run_output_layout(output_root, run_id = run_id)
@@ -271,9 +298,12 @@ def create_app(
                 },
                 "outputPreview": _output_preview_response(context),
             }
+        except CommandCancelledError as exc:
+            raise HTTPException(status_code = 499, detail = str(exc)) from exc
         except GUI_REQUEST_EXCEPTIONS as exc:
             raise HTTPException(status_code = 400, detail = str(exc)) from exc
         finally:
+            operations.pop(operation.operation_id, None)
             shutil.rmtree(staged.root_dir, ignore_errors = True)
     
     @app.post("/api/runs")
@@ -281,12 +311,16 @@ def create_app(
         model_id: Annotated[str, Form(alias = "modelId")],
         output_root_text: Annotated[str, Form(alias = "outputRoot")],
         files: Annotated[list[UploadFile], File()],
+        operation_id_text: Annotated[str | None, Form(alias = "operationId")] = None,
     ) -> dict[str, object]:
         """ Start a model run and return immediately with a run id. """
         staged = await _stage_uploaded_files(files)
+        operation = _register_operation(operations, operation_id_text)
         
         try:
             output_root = _normalize_output_root(output_root_text)
+            
+            _validate_existing_output_root(output_root)
             
             _validate_gui_request(
                 model_id = model_id,
@@ -322,6 +356,8 @@ def create_app(
                 input_path = staged.input_path,
                 staged_root = staged.root_dir,
                 output_preview = _output_preview_response(context),
+                operation_id = operation.operation_id,
+                cancellation = operation.cancellation,
             )
             
             runs[run_id] = state
@@ -330,14 +366,17 @@ def create_app(
             
             thread = threading.Thread(
                 target = _execute_run,
+                name = f"egomodelkit-run-{run_id}",
                 kwargs = {
                     "state": state,
                     "hand_object_runner": hand_object_runner,
                     "adl_runner": adl_runner,
+                    "operations": operations,
                 },
                 daemon = True
             )
             
+            state.worker_thread_name = thread.name
             thread.start()
             
             return {
@@ -354,7 +393,9 @@ def create_app(
                 "outputPreview": state.output_preview,
             }
         except GUI_REQUEST_EXCEPTIONS as exc:
+            operations.pop(operation.operation_id, None)
             shutil.rmtree(staged.root_dir, ignore_errors = True)
+            
             raise HTTPException(status_code = 400, detail = str(exc)) from exc
     
     @app.get("/api/runs/{run_id}/progress")
@@ -366,6 +407,19 @@ def create_app(
             raise HTTPException(status_code = 404, detail = "Run was not found.")
         
         return _progress_response(state)
+
+    @app.post("/api/cancel-run")
+    def cancel_run(request: CancelRunRequest) -> dict[str, object]:
+        """ Cancel an active dry-run or model-run operation. """
+        try:
+            return _cancel_operation_for_request(
+                run_id = request.run_id,
+                operation_id = request.operation_id,
+                operations = operations,
+                runs = runs,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code = 404, detail = str(exc)) from exc
     
     @app.post("/api/open-output-folder")
     def open_output_folder(request: OpenOutputFolderRequest) -> dict[str, object]:
@@ -419,6 +473,7 @@ def _execute_run(
     state: GuiRunState,
     hand_object_runner: ModelRunner | None,
     adl_runner: ModelRunner | None,
+    operations: dict[str, CancelableGuiOperation],
 ) -> None:
     """ Execute one run in a background thread. """
     try:
@@ -432,21 +487,29 @@ def _execute_run(
             _record_runtime_output(state, message)
         
         if state.model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-            runner = (
-                hand_object_runner
-                if hand_object_runner is not None
-                else _run_hand_object_contact_for_gui
-            )
+            if hand_object_runner is None:
+                _run_hand_object_contact_for_gui(
+                    state.input_path,
+                    state.layout.run_dir,
+                    progress,
+                    state.cancellation,
+                )
+            else:
+                hand_object_runner(state.input_path, state.layout.run_dir, progress)
         elif state.model_id == ADL_RECOGNITION_MODEL_ID:
-            runner = (
-                adl_runner
-                if adl_runner is not None
-                else _run_adl_recognition_for_gui
-            )
+            if adl_runner is None:
+                _run_adl_recognition_for_gui(
+                    state.input_path,
+                    state.layout.run_dir,
+                    progress,
+                    state.cancellation,
+                )
+            else:
+                adl_runner(state.input_path, state.layout.run_dir, progress)
         else:
             raise ValueError(f"Unsupported model id: {state.model_id}")
 
-        runner(state.input_path, state.layout.run_dir, progress)
+        state.cancellation.raise_if_cancelled()
 
         finalize_runtime_outputs(
             layout = state.layout,
@@ -459,6 +522,8 @@ def _execute_run(
         
         _finish_runtime_build_stage(state)
         
+        state.cancellation.raise_if_cancelled()
+
         write_run_summary(
             layout = state.layout,
             model_id = state.model_id,
@@ -466,9 +531,30 @@ def _execute_run(
             scenario = state.scenario,
             status = "completed",
         )
-        
+                
         with state.lock:
             state.status = "completed"
+    except CommandCancelledError:
+        write_runtime_log_line(
+            state.layout.runtime_log_path,
+            (
+                "Backend worker stopped after cancellation: "
+                f"{state.worker_thread_name or threading.current_thread().name}."
+            ),
+        )
+                
+        write_run_summary(
+            layout = state.layout,
+            model_id = state.model_id,
+            input_path = state.input_path,
+            scenario = state.scenario,
+            status = "cancelled",
+        )
+
+        with state.lock:
+            state.runtime_status = None
+            state.status = "cancelled"
+            state.error_message = "Run was cancelled."
     except GUI_REQUEST_EXCEPTIONS as exc:
         write_run_summary(
             layout = state.layout,
@@ -488,18 +574,30 @@ def _execute_run(
             state.status = "failed"
             state.error_message = str(exc)
     finally:
+        operations.pop(state.operation_id, None)
         shutil.rmtree(state.staged_root, ignore_errors = True)
         
 def _run_hand_object_contact_for_gui(
     input_path: Path,
     output_dir: Path,
     progress: Callable[[str], None],
+    cancellation: ProcessCancellation,
 ) -> None:
     """ Run the existing hand-object-contact runtime. """
     run_hand_object_contact(
         HandObjectContactRequest(input_path = input_path, output_dir = output_dir),
-        command_runner = subprocess_runner,
-        streaming_command_runner = streaming_subprocess_runner,
+        command_runner = (
+            lambda command: cancellable_subprocess_runner(command, cancellation)
+        ),
+        streaming_command_runner = (
+            lambda command, progress_callback: (
+                cancellable_streaming_subprocess_runner(
+                    command, 
+                    progress_callback, 
+                    cancellation,
+                )
+            )
+        ),
         progress = progress,
     )
 
@@ -507,12 +605,23 @@ def _run_adl_recognition_for_gui(
     input_path: Path,
     output_dir: Path,
     progress: Callable[[str], None],
+    cancellation: ProcessCancellation,
 ) -> None:
     """ Run the existing ADL-recognition runtime. """
     run_adl_recognition(
         AdlRecognitionRequest(input_path = input_path, output_dir = output_dir),
-        command_runner = subprocess_runner,
-        streaming_command_runner = streaming_subprocess_runner,
+        command_runner = (
+            lambda command: cancellable_subprocess_runner(command, cancellation)
+        ),
+        streaming_command_runner = (
+            lambda command, progress_callback: (
+                cancellable_streaming_subprocess_runner(
+                    command, 
+                    progress_callback, 
+                    cancellation,
+                )
+            )
+        ),
         progress = progress,
     )
 
@@ -522,6 +631,7 @@ def _ignore_progress(_: str) -> None:
 def _check_runtime_ready_for_gui(
     model_id: str,
     progress: ProgressCallback = _ignore_progress,
+    command_runner: Callable[[list[str]], int] = subprocess_runner,
 ) -> None:
     """ Validate that the host can run packaged GPU model containers. """
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
@@ -533,9 +643,115 @@ def _check_runtime_ready_for_gui(
 
     ensure_host_runtime_ready(
         docker_executable = docker_executable,
-        command_runner = subprocess_runner,
+        command_runner = command_runner,
         require_linux_nvidia_gpu = True,
         progress = progress,
+    )
+
+def _register_operation(
+    operations: dict[str, CancelableGuiOperation],
+    operation_id_text: str | None,
+) -> CancelableGuiOperation:
+    """ Register a cancelable GUI operation. """
+    operation_id = _operation_id_from_text(operation_id_text)
+    operation = CancelableGuiOperation(operation_id = operation_id)
+    operations[operation_id] = operation
+
+    return operation
+
+def _operation_id_from_text(operation_id_text: str | None) -> str:
+    """ Return a safe operation id from frontend text or create one. """
+    operation_id = (operation_id_text or "").strip()
+
+    if operation_id:
+        return operation_id
+
+    return f"operation-{uuid4().hex}"
+
+def _command_runner_for_operation(
+    operation: CancelableGuiOperation,
+) -> Callable[[list[str]], int]:
+    """ Return a command runner bound to a cancelable operation. """
+    return lambda command: cancellable_subprocess_runner(
+        command,
+        operation.cancellation,
+    )
+
+def _cancel_operation_for_request(
+    *,
+    run_id: str | None,
+    operation_id: str | None,
+    operations: dict[str, CancelableGuiOperation],
+    runs: dict[str, GuiRunState],
+) -> dict[str, object]:
+    """ Cancel a tracked dry-run or model-run operation. """
+    state = runs.get(run_id) if run_id else None
+    resolved_operation_id = state.operation_id if state is not None else operation_id
+
+    operation = operations.get(resolved_operation_id or "")
+
+    if operation is None:
+        raise ValueError("No active run or operation was found to cancel.")
+
+    cancel_messages = operation.cancellation.cancel(
+        operation_label = _operation_label_for_cancel_log(state, operation),
+    )
+
+    if state is not None:
+        _record_cancel_request(state, cancel_messages)
+        _mark_run_cancelled(state)
+
+    return {
+        "cancelled": True,
+        "runId": state.run_id if state is not None else None,
+        "operationId": operation.operation_id,
+    }
+
+def _mark_run_cancelled(state: GuiRunState) -> None:
+    """ Mark a GUI run cancelled immediately after a cancel request. """
+    with state.lock:
+        state.runtime_status = None
+        state.active_runtime_stage_id = None
+        state.status = "cancelled"
+        state.error_message = "Run was cancelled."
+
+def _operation_label_for_cancel_log(
+    state: GuiRunState | None,
+    operation: CancelableGuiOperation,
+) -> str:
+    """ Return a clear operation label for cancellation logs. """
+    if state is not None:
+        return f"run {state.run_id} ({state.model_id})"
+
+    return f"operation {operation.operation_id}"
+
+def _record_cancel_request(
+    state: GuiRunState,
+    cancel_messages: list[str],
+) -> None:
+    """ Record clear cancellation details in runtime.log and progress.jsonl. """
+    write_runtime_log_line(
+        state.layout.runtime_log_path,
+        f"Run {state.run_id} was cancelled by the user.",
+    )
+
+    write_runtime_log_line(
+        state.layout.runtime_log_path,
+        (
+            "Backend worker thread signalled for cancellation: "
+            f"{state.worker_thread_name or 'unknown'}."
+        ),
+    )
+
+    for message in cancel_messages:
+        write_runtime_log_line(state.layout.runtime_log_path, message)
+
+    _record_progress(
+        state,
+        ProgressEvent(
+            stage = "cancelled",
+            message = "Run cancelled by user.",
+        ),
     )
 
 def _validate_gui_request(
@@ -1235,6 +1451,18 @@ def _normalize_output_root(output_root_text: str) -> Path:
         raise ValueError("Choose an output folder before continuing.")
     
     return Path(output_root_text).expanduser()
+
+def _validate_existing_output_root(output_root: Path) -> None:
+    """ Validate that a GUI output root already exists and is a directory. """
+    if not output_root.exists():
+        raise ValueError(
+            "Output folder does not exist. Choose an existing folder before continuing."
+        )
+
+    if not output_root.is_dir():
+        raise ValueError(
+            f"Output path exists but is not a folder: {output_root}"
+        )
 
 def _build_unique_run_id(output_root: Path, runs: dict[str, GuiRunState]) -> str:
     """ Build a neutral run id that does not collide in memory or on disk. """

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import builtins
 import sys
+import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -13,14 +15,17 @@ from fastapi.testclient import TestClient
 
 import egomodelkit.gui_backend as gui_backend
 from egomodelkit.gui_backend import (
+    CancelableGuiOperation,
     GuiRunState,
     ProgressCallback,
     _build_unique_run_id,
+    _cancel_operation_for_request,
     _check_runtime_ready_for_gui,
     _execute_run,
     _input_label,
     _model_display_name,
     _normalize_output_root,
+    _register_operation,
     _run_adl_recognition_for_gui,
     _run_hand_object_contact_for_gui,
     _safe_upload_filename,
@@ -30,6 +35,7 @@ from egomodelkit.gui_backend import (
     _select_output_folder_windows,
     _stage_uploaded_files,
     _unique_destination_path,
+    _validate_existing_output_root,
     _validate_gui_request,
     create_app,
 )
@@ -43,6 +49,7 @@ from egomodelkit.models.hand_object_contact import (
 )
 from egomodelkit.output_contract import build_run_output_layout, create_output_scaffold
 from egomodelkit.progress import ExternalProgressUpdate, ProgressEvent
+from egomodelkit.runtime.commands import CommandCancelledError, ProcessCancellation
 from egomodelkit.runtime.hand_object_contact import HandObjectContactRuntimeError
 
 
@@ -60,12 +67,14 @@ def _progress_line(kind: str, **payload: object) -> str:
 def _ready_runtime_checker(
     model_id: str,
     progress: ProgressCallback,
+    command_runner,
 ) -> None:
     progress(f"Runtime ready for {model_id}.")
 
 def _failing_runtime_checker(
     model_id: str,
     progress: ProgressCallback,
+    command_runner,
 ) -> None:
     progress(f"Runtime unavailable for {model_id}.")
     
@@ -74,6 +83,13 @@ def _failing_runtime_checker(
         "detected Darwin."
     )
 
+def _existing_output_root(tmp_path: Path) -> Path:
+    """ Create and return an output root for GUI tests that should pass validation. """
+    output_root = tmp_path / "results"
+    output_root.mkdir(exist_ok = True)
+
+    return output_root
+
 def _test_run_state(
     tmp_path: Path,
     *,
@@ -81,15 +97,17 @@ def _test_run_state(
     scenario: str = "hand-object-single-image",
 ) -> GuiRunState:
     return GuiRunState(
-        run_id = "run-test",
-        model_id = model_id,
-        status = "running",
-        layout = build_run_output_layout(tmp_path / "results", run_id = "run-test"),
-        scenario = scenario,  # type: ignore[arg-type]
-        input_name = "input",
-        input_path = tmp_path / "input",
-        staged_root = tmp_path / "staged",
-        output_preview = {},
+        run_id="run-test",
+        model_id=model_id,
+        status="running",
+        layout=build_run_output_layout(tmp_path / "results", run_id="run-test"),
+        scenario=scenario,  # type: ignore[arg-type]
+        input_name="input",
+        input_path=tmp_path / "input",
+        staged_root=tmp_path / "staged",
+        operation_id="operation-test",
+        cancellation=ProcessCancellation(),
+        output_preview={},
     )
 
 def test_models_endpoint_return_supported_models() -> None:
@@ -132,7 +150,7 @@ def test_output_preview_endpoint_returns_dynamic_tree(tmp_path: Path) -> None:
         json = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
             "inputNames": ["frame.jpg"],
-            "outputRoot": str(tmp_path / "results"), 
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
     )
     
@@ -151,7 +169,7 @@ def test_dry_run_validates_uploaded_file(tmp_path: Path) -> None:
         "/api/dry-run",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [
             ("files", ("frame.jpg", b"fake-image", "image/jpeg")),  
@@ -165,6 +183,38 @@ def test_dry_run_validates_uploaded_file(tmp_path: Path) -> None:
     assert body["status"] == "ready"
     assert body["scenario"] == "hand-object-single-image"
     assert body["summary"]["model"] == "Hand-object contact"
+
+def test_register_operation_uses_provided_operation_id() -> None:
+    operations = {}
+
+    operation = _register_operation(operations, "operation-1")
+
+    assert operation.operation_id == "operation-1"
+    assert operations["operation-1"] is operation
+
+def test_cancel_operation_for_request_cancels_operation_id() -> None:
+    operations = {}
+    runs = {}
+    operation = _register_operation(operations, "operation-1")
+
+    response = _cancel_operation_for_request(
+        run_id = None,
+        operation_id = "operation-1",
+        operations = operations,
+        runs = runs,
+    )
+
+    assert response["cancelled"] is True
+    assert operation.cancellation.is_cancelled()
+
+def test_cancel_operation_for_request_rejects_unknown_operation() -> None:
+    with pytest.raises(ValueError, match = "No active run or operation was found"):
+        _cancel_operation_for_request(
+            run_id = None,
+            operation_id = "missing-operation",
+            operations = {},
+            runs = {},
+        )
 
 def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> None:
     def fake_runner(
@@ -188,7 +238,7 @@ def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> Non
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results")
+            "outputRoot": str(_existing_output_root(tmp_path))
         },
         files = [
             ("files", ("frame.jpg", b"fake-image", "image/jpeg")),
@@ -255,7 +305,7 @@ def test_run_endpoint_organizes_hand_object_runtime_outputs(tmp_path: Path) -> N
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -336,7 +386,7 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
         "/api/runs",
         data = {
             "modelId": ADL_RECOGNITION_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
     )
@@ -391,6 +441,61 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
     assert not (run_dir / "all_preds.pkl").exists()
     assert not (run_dir / "adl_recognition_work").exists()
 
+def test_cancel_run_endpoint_cancels_running_state(tmp_path: Path) -> None:
+    block_runner = threading.Event()
+
+    def slow_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+    ) -> None:
+        progress("Fake model started.")
+        block_runner.wait(timeout = 2)
+
+    client = TestClient(create_app(hand_object_runner = slow_runner))
+
+    start_response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(_existing_output_root(tmp_path)),
+            "operationId": "operation-run-1",
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    assert start_response.status_code == 200
+    
+    run_id = start_response.json()["runId"]
+
+    cancel_response = client.post(
+        "/api/cancel-run",
+        json = {"runId": run_id, "operationId": "operation-run-1"},
+    )
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["cancelled"] is True
+
+    progress_body = client.get(f"/api/runs/{run_id}/progress").json()
+
+    assert progress_body["status"] == "cancelled"
+    assert progress_body["errorMessage"] == "Run was cancelled."
+
+    run_dir = tmp_path / "results" / run_id
+    runtime_log = run_dir / "logs" / "runtime.log"
+    progress_log = run_dir / "logs" / "progress.jsonl"
+
+    runtime_text = runtime_log.read_text(encoding = "utf-8")
+    progress_text = progress_log.read_text(encoding = "utf-8")
+
+    assert f"Run {run_id} was cancelled by the user." in runtime_text
+    assert "Backend worker thread signalled for cancellation:" in runtime_text
+    assert "no active subprocess was running at the time of cancellation" in runtime_text
+    assert '"stage": "cancelled"' in progress_text
+    assert '"message": "Run cancelled by user."' in progress_text
+
+    block_runner.set()
+
 def test_open_output_folder_uses_tracked_run(
     tmp_path: Path,
     monkeypatch,
@@ -419,7 +524,7 @@ def test_open_output_folder_uses_tracked_run(
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [
             ("files", ("frame.jpg", b"fake-image", "image/jpeg")),
@@ -502,7 +607,7 @@ def test_output_preview_endpoint_reports_bad_request(tmp_path: Path) -> None:
         json = {
             "modelId": "unknown-model",
             "inputNames": ["frame.jpg"],
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
     )
     
@@ -514,7 +619,7 @@ def test_dry_run_endpoint_checks_local_runtime_before_reporting_ready(
 ) -> None:
     checked_models: list[str] = []
 
-    def runtime_checker(model_id: str, progress: ProgressCallback) -> None:
+    def runtime_checker(model_id: str, progress: ProgressCallback, command_runner) -> None:
         checked_models.append(model_id)
         progress("Runtime check finished.")
 
@@ -524,7 +629,7 @@ def test_dry_run_endpoint_checks_local_runtime_before_reporting_ready(
         "/api/dry-run",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -539,7 +644,7 @@ def test_dry_run_endpoint_fails_when_runtime_check_fails(tmp_path: Path) -> None
         "/api/dry-run",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -586,7 +691,7 @@ def test_run_endpoint_reports_runtime_check_failure_gracefully(tmp_path: Path) -
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -622,7 +727,7 @@ def test_run_endpoint_reports_validation_error_and_cleans_staging(tmp_path: Path
         "/api/runs",
         data = {
             "modelId": "unknown-model",
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -647,7 +752,7 @@ def test_open_output_folder_rejects_missing_output_folder(tmp_path: Path) -> Non
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -692,7 +797,7 @@ def test_run_endpoint_uses_injected_adl_runner(tmp_path: Path) -> None:
         "/api/runs",
         data = {
             "modelId": ADL_RECOGNITION_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
     )
@@ -755,13 +860,20 @@ def test_execute_run_records_failure_and_cleans_staged_root(tmp_path: Path) -> N
         input_name = "frame.jpg",
         input_path = input_path,
         staged_root = staged_root,
+        operation_id="operation-test",
+        cancellation=ProcessCancellation(),
         output_preview = {}
     )
     
     def failing_runner(input_path: Path, output_dir: Path, progress) -> None:
         raise HandObjectContactRuntimeError("simulated failure")
     
-    _execute_run(state = state, hand_object_runner = failing_runner, adl_runner = None)
+    _execute_run(
+        state=state,
+        hand_object_runner=failing_runner,
+        adl_runner=None,
+        operations={},
+    )
 
     assert state.status == "failed"
     assert state.error_message == "simulated failure"
@@ -787,10 +899,20 @@ def test_execute_run_rejects_unsupported_model_id(tmp_path: Path) -> None:
         input_name = "frame.jpg",
         input_path = input_path,
         staged_root = staged_root,
+        operation_id="operation-test",
+        cancellation=ProcessCancellation(),
         output_preview = {},
     )
     
-    _execute_run(state = state, hand_object_runner = None, adl_runner = None)
+    def failing_runner(input_path: Path, output_dir: Path, progress) -> None:
+        raise HandObjectContactRuntimeError("Unsupported model id: unknown-model")
+    
+    _execute_run(
+        state = state,
+        hand_object_runner = failing_runner,
+        adl_runner = None,
+        operations = {},
+    )
 
     assert state.status == "failed"
     assert state.error_message == "Unsupported model id: unknown-model"
@@ -839,8 +961,19 @@ def test_runtime_wrappers_delegate_to_existing_runners(
     
     messages: list[str] = []
     
-    _run_hand_object_contact_for_gui(tmp_path / "frame.jpg", tmp_path / "out", messages.append)
-    _run_adl_recognition_for_gui(tmp_path / "clip.mp4", tmp_path / "out", messages.append)
+    _run_hand_object_contact_for_gui(
+        tmp_path / "frame.jpg",
+        tmp_path / "out",
+        messages.append,
+        ProcessCancellation(),
+    )
+    
+    _run_adl_recognition_for_gui(
+        tmp_path / "clip.mp4", 
+        tmp_path / "out", 
+        messages.append,
+        ProcessCancellation(),
+    )
     
     assert captured["hand_request"].input_path == tmp_path / "frame.jpg"
     assert captured["adl_request"].input_path == tmp_path / "clip.mp4"
@@ -898,6 +1031,25 @@ def test_stage_uploaded_files_cleans_up_after_bad_filename(tmp_path: Path) -> No
 def test_normalize_output_root_rejects_blank_text() -> None:
     with pytest.raises(ValueError, match = "Choose an output folder"):
         _normalize_output_root(" \n\t ")
+
+def test_validate_existing_output_root_rejects_missing_folder(tmp_path: Path) -> None:
+    missing_output_root = tmp_path / "missing-results"
+
+    with pytest.raises(ValueError, match = "Output folder does not exist"):
+        _validate_existing_output_root(missing_output_root)
+
+def test_validate_existing_output_root_rejects_file(tmp_path: Path) -> None:
+    output_file = tmp_path / "results.txt"
+    output_file.write_text("not a folder", encoding = "utf-8")
+
+    with pytest.raises(ValueError, match = "Output path exists but is not a folder"):
+        _validate_existing_output_root(output_file)
+
+def test_validate_existing_output_root_accepts_existing_folder(tmp_path: Path) -> None:
+    output_root = tmp_path / "results"
+    output_root.mkdir()
+
+    _validate_existing_output_root(output_root)
 
 def test_build_unique_run_id_uses_suffix_for_collisions(
     tmp_path: Path,
@@ -1091,7 +1243,7 @@ def test_run_endpoint_reports_wireframe_hand_object_single_image_progress(
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -1125,7 +1277,7 @@ def test_run_endpoint_reports_wireframe_hand_object_image_set_progress(
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [
             ("files", (f"frame-{index:03d}.jpg", b"fake-image", "image/jpeg"))
@@ -1169,7 +1321,7 @@ def test_run_endpoint_reports_wireframe_adl_single_video_progress(
         "/api/runs",
         data = {
             "modelId": ADL_RECOGNITION_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("participant-session-01.mp4", b"fake-video", "video/mp4"))],
     )
@@ -1217,7 +1369,7 @@ def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
         "/api/runs",
         data = {
             "modelId": ADL_RECOGNITION_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [
             ("files", (f"participant-session-{index:02d}.mp4", b"fake-video", "video/mp4"))
@@ -1259,7 +1411,7 @@ def test_run_endpoint_writes_technical_progress_without_showing_it(
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -1309,7 +1461,7 @@ def test_run_endpoint_reports_runtime_status_separately_from_progress_rows(
         "/api/runs",
         data = {
             "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
-            "outputRoot": str(tmp_path / "results"),
+            "outputRoot": str(_existing_output_root(tmp_path)),
         },
         files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
     )
@@ -1596,3 +1748,216 @@ def test_active_runtime_build_stage_ignores_missing_active_stage(tmp_path: Path)
     assert state.runtime_status is None
     assert state.active_runtime_stage_id is None
     assert state.runtime_build_stages == {}
+
+def test_dry_run_rejects_missing_output_folder(tmp_path: Path) -> None:
+    app = create_app(runtime_checker = _ready_runtime_checker)
+    client = TestClient(app)
+
+    input_file = tmp_path / "frame.jpg"
+    input_file.write_bytes(b"fake image")
+
+    missing_output_root = tmp_path / "missing-results"
+
+    with input_file.open("rb") as stream:
+        response = client.post(
+            "/api/dry-run",
+            data = {
+                "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+                "outputRoot": str(missing_output_root),
+            },
+            files = {
+                "files": ("frame.jpg", stream, "image/jpeg"),
+            },
+        )
+
+    assert response.status_code == 400
+    
+    assert response.json()["detail"] == (
+        "Output folder does not exist. Choose an existing folder before continuing."
+    )
+
+def test_start_run_rejects_missing_output_folder(tmp_path: Path) -> None:
+    app = create_app(runtime_checker = _ready_runtime_checker)
+    client = TestClient(app)
+
+    input_file = tmp_path / "frame.jpg"
+    input_file.write_bytes(b"fake image")
+
+    missing_output_root = tmp_path / "missing-results"
+
+    with input_file.open("rb") as stream:
+        response = client.post(
+            "/api/runs",
+            data = {
+                "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+                "outputRoot": str(missing_output_root),
+            },
+            files = {
+                "files": ("frame.jpg", stream, "image/jpeg"),
+            },
+        )
+
+    assert response.status_code == 400
+    
+    assert response.json()["detail"] == (
+        "Output folder does not exist. Choose an existing folder before continuing."
+    )
+
+def test_dry_run_returns_499_when_runtime_check_is_cancelled(tmp_path: Path) -> None:
+    def cancelling_runtime_checker(
+        _model_id: str,
+        _progress: ProgressCallback,
+        _command_runner: Callable[[list[str]], int],
+    ) -> None:
+        raise CommandCancelledError("Run was cancelled.")
+
+    app = create_app(runtime_checker = cancelling_runtime_checker)
+    client = TestClient(app)
+
+    input_file = tmp_path / "frame.jpg"
+    input_file.write_bytes(b"fake image")
+
+    with input_file.open("rb") as stream:
+        response = client.post(
+            "/api/dry-run",
+            data = {
+                "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+                "outputRoot": str(_existing_output_root(tmp_path)),
+                "operationId": "operation-cancelled-dry-run",
+            },
+            files = {
+                "files": ("frame.jpg", stream, "image/jpeg"),
+            },
+        )
+
+    assert response.status_code == 499
+    assert response.json()["detail"] == "Run was cancelled."
+
+def test_cancel_run_endpoint_returns_404_when_operation_is_missing() -> None:
+    client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
+
+    response = client.post(
+        "/api/cancel-run",
+        json = {
+            "runId": "missing-run",
+            "operationId": "missing-operation",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "No active run or operation was found to cancel."
+
+def test_execute_run_uses_default_hand_object_gui_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(tmp_path)
+    calls: list[tuple[Path, Path, ProcessCancellation]] = []
+
+    def fake_hand_object_gui_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+        cancellation: ProcessCancellation,
+    ) -> None:
+        calls.append((input_path, output_dir, cancellation))
+        progress("Hand-object runtime output")
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._run_hand_object_contact_for_gui",
+        fake_hand_object_gui_runner,
+    )
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.finalize_runtime_outputs",
+        lambda **_kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.write_run_summary",
+        lambda **_kwargs: None,
+    )
+
+    operations = {
+        state.operation_id: CancelableGuiOperation(
+            operation_id = state.operation_id,
+            cancellation = state.cancellation,
+        )
+    }
+
+    _execute_run(
+        state = state,
+        hand_object_runner = None,
+        adl_runner = None,
+        operations = operations,
+    )
+
+    assert calls == [
+        (
+            state.input_path,
+            state.layout.run_dir,
+            state.cancellation,
+        )
+    ]
+
+    assert state.status == "completed"
+    assert operations == {}
+
+def test_execute_run_uses_default_adl_gui_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(tmp_path)
+    state.model_id = ADL_RECOGNITION_MODEL_ID
+    state.scenario = "adl-single-video"
+
+    calls: list[tuple[Path, Path, ProcessCancellation]] = []
+
+    def fake_adl_gui_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+        cancellation: ProcessCancellation,
+    ) -> None:
+        calls.append((input_path, output_dir, cancellation))
+        progress("ADL runtime output")
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._run_adl_recognition_for_gui",
+        fake_adl_gui_runner,
+    )
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.finalize_runtime_outputs",
+        lambda **_kwargs: None,
+    )
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.write_run_summary",
+        lambda **_kwargs: None,
+    )
+
+    operations = {
+        state.operation_id: CancelableGuiOperation(
+            operation_id = state.operation_id,
+            cancellation = state.cancellation,
+        )
+    }
+
+    _execute_run(
+        state = state,
+        hand_object_runner = None,
+        adl_runner = None,
+        operations = operations,
+    )
+
+    assert calls == [
+        (
+            state.input_path,
+            state.layout.run_dir,
+            state.cancellation,
+        )
+    ]
+
+    assert state.status == "completed"
+    assert operations == {}
