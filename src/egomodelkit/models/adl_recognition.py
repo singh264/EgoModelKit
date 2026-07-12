@@ -2,6 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
+from egomodelkit.bandini_metrics import (
+    DEFAULT_DOMINANT_HAND,
+    LEFT_HAND_LABEL,
+    RIGHT_HAND_LABEL,
+    HandLabel,
+)
+
 ADL_RECOGNITION_MODEL_ID: Final[str] = "adl-recognition"
 COMBINED_PREDS_FILENAME: Final[str] = "all_preds.pkl"
 
@@ -19,10 +26,14 @@ class AdlRecognitionRequest:
     """ One video-based ADL recognition request. """
     input_path: Path
     output_dir: Path
+    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND
 
 def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
     """ Validate an ADL recognition request. """
     input_path = request.input_path
+    
+    if request.dominant_hand not in {LEFT_HAND_LABEL, RIGHT_HAND_LABEL}:
+        raise AdlRecognitionInputError("Dominant hand must be 'left' or 'right'.")
     
     if not input_path.exists():
         raise AdlRecognitionInputError(f"Input path does not exist: {input_path}")

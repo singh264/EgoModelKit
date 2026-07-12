@@ -2,11 +2,15 @@
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Final, Literal
 
+from egomodelkit.bandini_metrics import (
+    DEFAULT_VIDEO_PROCESSING_CONFIG,
+    VideoProcessingConfig,
+)
 from egomodelkit.models.adl_recognition import (
     COMBINED_PREDS_FILENAME,
     AdlRecognitionRequest,
@@ -54,7 +58,6 @@ DETIC_WEIGHTS_FILENAME: Final[str] = DETIC_WEIGHTS_PIN.filename
 @dataclass(frozen = True, slots = True)
 class AdlRecognitionRuntimeSpec:
     """ Build and execution settings for the hidden adl-recognition runtime. """
-
     docker_executable: str
     core_image_tag: str
     detic_image_tag: str
@@ -80,9 +83,7 @@ class AdlRecognitionRuntimeSpec:
     
     detic_confidence_threshold: float
     detic_num_workers: int
-    subclip_length_seconds: int
-    subclip_fps: int
-    frame_fps: int
+    video_processing_config: VideoProcessingConfig
     active_iou: float
     
     hand_object_contact_runtime_spec: HandObjectContactRuntimeSpec
@@ -116,9 +117,7 @@ DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC: Final[AdlRecognitionRuntimeSpec] = (
         pytorch_cuda_index_url = "https://download.pytorch.org/whl/cu113",
         detic_confidence_threshold = 0.3,
         detic_num_workers = 1,
-        subclip_length_seconds = 10,
-        subclip_fps = 10,
-        frame_fps = 2,
+        video_processing_config = DEFAULT_VIDEO_PROCESSING_CONFIG,
         active_iou = 0.75,
         hand_object_contact_runtime_spec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
         host_uid = os.getuid(),
@@ -307,11 +306,21 @@ def build_core_run_command(
         "--adl-dir-name",
         runtime_spec.staged_adl_dir_name,
         "--subclip-length",
-        str(runtime_spec.subclip_length_seconds),
+        str(runtime_spec.video_processing_config.subclip_length_seconds),
         "--fps",
-        str(runtime_spec.subclip_fps),
+        str(runtime_spec.video_processing_config.subclip_fps),
         "--frame-fps",
-        str(runtime_spec.frame_fps),
+        str(runtime_spec.video_processing_config.frame_fps),
+        "--resize-width",
+        str(runtime_spec.video_processing_config.resize_width),
+        "--resize-height",
+        str(runtime_spec.video_processing_config.resize_height),
+        "--pooling-window-seconds",
+        str(runtime_spec.video_processing_config.pooling_window_seconds),
+        "--interaction-contact-state-threshold",
+        str(runtime_spec.video_processing_config.interaction_contact_state_threshold),
+        "--dominant-hand",
+        runtime_spec.video_processing_config.dominant_hand,
         "--active-iou",
         str(runtime_spec.active_iou),
     ]
@@ -388,6 +397,20 @@ def _repair_output_ownership(
     
     return command
 
+def _runtime_spec_for_request(
+    request: AdlRecognitionRequest,
+    *,
+    runtime_spec: AdlRecognitionRuntimeSpec,
+) -> AdlRecognitionRuntimeSpec:
+    """ Return runtime spec with request-specific ADL metric settings applied. """
+    return replace(
+        runtime_spec,
+        video_processing_config = replace(
+            runtime_spec.video_processing_config,
+            dominant_hand = request.dominant_hand,
+        ),
+    )
+
 def run_adl_recognition(
     request: AdlRecognitionRequest,
     *,
@@ -401,6 +424,11 @@ def run_adl_recognition(
     """ Run ADL recognition behind EgoModelKit's run command. """
     progress("Validating adl-recognition request.")
     validate_adl_recognition_request(request)
+    
+    runtime_spec = _runtime_spec_for_request(
+        request,
+        runtime_spec=runtime_spec,
+    )
     
     runtime_check_kwargs = _runtime_check_overrides(
         executable_locator = executable_locator,

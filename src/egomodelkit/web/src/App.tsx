@@ -146,6 +146,7 @@ type ProgressResponse = {
 type PersistedAppState = {
     step: Step;
     modelId: string;
+    dominantHand: DominantHand;
     inputNames: string[];
     ignoredInputNames: string[];
     outputRoot: string;
@@ -157,8 +158,10 @@ type PersistedAppState = {
     outputPreview: OutputPreview | null;
 };
 
-const HAND_OBJECT_MODEL_ID = "hand-object-contact";
-const ADL_MODEL_ID = "adl-recognition";
+type DominantHand = "right" | "left";
+
+const ADL_MODEL_ID = "adl-recognition"
+const DEFAULT_DOMINANT_HAND: DominantHand = "right";
 
 const STEPS: Array<{ id: StepperStep; label: string }> = [
     { id: "select-model", label: "Select model" },
@@ -209,6 +212,11 @@ export function App() {
     const [modelsLoading, setModelsLoading] = useState<boolean>(true);
     const [modelsError, setModelsError] = useState<string>("");
     const [modelId, setModelId] = useState<string>(initialState?.modelId ?? "");
+
+    const [dominantHand, setDominantHand] = useState<DominantHand>(
+        initialState?.dominantHand ?? DEFAULT_DOMINANT_HAND,
+    );
+
     const [files, setFiles] = useState<File[]>([]);
     const [inputNames, setInputNames] = useState<string[]>(initialState?.inputNames ?? []);
 
@@ -256,6 +264,7 @@ export function App() {
 
     function startNewRun() {
         setModelId("");
+        setDominantHand(DEFAULT_DOMINANT_HAND);
         setFiles([]);
         setInputNames([]);
         setIgnoredInputNames([]);
@@ -268,6 +277,7 @@ export function App() {
 
     function goHome() {
         setModelId("");
+        setDominantHand(DEFAULT_DOMINANT_HAND);
         setFiles([]);
         setInputNames([]);
         setIgnoredInputNames([]);
@@ -280,6 +290,10 @@ export function App() {
 
     function selectModel(nextModelId: string) {
         if (nextModelId !== modelId) {
+            if (nextModelId !== ADL_MODEL_ID) {
+                setDominantHand(DEFAULT_DOMINANT_HAND);
+            }
+
             setModelId(nextModelId);
             setFiles([]);
             setInputNames([]);
@@ -507,10 +521,11 @@ export function App() {
             setIsBusy(true);
             setErrorMessage("");
 
-            const body = await postMultipart<DryRunResponse>("/api/dry-run", {
+           const body = await postMultipart<DryRunResponse>("/api/dry-run", {
                 modelId,
                 outputRoot,
                 files,
+                dominantHand,
                 operationId,
                 signal: abortController.signal,
             });
@@ -552,9 +567,11 @@ export function App() {
                 modelId,
                 outputRoot,
                 files,
+                dominantHand,
                 operationId,
                 signal: abortController.signal,
             });
+
 
             started = true;
 
@@ -581,6 +598,11 @@ export function App() {
                         error, 
                         "Unable to start model run.")
                 );
+
+                setRunId("");
+                setProgress(null);
+                setResultSummary(null);
+                setOutputPreview(null);
                 setReviewMode("ready");
             }
         } finally {
@@ -641,9 +663,10 @@ export function App() {
     }, [reviewMode, runId]);
 
     useEffect(() => {
-        writePersistedAppState({
+       writePersistedAppState({
             step,
             modelId,
+            dominantHand,
             inputNames,
             ignoredInputNames,
             outputRoot,
@@ -657,6 +680,7 @@ export function App() {
     }, [
         step,
         modelId,
+        dominantHand,
         inputNames,
         ignoredInputNames,
         outputRoot,
@@ -723,6 +747,8 @@ export function App() {
                                     modelsError={modelsError}
                                     selectedModelId={modelId}
                                     onSelectModel={selectModel}
+                                    dominantHand={dominantHand}
+                                    onDominantHandChange={setDominantHand}
                                     canContinue={modelId.length > 0}
                                     onBack={() => setStep("welcome")}
                                     onContinue={() => setStep("choose-input")}
@@ -730,6 +756,7 @@ export function App() {
                             ) : step === "choose-input" && selectedModel !== null ? (
                                 <ChooseInputScreen 
                                     selectedModel={selectedModel}
+                                    isAdlModel={selectedModel.id === ADL_MODEL_ID}
                                     files={files}
                                     ignoredInputNames={ignoredInputNames}
                                     fileInputRef={fileInputRef}
@@ -751,6 +778,11 @@ export function App() {
                             ) : step === "review" && selectedModel !== null ? (
                                 <ReviewScreen
                                     selectedModel={selectedModel}
+                                    dominantHand={
+                                        selectedModel.id === ADL_MODEL_ID 
+                                        ? dominantHand 
+                                        : null
+                                    }
                                     files={files}
                                     outputRoot={outputRoot}
                                     reviewMode={reviewMode}
@@ -766,6 +798,11 @@ export function App() {
                             ) : step === "results" && selectedModel !== null ? (
                                 <ResultsScreen
                                     selectedModel={selectedModel}
+                                    dominantHand={
+                                        selectedModel.id === ADL_MODEL_ID 
+                                        ? dominantHand 
+                                        : null
+                                    }
                                     files={files}
                                     runId={runId}
                                     resultSummary={resultSummary}
@@ -794,6 +831,8 @@ export function App() {
                                     modelsError={modelsError}
                                     selectedModelId={modelId}
                                     onSelectModel={selectModel}
+                                    dominantHand={dominantHand}
+                                    onDominantHandChange={setDominantHand}
                                     canContinue={modelId.length > 0}
                                     onBack={() => setStep("welcome")}
                                     onContinue={() => setStep("choose-input")}
@@ -829,7 +868,7 @@ function WelcomeScreen({ onStart }: { onStart: () => void }) {
 
             <div
                 className="
-                    mx-auto mt-8 flex min-h-[84px] w-full max-w-[544px] items-center
+                    mx-auto mt-8 flex min-h-[84px] w-full max-w-[544px]
                     gap-4 rounded-xl border border-egm-blue-border bg-egm-blue-soft
                     px-6 py-5 text-left
                 "
@@ -870,6 +909,8 @@ function SelectModelScreen({
     modelsError,
     selectedModelId,
     onSelectModel,
+    dominantHand,
+    onDominantHandChange,
     canContinue,
     onBack,
     onContinue,
@@ -879,6 +920,8 @@ function SelectModelScreen({
     modelsError: string;
     selectedModelId: string;
     onSelectModel: (modelId: string) => void;
+    dominantHand: DominantHand;
+    onDominantHandChange: (dominantHand: DominantHand) => void;
     canContinue: boolean;
     onBack: () => void;
     onContinue: () => void;
@@ -994,6 +1037,13 @@ function SelectModelScreen({
                 </div>
             )}
 
+           {selectedModelId === ADL_MODEL_ID ? (
+                <AdlSettingsPanel
+                    dominantHand={dominantHand}
+                    onDominantHandChange={onDominantHandChange}
+                />
+            ) : null}
+
             <FooterActions
                 onBack={onBack}
                 onContinue={onContinue}
@@ -1001,6 +1051,108 @@ function SelectModelScreen({
                 continueDisabled={!canContinue || modelsLoading || modelsError.length > 0}
             />
         </>
+    );
+}
+
+function AdlSettingsPanel({
+    dominantHand,
+    onDominantHandChange,
+}: {
+    dominantHand: DominantHand;
+    onDominantHandChange: (dominantHand: DominantHand) => void;
+}) {
+    const options: DominantHand[] = ["right", "left"];
+
+    return (
+        <section
+            aria-labelledby="adl-settings-heading"
+            className="
+                mt-6 rounded-2xl border border-egm-card-border bg-white px-5 py-5
+                text-base text-egm-body-copy
+            "
+        >
+            <h2
+                id="adl-settings-heading"
+                className="text-base font-semibold text-black"
+            >
+                ADL settings
+            </h2>
+
+            <fieldset className="mt-5">
+                <legend className="font-semibold text-egm-strong-copy">
+                    Dominant hand after injury
+                </legend>
+
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                    {options.map((option) => {
+                        const selected = dominantHand === option;
+
+                        return (
+                            <label
+                                key={option}
+                                className={[
+                                    "inline-flex min-h-10 cursor-pointer items-center",
+                                    "justify-center rounded-lg border px-5 py-2",
+                                    "font-semibold transition-colors",
+                                    "focus-within:outline-3 focus-within:outline-offset-3",
+                                    "focus-within:outline-egm-green",
+                                    selected
+                                        ? [
+                                            "border-egm-green bg-egm-green-tint",
+                                            "text-egm-green",
+                                        ].join(" ")
+                                        : [
+                                            "border-egm-radio-border bg-white",
+                                            "text-egm-strong-copy hover:bg-egm-hover",
+                                        ].join(" "),
+                                ].join(" ")}
+                            >
+                                <input
+                                    checked={selected}
+                                    className="sr-only"
+                                    name="dominant-hand"
+                                    type="radio"
+                                    value={option}
+                                    onChange={() => onDominantHandChange(option)}
+                                />
+                                {dominantHandLabel(option)}
+                            </label>
+                        );
+                    })}
+                </div>
+            </fieldset>
+
+            <p className="mt-3 text-sm leading-6 text-egm-secondary-copy">
+                Used to label dominant-hand and non-dominant-hand clinical hand-use metrics.
+            </p>
+        </section>
+    );
+}
+
+function AdlMultiFileSessionNote() {
+    return (
+        <div
+            className="
+                mt-6 flex items-start gap-3 rounded-xl border border-egm-blue-border
+                bg-egm-blue-soft px-4 py-3 text-sm leading-6 text-egm-blue-icon
+            "
+            role="note"
+        >
+            <Info
+                aria-hidden="true"
+                className="mt-0.5 shrink-0 text-egm-blue-icon"
+                size={18}
+                strokeWidth={2.0}
+            />
+
+            <div>
+                <p className="font-semibold">Session note</p>
+                <p>
+                    Multiple selected ADL videos are grouped as one session. Run the
+                    pipeline separately for each session.
+                </p>
+            </div>
+        </div>
     );
 }
 
@@ -1278,6 +1430,9 @@ function normalizePersistedAppState(value: unknown): PersistedAppState | null {
     return {
         step: value.step,
         modelId: stringValue(value.modelId),
+        dominantHand: isDominantHand(value.dominantHand)
+            ? value.dominantHand
+            : DEFAULT_DOMINANT_HAND,
         inputNames: stringArrayValue(value.inputNames),
         ignoredInputNames: stringArrayValue(value.ignoredInputNames),
         outputRoot: stringValue(value.outputRoot),
@@ -1304,6 +1459,14 @@ function isStep(value: unknown): value is Step {
 
 function isReviewMode(value: unknown): value is ReviewMode {
     return ["ready", "dry-run-complete", "running"].includes(String(value));
+}
+
+function isDominantHand(value: unknown): value is DominantHand {
+    return value === "right" || value === "left";
+}
+
+function dominantHandLabel(value: DominantHand): string {
+    return value === "right" ? "Right" : "Left";
 }
 
 function isProgressResponse(value: unknown): value is ProgressResponse {
@@ -1364,20 +1527,27 @@ async function postMultipart<T>(
         modelId,
         outputRoot,
         files,
+        dominantHand,
         operationId,
         signal
     }: {
         modelId: string;
         outputRoot: string;
         files: File[];
+        dominantHand: DominantHand;
         operationId: string;
         signal: AbortSignal;
     },
+
 ): Promise<T> {
     const formData = new FormData();
 
     formData.append("modelId", modelId);
     formData.append("outputRoot", outputRoot);
+
+    if (modelId === ADL_MODEL_ID) {
+        formData.append("dominantHand", dominantHand);
+    }
 
     for (const file of files) {
         formData.append("files", file, file.name);
@@ -1400,6 +1570,7 @@ async function postMultipart<T>(
 
 function ChooseInputScreen({
     selectedModel,
+    isAdlModel,
     files,
     ignoredInputNames,
     fileInputRef,
@@ -1410,6 +1581,7 @@ function ChooseInputScreen({
     onContinue,
 } : {
     selectedModel: ModelInfo;
+    isAdlModel: boolean;
     files: File[];
     ignoredInputNames: string[];
     fileInputRef: RefObject<HTMLInputElement | null>;
@@ -1424,6 +1596,8 @@ function ChooseInputScreen({
     return (
         <>
             <PageHeading title="Choose input" subtitle={subtitle} />
+
+            {isAdlModel ? <AdlMultiFileSessionNote /> : null}
 
             <div 
                 className="
@@ -1614,6 +1788,7 @@ function ChooseOutputScreen({
 
 function ReviewScreen({
     selectedModel,
+    dominantHand,
     files,
     outputRoot,
     reviewMode,
@@ -1627,6 +1802,7 @@ function ReviewScreen({
     onCancelRun,
 } : {
     selectedModel: ModelInfo;
+    dominantHand: DominantHand | null;
     files: File[];
     outputRoot: string;
     reviewMode: ReviewMode;
@@ -1652,6 +1828,7 @@ function ReviewScreen({
                 selectedModel={selectedModel}
                 inputLabel={inputLabelFromNames(inputNames)}
                 outputRoot={outputRoot}
+                dominantHand={dominantHand}
             />
 
             <div
@@ -1660,7 +1837,7 @@ function ReviewScreen({
                     px-5 py-4 text-base text-egm-body-copy
                 "
             >
-                Dry run checks the selected input, output folder, and required local
+                Dry run checks the input, output folder, and local
                 setup without running the full model.
             </div>
 
@@ -1732,10 +1909,12 @@ function SummaryPanel({
     selectedModel,
     inputLabel,
     outputRoot,
+    dominantHand,
 } : {
     selectedModel: ModelInfo;
     inputLabel: string;
     outputRoot: string;
+    dominantHand: DominantHand | null;
 }) {
     return (
         <>
@@ -1757,6 +1936,22 @@ function SummaryPanel({
                     >
                         {selectedModel.name}
                     </dd>
+
+                    {dominantHand !== null ? (
+                        <>
+                            <dt className="border-b border-egm-list-border pb-2">
+                                Dominant hand:
+                            </dt>
+                            <dd
+                                className="
+                                    m-0 font-semibold text-egm-strong-copy text-right
+                                    border-b border-egm-list-border pb-2
+                                "
+                            >
+                                {dominantHandLabel(dominantHand)}
+                            </dd>
+                        </>
+                    ) : null}
 
                     <dt className="border-b border-egm-list-border pb-2">Input:</dt>
                     <dd 
@@ -1946,6 +2141,7 @@ function RunningPanel({
 
 function ResultsScreen({
     selectedModel,
+    dominantHand,
     files,
     runId,
     resultSummary,
@@ -1958,6 +2154,7 @@ function ResultsScreen({
     inputNames,
 } : {
     selectedModel: ModelInfo;
+    dominantHand: DominantHand | null;
     files: File[];
     runId: string;
     resultSummary: RunSummary | null;
@@ -1989,6 +2186,7 @@ function ResultsScreen({
                 resultSummary={resultSummary}
                 progress={progress}
                 inputNames={inputNames}
+                dominantHand={dominantHand}
             />
 
             <div 
@@ -2035,6 +2233,7 @@ function ResultsScreenSummaryPanel({
     resultSummary,
     progress,
     inputNames,
+    dominantHand,
 } : {
     selectedModel: ModelInfo;
     files: File[];
@@ -2042,6 +2241,7 @@ function ResultsScreenSummaryPanel({
     resultSummary: RunSummary | null;
     progress: ProgressResponse | null;
     inputNames: string[];
+    dominantHand : DominantHand | null;
 }) {
     const failed = progress?.status === "failed";
     const statusLabel = failed ? "Failed" : "Completed";
@@ -2101,6 +2301,22 @@ function ResultsScreenSummaryPanel({
                         >
                             {inputLabelFromNames(inputNames)}
                         </dd>
+
+                        {dominantHand !== null ? (
+                            <>
+                                <dt className="border-b border-egm-list-border pb-2">
+                                    Dominant hand:
+                                </dt>
+                                <dd
+                                    className="
+                                        m-0 font-semibold text-egm-strong-copy text-right
+                                        border-b border-egm-list-border pb-2
+                                    "
+                                >
+                                    {dominantHandLabel(dominantHand)}
+                                </dd>
+                            </>
+                        ) : null}
 
                         <dt className="border-b pb-2 border-egm-list-border">
                             Output folder:

@@ -3317,3 +3317,237 @@ describe("App", () => {
         });
     });
 });
+
+it("shows ADL dominant-hand settings only when ADL is selected", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+    expect(screen.queryByText("ADL settings")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
+
+    expect(screen.queryByText("ADL settings")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", {
+        name: /Activity recognition \(ADL\)/,
+    }));
+
+    expect(screen.getByText("ADL settings")).toBeInTheDocument();
+    expect(screen.getByLabelText("Right")).toBeChecked();
+    expect(screen.getByLabelText("Left")).not.toBeChecked();
+
+    await user.click(screen.getByLabelText("Left"));
+
+    expect(screen.getByLabelText("Left")).toBeChecked();
+});
+
+it("sends selected ADL dominant hand with dry-run requests", async () => {
+    const user = userEvent.setup();
+
+    const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }))
+        .mockResolvedValueOnce(okJson(dryRunResponse()));
+
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
+
+    await navigateToOutputStep(user, {
+        modelName: /Activity recognition \(ADL\)/,
+        file: new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+    });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(screen.getByLabelText("Left"));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByText("Dominant hand:")).toBeInTheDocument();
+    expect(screen.getByText("Left")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+    const dryRunCall = wrappedFetchMock.mock.calls.find(
+        ([input]) => String(input) === "/api/dry-run",
+    );
+
+    const formData = dryRunCall?.[1]?.body as FormData;
+
+    expect(formData.get("modelId")).toBe("adl-recognition");
+    expect(formData.get("dominantHand")).toBe("left");
+});
+
+it("shows the ADL multi-file session note on input and review screens", async () => {
+    const user = userEvent.setup();
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+
+    await user.click(await screen.findByRole("button", {
+        name: /Activity recognition \(ADL\)/,
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(
+        screen.getByText(/multiple selected ADL videos are grouped as one session/i),
+    ).toBeInTheDocument();
+
+    await user.upload(screen.getByLabelText("Choose input files"), [
+        new File(["fake video 1"], "clip1.mp4", { type: "video/mp4" }),
+        new File(["fake video 2"], "clip2.mp4", { type: "video/mp4" }),
+    ]);
+
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }));
+
+    stubFetchWithModels(fetchMock);
+
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+});
+
+it("keeps Run Model preflight failures on Review and restores run buttons", async () => {
+    const user = userEvent.setup();
+
+    const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }))
+        .mockResolvedValueOnce({
+            ok: false,
+            status: 400,
+            json: async () => ({
+                detail:
+                    "ADL recognition requires a Linux host with an NVIDIA GPU.",
+            }),
+        });
+
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
+
+    await navigateToOutputStep(user, {
+        modelName: /Activity recognition \(ADL\)/,
+        file: new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+    });
+
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+        "ADL recognition requires a Linux host with an NVIDIA GPU.",
+    );
+
+    expect(screen.getByRole("heading", { name: "Review and run" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Needs attention" })).not.toBeInTheDocument();
+    expect(screen.getByText("Ready to start.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Dry Run" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Run Model" })).toBeInTheDocument();
+
+    expect(
+        wrappedFetchMock.mock.calls.some(([input]) =>
+            String(input).includes("/api/runs/run-1/progress"),
+        ),
+    ).toBe(false);
+});
+
+it("does not start progress polling after Run Model preflight failure", async () => {
+    const user = userEvent.setup();
+
+    const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }))
+        .mockResolvedValueOnce({
+            ok: false,
+            status: 400,
+            json: async () => ({
+                detail: "EgoModelKit model runs require a Linux host with an NVIDIA GPU.",
+            }),
+        });
+
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
+
+    await navigateToOutputStep(user);
+
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Run Model" }));
+
+    await screen.findByRole("alert");
+
+    expect(
+        wrappedFetchMock.mock.calls.some(([input]) =>
+            String(input).includes("/api/runs/") &&
+            String(input).includes("/progress"),
+        ),
+    ).toBe(false);
+});
+
+it("shows the selected ADL dominant hand on completed results", async () => {
+    const user = userEvent.setup();
+
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+
+        if (url === "/api/select-output-folder") {
+            return okJson({
+                outputRoot: "/tmp/egomodelkit-results",
+            });
+        }
+
+        if (url === "/api/runs") {
+            return okJson({
+                ...startRunResponse("adl-run-1"),
+                summary: {
+                    modelId: "adl-recognition",
+                    model: "Activity recognition (ADL)",
+                    input: "clip.mp4",
+                    outputFolder: "/tmp/egomodelkit-results/adl-run-1",
+                    status: "running",
+                },
+            });
+        }
+
+        if (url === "/api/runs/adl-run-1/progress") {
+            return okJson(
+                progressResponse({
+                    runId: "adl-run-1",
+                    status: "completed",
+                    outputFolder: "/tmp/egomodelkit-results/adl-run-1",
+                }),
+            );
+        }
+
+        throw new Error(`Unexpected fetch call: ${url}`);
+    });
+
+    stubFetchWithModels(fetchMock);
+
+    await navigateToOutputStep(user, {
+        modelName: /Activity recognition \(ADL\)/,
+        file: new File(
+            ["fake video"],
+            "clip.mp4",
+            {
+                type: "video/mp4",
+            },
+        ),
+    });
+
+    await user.click(screen.getByRole("button", {name: "Choose Output Folder"}));
+    await user.click(screen.getByRole("button", {name: "Continue"}));
+    await user.click(screen.getByRole("button", {name: "Run Model"}));
+
+    expect(await screen.findByRole("heading", {name: "Run completed"})).toBeInTheDocument();
+    expect(screen.getByText("Dominant hand:")).toBeInTheDocument();
+    expect(screen.getByText("Right")).toBeInTheDocument();
+});

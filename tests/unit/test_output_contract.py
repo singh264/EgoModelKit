@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,6 +8,7 @@ from typing import cast
 
 import pytest
 
+from egomodelkit.bandini_metrics import VideoProcessingConfig
 from egomodelkit.models.adl_recognition import ADL_RECOGNITION_MODEL_ID
 from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_MODEL_ID
 from egomodelkit.output_contract import (
@@ -60,6 +62,22 @@ def test_run_output_layout_exposes_all_backend_paths(tmp_path: Path) -> None:
     
     assert layout.intermediate_files_dir == (
         tmp_path / "run-1" / "technical" / "intermediate_files"
+    )
+    
+    assert layout.session_level_metrics_path == (
+        tmp_path / "run-1" / "results" / "session_level_metrics.csv"
+    )
+    
+    assert layout.adl_input_manifest_path == (
+        tmp_path / "run-1" / "technical" / "model_outputs" / "adl_input_manifest.csv"
+    )
+    
+    assert layout.adl_subclip_manifest_path == (
+        tmp_path / "run-1" / "technical" / "post_processing" / "adl_subclip_manifest.csv"
+    )
+    
+    assert layout.metrics_config_path == (
+        tmp_path / "run-1" / "technical" / "post_processing" / "metrics_config.json"
     )
 
 def test_infer_input_scenario_covers_supported_and_unsupported_cases(tmp_path: Path) -> None:
@@ -190,8 +208,23 @@ def test_create_output_scaffold_creates_hand_object_and_adl_contract_files(
     assert (hand_layout.visual_outputs_dir / "hand_object_contact").is_dir()
     assert hand_layout.model_outputs_dir.is_dir()
     assert hand_layout.progress_log_path.exists()
-    assert json.loads(hand_layout.run_summary_path.read_text())["status"] == "running"
-    assert json.loads(hand_layout.run_manifest_path.read_text())["output_contract_version"] == 1
+    
+    hand_summary = json.loads(hand_layout.run_summary_path.read_text(encoding = "utf-8"))
+
+    assert hand_summary["status"] == "running"
+    assert hand_summary["input_names"] == ["frame.jpg"]
+    assert "input_name" not in hand_summary
+    assert "input_path" not in hand_summary
+    
+    hand_manifest = json.loads(
+        hand_layout.run_manifest_path.read_text(
+            encoding = "utf-8",
+        )
+    )
+
+    assert hand_manifest["output_contract_version"] == 1
+    assert hand_manifest["input_names"] == ["frame.jpg"]
+    assert "input_name" not in hand_manifest
     
     adl_layout = build_run_output_layout(tmp_path / "adl-results", run_id = "run-adl")
     
@@ -200,6 +233,7 @@ def test_create_output_scaffold_creates_hand_object_and_adl_contract_files(
         model_id = ADL_RECOGNITION_MODEL_ID,
         input_path = video,
         scenario = "adl-single-video",
+        video_processing_config = VideoProcessingConfig(dominant_hand = "left"),
     )
 
     assert adl_layout.results_dir.is_dir()
@@ -212,7 +246,52 @@ def test_create_output_scaffold_creates_hand_object_and_adl_contract_files(
     assert "metric_status" in adl_layout.video_level_metrics_path.read_text()
     assert "pending" in adl_layout.video_level_metrics_summary_path.read_text()
     assert "results/video_level_metrics.csv" in adl_layout.readme_path.read_text()
+    assert adl_layout.session_level_metrics_path.exists()
     
+    with adl_layout.session_level_metrics_path.open(
+        "r",
+        encoding = "utf-8",
+        newline = "",
+    ) as csv_file:
+        session_rows = list(csv.DictReader(csv_file))
+
+    assert session_rows[0]["dominant_hand"] == "left"
+    assert session_rows[0]["non_dominant_hand"] == "right"
+   
+    assert "pooling_window_frames" in adl_layout.metrics_config_path.read_text(
+        encoding="utf-8"
+    )
+    
+def test_create_output_scaffold_records_multi_file_input_names_in_manifest(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "egomodelkit-gui-input-test"
+    input_dir.mkdir()
+
+    (input_dir / "part-02.jpg").write_bytes(b"fake-image-2")
+    (input_dir / "part-01.jpg").write_bytes(b"fake-image-1")
+
+    layout = build_run_output_layout(
+        tmp_path / "results",
+        run_id = "run-multi-input-manifest",
+    )
+
+    create_output_scaffold(
+        layout = layout,
+        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
+        input_path = input_dir,
+        scenario = "hand-object-image-directory",
+    )
+
+    manifest = json.loads(layout.run_manifest_path.read_text(encoding = "utf-8"))
+
+    assert manifest["input_names"] == [
+        "part-01.jpg",
+        "part-02.jpg",
+    ]
+
+    assert "input_name" not in manifest 
+
 def test_create_output_scaffold_rejects_unsupported_model(tmp_path: Path) -> None:
     input_file = tmp_path / "file.bin"
     input_file.write_bytes(b"fake")
@@ -260,6 +339,10 @@ def test_output_folder_tree_covers_directory_and_adl_scenarios() -> None:
     assert "          clip/" not in output_folder_tree(adl_single)
     assert "          ..." in output_folder_tree(adl_directory)
     assert "all_preds.pkl" in output_folder_tree(adl_combined)
+    assert "      session_level_metrics.csv" in output_folder_tree(adl_single)
+    assert "        adl_input_manifest.csv" in output_folder_tree(adl_single)
+    assert "        metrics_config.json" in output_folder_tree(adl_single)
+    assert "        adl_subclip_manifest.csv" in output_folder_tree(adl_single)
 
 def test_output_folder_tree_rejects_unknown_scenario() -> None:
     context = OutputPreviewContext(
@@ -308,6 +391,24 @@ def test_output_file_descriptions_and_notes_cover_remaining_scenarios() -> None:
         "visual_outputs/hand_object_contact" in 
         run_readme_text(model_id = HAND_OBJECT_CONTACT_MODEL_ID, context = hand_directory)
     )
+    
+    assert any(
+        description.name == "session_level_metrics.csv"
+        for description in output_file_descriptions(adl_single)
+    )
+    assert any(
+        description.name == "adl_input_manifest.csv"
+        for description in output_file_descriptions(adl_single)
+    )
+    assert any(
+        description.name == "metrics_config.json"
+        for description in output_file_descriptions(adl_single)
+    )
+    
+    assert any(
+        description.name == "adl_subclip_manifest.csv"
+        for description in output_file_descriptions(adl_single)
+    )
 
 def test_finalize_runtime_outputs_moves_hand_object_visuals(tmp_path: Path) -> None:
     image = tmp_path / "frame.jpg"
@@ -350,7 +451,7 @@ def test_finalize_runtime_outputs_moves_hand_object_visuals(tmp_path: Path) -> N
     assert (layout.model_outputs_dir / "frame_shan.json").exists()
     assert (layout.model_outputs_dir / "frame_shan.pkl").exists()
     
-def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metric_stubs(
+def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metrics(
     tmp_path: Path,
 ) -> None:
     video = tmp_path / "clip.mp4"
@@ -383,20 +484,57 @@ def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metric_stubs
         / "meal-preparation-cleanup"
     )
 
-    (runtime_adl_dir / "subclips" / "clip_001").mkdir(parents = True)
-    (runtime_adl_dir / "subclips" / "clip_001" / "frame_001.jpg").write_bytes(b"jpg")
+    (runtime_adl_dir / "subclips" / "video001_001").mkdir(parents = True)
+    (runtime_adl_dir / "subclips" / "video001_001" / "frame_001.jpg").write_bytes(b"jpg")
+    (runtime_adl_dir / "detic_raw" / "video001_001").mkdir(parents = True)
 
-    (runtime_adl_dir / "detic_raw" / "clip_001").mkdir(parents = True)
-    
-    (runtime_adl_dir / "detic_raw" / "clip_001" / "frame_001_detic.pkl").write_bytes(
-        b"detic",
-    )
+    (
+        runtime_adl_dir
+        / "detic_raw"
+        / "video001_001"
+        / "frame_001_detic.pkl"
+    ).write_bytes(b"detic")
 
     layout.adl_detic_outputs_dir.rmdir()
 
-    (runtime_adl_dir / "subclips_shan" / "clip_001").mkdir(parents = True)
-    (runtime_adl_dir / "subclips_shan" / "clip_001" / "frame_001_shan.pkl").write_bytes(
-        b"shan",
+    (runtime_adl_dir / "shan").mkdir(parents=True)
+    (runtime_adl_dir / "shan" / "video001.--1_frame5_shan.pkl").write_bytes(
+        b"flat-shan",
+    )
+
+    nested_shan_dir = runtime_adl_dir / "subclips_shan" / "video001.--1"
+    nested_shan_dir.mkdir(parents=True)
+
+    (nested_shan_dir / "frame_5_shan.pkl").write_bytes(b"nested-shan")
+
+    (nested_shan_dir / "frame_5_shan.json").write_text(
+        '{"hands": [[0, 0, 10, 10, 0.9, 3, 0, 0, 0, 1]]}',
+        encoding="utf-8",
+    )
+
+    (layout.run_dir / "adl_input_manifest.csv").write_text(
+        "session_id,session_sort_index,input_name,staged_video_name,"
+        "staged_video_stem,input_modified_time\n"
+        "session001,1,clip.mp4,video001.MP4,video001,2026-07-05T10:01:00+00:00\n",
+        encoding="utf-8",
+    )
+    
+    (layout.run_dir / "metrics_config.json").write_text(
+        (
+            '{"subclip_length_seconds": 10, "subclip_fps": 30, '
+            '"frame_fps": 30, "resize_width": 720, "resize_height": 405, '
+            '"pooling_window_seconds": 1.0, '
+            '"interaction_contact_state_threshold": 3}'
+        ),
+        encoding="utf-8",
+    )
+    
+    (layout.run_dir / "adl_subclip_manifest.csv").write_text(
+        "session_id,input_name,staged_video_stem,subclip_name,subclip_index,"
+        "source_start_seconds,source_end_seconds,valid_duration_seconds,"
+        "processing_fps,processing_subclip_duration_seconds\n"
+        "session001,clip.mp4,video001,video001.--1,1,0,10,10,30,10\n",
+        encoding = "utf-8",
     )
 
     finalize_runtime_outputs(
@@ -409,12 +547,19 @@ def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metric_stubs
     assert (layout.model_outputs_dir / "predictions.csv").exists()
     assert (layout.model_outputs_dir / "predictions_summary.csv").exists()
     assert (layout.model_outputs_dir / "all_preds.pkl").read_bytes() == b"pickle"
-    assert (layout.adl_extracted_frames_dir / "clip_001" / "frame_001.jpg").exists()
-    assert (layout.adl_detic_outputs_dir / "clip_001" / "frame_001_detic.pkl").exists()
-    assert (layout.adl_shan_outputs_dir / "clip_001" / "frame_001_shan.pkl").exists()
-    assert "stub" in layout.video_level_metrics_path.read_text(encoding = "utf-8")
+    assert (layout.adl_extracted_frames_dir / "video001_001" / "frame_001.jpg").exists()
+    assert (layout.adl_detic_outputs_dir / "video001_001" / "frame_001_detic.pkl").exists()
+    assert (layout.adl_shan_outputs_dir / "video001.--1" / "frame_5_shan.json").exists()
+    assert (layout.adl_shan_outputs_dir / "video001.--1" / "frame_5_shan.pkl").exists()
+    assert not (layout.adl_shan_outputs_dir / "video001.--1_frame5_shan.pkl").exists()    
     assert "clip.mp4" in layout.frame_level_predictions_path.read_text(encoding = "utf-8")
-    assert "segment_status" in layout.interaction_segments_path.read_text(encoding = "utf-8")
+    assert layout.session_level_metrics_path.exists()
+    assert "computed" in layout.video_level_metrics_path.read_text(encoding="utf-8")
+    assert "computed" in layout.session_level_metrics_path.read_text(encoding="utf-8")
+    assert "clip.mp4" in layout.frame_level_predictions_path.read_text(encoding="utf-8")
+    assert "duration_seconds" in layout.interaction_segments_path.read_text(encoding="utf-8")
+    assert "pooling_window_frames" in layout.metrics_config_path.read_text(encoding="utf-8")
+    assert layout.adl_subclip_manifest_path.exists()
 
 def test_finalize_runtime_outputs_tolerates_missing_adl_runtime_work(
     tmp_path: Path,
@@ -442,6 +587,23 @@ def test_finalize_runtime_outputs_tolerates_missing_adl_runtime_work(
         encoding = "utf-8",
     )
 
+    (layout.run_dir / "adl_input_manifest.csv").write_text(
+        "session_id,session_sort_index,input_name,staged_video_name,"
+        "staged_video_stem,input_modified_time\n"
+        "session001,1,clip.mp4,video001.MP4,video001,2026-07-05T10:01:00+00:00\n",
+        encoding = "utf-8",
+    )
+    
+    (layout.run_dir / "adl_subclip_manifest.csv").write_text(
+        "session_id,input_name,staged_video_stem,"
+        "subclip_name,subclip_index,"
+        "source_start_seconds,source_end_seconds,"
+        "valid_duration_seconds,"
+        "processing_fps,"
+        "processing_subclip_duration_seconds\n",
+        encoding = "utf-8",
+    )
+
     finalize_runtime_outputs(
         layout = layout,
         model_id = ADL_RECOGNITION_MODEL_ID,
@@ -465,22 +627,33 @@ def test_finalize_runtime_outputs_rejects_unsupported_model(tmp_path: Path) -> N
             scenario = cast(InputScenario, "hand-object-single-image"),
         )
 
-def test_write_run_summary_updates_existing_summary(tmp_path: Path) -> None:
-    input_file = tmp_path / "frame.jpg"
-    input_file.write_bytes(b"fake-image")
-    
+def test_write_run_summary_records_multi_file_input_names_without_temp_path(
+    tmp_path: Path,
+) -> None:
+    input_dir = tmp_path / "egomodelkit-gui-input-test"
+    input_dir.mkdir()
+
+    (input_dir / "part-02.mp4").write_bytes(b"fake-video-2")
+    (input_dir / "part-01.mp4").write_bytes(b"fake-video-1")
+
     layout = build_run_output_layout(tmp_path, run_id = "run-summary")
+
     layout.run_dir.mkdir(parents = True)
-    
+
     write_run_summary(
         layout = layout,
-        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
-        input_path = input_file,
-        scenario = "hand-object-single-image",
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = input_dir,
+        scenario = "adl-video-directory",
         status = "completed",
     )
-    
-    assert json.loads(layout.run_summary_path.read_text())["status"] == "completed"    
+
+    summary = json.loads(layout.run_summary_path.read_text(encoding = "utf-8"))
+
+    assert summary["status"] == "completed"
+    assert summary["input_names"] == ["part-01.mp4", "part-02.mp4"]
+    assert "input_name" not in summary
+    assert "input_path" not in summary   
 
 def test_private_preview_helpers_cover_small_lists_and_unsupported_model(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"

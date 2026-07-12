@@ -12,14 +12,23 @@ It does not reimplement EgoVizML's ADL processing, instead it:
 """
 
 import argparse
+import csv
+import json
+import re
 import shutil
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
 SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
 EGOVIZML_STAGED_VIDEO_SUFFIX: Final[str] = ".MP4"
+
+DEFAULT_SESSION_ID: Final[str] = "session001"
+ADL_INPUT_MANIFEST_FILENAME: Final[str] = "adl_input_manifest.csv"
+ADL_SUBCLIP_MANIFEST_FILENAME: Final[str] = "adl_subclip_manifest.csv"
+METRICS_CONFIG_FILENAME: Final[str] = "metrics_config.json"
 
 EGOVIZML_HOME: Final[Path] = Path("/opt/EgoVizML")
 
@@ -52,6 +61,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--subclip-length", type = int, required = True)
     parser.add_argument("--fps", type = int, required = True)
     parser.add_argument("--frame-fps", type = int, required = True)
+    parser.add_argument("--resize-width", type = int, required = True)
+    parser.add_argument("--resize-height", type = int, required = True)
+    parser.add_argument("--pooling-window-seconds", type = float, required = True)
+    parser.add_argument("--interaction-contact-state-threshold", type = int, required = True)
+    parser.add_argument("--dominant-hand", choices = ["left", "right"], required = True)   
     parser.add_argument("--active-iou", type = float, required = True)
     
     return parser.parse_args()
@@ -74,6 +88,11 @@ def main() -> None:
             subclip_length = args.subclip_length,
             fps = args.fps,
             frame_fps = args.frame_fps,
+            resize_width=args.resize_width,
+            resize_height=args.resize_height,
+            pooling_window_seconds=args.pooling_window_seconds,
+            interaction_contact_state_threshold=args.interaction_contact_state_threshold,
+            dominant_hand = args.dominant_hand,
         )
         
         return
@@ -104,10 +123,15 @@ def extract_frames(
     subclip_length: int,
     fps: int,
     frame_fps: int,
+    resize_width: int,
+    resize_height: int,
+    pooling_window_seconds: float,
+    interaction_contact_state_threshold: int,
+    dominant_hand: str,
 ) -> None:
     print("EgoModelKit runtime: preparing EgoVizML video workspace.", flush = True)
     
-    data_root = _egoviz_data_root(
+    data_root = _egoviz_data_root( 
         output_dir = output_dir,
         work_dir_name = work_dir_name,
         egoviz_data_dir_name = egoviz_data_dir_name,
@@ -120,13 +144,26 @@ def extract_frames(
         
     adl_dir.mkdir(parents = True, exist_ok = True)
     
-    staged_count = _stage_input_videos(
+    staged_rows = _stage_input_videos(
         input_path = input_path,
-        adl_dir = adl_dir
+        adl_dir = adl_dir,
+        manifest_path = output_dir / ADL_INPUT_MANIFEST_FILENAME,
     )
-    
-    if staged_count == 0:
+
+    if not staged_rows:
         raise RuntimeError("No supported video files were staged for ADL recognition.")
+    
+    _write_metrics_config(
+        output_dir / METRICS_CONFIG_FILENAME,
+        subclip_length_seconds = subclip_length,
+        subclip_fps = fps,
+        frame_fps = frame_fps,
+        resize_width = resize_width,
+        resize_height = resize_height,
+        pooling_window_seconds = pooling_window_seconds,
+        interaction_contact_state_threshold = interaction_contact_state_threshold,
+        dominant_hand = dominant_hand,
+    )
     
     print("EgoModelKit runtime: calling EgoVizML frame extraction.", flush = True)
     
@@ -142,6 +179,22 @@ def extract_frames(
             "--frame_fps",
             str(frame_fps),
         ]
+    )
+    
+    _write_subclip_manifest(
+        manifest_path = output_dir / ADL_SUBCLIP_MANIFEST_FILENAME,
+        staged_rows = staged_rows,
+        subclips_dir = adl_dir / "subclips",
+        subclip_length_seconds = subclip_length,
+        processing_fps = frame_fps,
+    )
+    
+    print("EgoModelKit runtime: resizing extracted ADL frames.", flush = True)
+
+    _resize_extracted_frames(
+        adl_dir / "subclips",
+        resize_width = resize_width,
+        resize_height = resize_height,
     )
     
     print("EgoModelKit runtime: EgoVizML frame extraction finished.", flush = True)
@@ -218,27 +271,50 @@ def _stage_input_videos(
     *,
     input_path: Path,
     adl_dir: Path,
-) -> int:
+    manifest_path: Path,
+) -> list[dict[str, object]]:
     input_files = (
         [input_path]
         if input_path.is_file()
-        else sorted(input_path.iterdir())
+        else sorted(
+            input_path.iterdir(),
+            key = lambda path: _natural_sort_key(path.name),
+        )
     )
-    
+
     staged_count = 0
-    
+    staged_rows: list[dict[str, object]] = []
+
     for path in input_files:
         if not path.is_file():
             continue
-                
+
         if path.suffix.lower() not in SUPPORTED_VIDEO_SUFFIXES:
             continue
-        
-        staged_path = adl_dir / f"video{staged_count + 1:03d}{EGOVIZML_STAGED_VIDEO_SUFFIX}"
+
+        source_metadata = _probe_source_video_metadata(path)
+        staged_video_name = f"video{staged_count + 1:03d}{EGOVIZML_STAGED_VIDEO_SUFFIX}"
+        staged_path = adl_dir / staged_video_name
         shutil.copy2(path, staged_path)
         staged_count += 1
-    
-    return staged_count
+        
+        staged_rows.append(
+            {
+                "session_id": DEFAULT_SESSION_ID,
+                "session_sort_index": staged_count,
+                "input_name": path.name,
+                "staged_video_name": staged_video_name,
+                "staged_video_stem": staged_path.stem,
+                "input_modified_time": _input_modified_time(path),
+                "source_duration_seconds": source_metadata["source_duration_seconds"],
+                "source_fps": source_metadata["source_fps"],
+                "source_total_frames": source_metadata["source_total_frames"],
+            }
+        )
+
+    _write_input_manifest(manifest_path, staged_rows)
+
+    return staged_rows
 
 def _ensure_egovizml_adl_folders(data_root: Path) -> None:
     for adl_name in EGOVIZML_ADL_DIRS:
@@ -329,6 +405,317 @@ def _egoviz_data_root(
 def _run(command: list[str]) -> None:
     print("EgoModelKit runtime: " + " ".join(command), flush = True)
     subprocess.run(command, check = True)
+
+def _natural_sort_key(value: str) -> list[object]:
+    return [
+        int(part) if part.isdigit() else part.lower()
+        for part in re.split(r"(\d+)", value)
+    ]
+
+def _input_modified_time(path: Path) -> str:
+    return datetime.fromtimestamp(path.stat().st_mtime, timezone.utc).replace(
+        microsecond = 0
+    ).isoformat()
+
+def _write_input_manifest(
+    manifest_path: Path,
+    rows: list[dict[str, object]],
+) -> None:
+    manifest_path.parent.mkdir(parents = True, exist_ok = True)
+
+    with manifest_path.open("w", encoding = "utf-8", newline = "") as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames = [
+                "session_id",
+                "session_sort_index",
+                "input_name",
+                "staged_video_name",
+                "staged_video_stem",
+                "input_modified_time",
+                "source_duration_seconds",
+                "source_fps",
+                "source_total_frames",
+            ],
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+def _probe_source_video_metadata(path: Path) -> dict[str, float | int]:
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=avg_frame_rate,r_frame_rate,nb_frames,duration:format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        check = True,
+        capture_output = True,
+        text = True,
+    )
+
+    payload = json.loads(completed.stdout)
+    streams = payload.get("streams", []) if isinstance(payload, dict) else []
+
+    if (
+        not isinstance(streams, list)
+        or not streams
+        or not isinstance(streams[0], dict)
+    ):
+        raise RuntimeError(f"Could not read source video metadata: {path}")
+
+    stream = streams[0]
+    format_payload = payload.get("format", {})
+
+    format_duration = (
+        format_payload.get("duration")
+        if isinstance(format_payload, dict)
+        else None
+    )
+
+    source_duration_seconds = _first_positive_float(
+        stream.get("duration"),
+        format_duration,
+    )
+
+    if source_duration_seconds <= 0:
+        raise RuntimeError(
+            f"Could not determine source video duration: {path}"
+        )
+
+    source_fps = _parse_ffprobe_frame_rate(
+        stream.get("avg_frame_rate")
+    )
+
+    if source_fps <= 0:
+        source_fps = _parse_ffprobe_frame_rate(
+            stream.get("r_frame_rate")
+        )
+
+    source_total_frames = _positive_int(
+        stream.get("nb_frames")
+    )
+
+    if source_total_frames == 0 and source_fps > 0:
+        source_total_frames = round(
+            source_duration_seconds * source_fps
+        )
+
+    return {
+        "source_duration_seconds": source_duration_seconds,
+        "source_fps": source_fps,
+        "source_total_frames": source_total_frames,
+    }
+
+def _first_positive_float(*values: object) -> float:
+    for value in values:
+        try:
+            parsed = float(value)
+        except (TypeError, ValueError):
+            continue
+
+        if parsed > 0:
+            return parsed
+
+    return 0.0
+
+def _positive_int(value: object) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+
+    return max(0, parsed)
+
+def _parse_ffprobe_frame_rate(value: object) -> float:
+    if not isinstance(value, str):
+        return 0.0
+
+    if "/" not in value:
+        return _first_positive_float(value)
+
+    numerator_text, denominator_text = value.split("/", 1)
+
+    try:
+        numerator = float(numerator_text)
+        denominator = float(denominator_text)
+    except ValueError:
+        return 0.0
+
+    if denominator == 0:
+        return 0.0
+
+    return max(0.0, numerator / denominator)
+
+def _write_subclip_manifest(
+    *,
+    manifest_path: Path,
+    staged_rows: list[dict[str, object]],
+    subclips_dir: Path,
+    subclip_length_seconds: int,
+    processing_fps: int,
+) -> None:
+    rows: list[dict[str, object]] = []
+
+    for staged_row in staged_rows:
+        staged_video_stem = str(staged_row["staged_video_stem"])
+        source_duration_seconds = float(staged_row["source_duration_seconds"])
+
+        matching_subclips = (
+            sorted(
+                [
+                    path
+                    for path in subclips_dir.iterdir()
+                    if path.is_dir()
+                    and path.name.startswith(
+                        f"{staged_video_stem}--"
+                    )
+                ],
+                key = lambda path: _subclip_index_from_name(
+                    path.name
+                ),
+            )
+            if subclips_dir.is_dir()
+            else []
+        )
+
+        for subclip_path in matching_subclips:
+            subclip_index = _subclip_index_from_name(subclip_path.name)
+            source_start_seconds = (subclip_index - 1) * subclip_length_seconds
+
+            valid_duration_seconds = max(
+                0.0,
+                min(
+                    float(subclip_length_seconds),
+                    source_duration_seconds - source_start_seconds,
+                ),
+            )
+
+            source_end_seconds = source_start_seconds + valid_duration_seconds
+
+            rows.append(
+                {
+                    "session_id": staged_row["session_id"],
+                    "input_name": staged_row["input_name"],
+                    "staged_video_stem": staged_video_stem,
+                    "subclip_name": subclip_path.name,
+                    "subclip_index": subclip_index,
+                    "source_start_seconds": source_start_seconds,
+                    "source_end_seconds": source_end_seconds,
+                    "valid_duration_seconds": valid_duration_seconds,
+                    "processing_fps": processing_fps,
+                    "processing_subclip_duration_seconds": subclip_length_seconds,
+                }
+            )
+
+    manifest_path.parent.mkdir(
+        parents = True,
+        exist_ok = True,
+    )
+
+    with manifest_path.open(
+        "w",
+        encoding = "utf-8",
+        newline = "",
+    ) as csv_file:
+        writer = csv.DictWriter(
+            csv_file,
+            fieldnames = [
+                "session_id",
+                "input_name",
+                "staged_video_stem",
+                "subclip_name",
+                "subclip_index",
+                "source_start_seconds",
+                "source_end_seconds",
+                "valid_duration_seconds",
+                "processing_fps",
+                "processing_subclip_duration_seconds",
+            ],
+        )
+
+        writer.writeheader()
+        writer.writerows(rows)
+
+def _subclip_index_from_name(
+    subclip_name: str,
+) -> int:
+    match = re.search(
+        r"--(\d+)$",
+        subclip_name,
+    )
+
+    if match is None:
+        raise RuntimeError(
+            "Unexpected EgoVizML subclip name: "
+            f"{subclip_name}"
+        )
+
+    return int(match.group(1))
+
+def _write_metrics_config(
+    metrics_config_path: Path,
+    *,
+    subclip_length_seconds: int,
+    subclip_fps: int,
+    frame_fps: int,
+    resize_width: int,
+    resize_height: int,
+    pooling_window_seconds: float,
+    interaction_contact_state_threshold: int,
+    dominant_hand: str,
+) -> None:
+    metrics_config_path.parent.mkdir(parents = True, exist_ok = True)
+    pooling_window_frames = max(1, round(frame_fps * pooling_window_seconds))
+    
+    metrics_config_path.write_text(
+        json.dumps(
+            {
+                "subclip_length_seconds": subclip_length_seconds,
+                "subclip_fps": subclip_fps,
+                "frame_fps": frame_fps,
+                "resize_width": resize_width,
+                "resize_height": resize_height,
+                "pooling_window_seconds": pooling_window_seconds,
+                "pooling_window_frames": pooling_window_frames,
+                "interaction_contact_state_threshold": interaction_contact_state_threshold,
+                "dominant_hand": dominant_hand,
+            },
+            indent = 2,
+            sort_keys = True,
+        ) + "\n",
+        encoding = "utf-8",
+    )
+
+def _resize_extracted_frames(
+    subclips_dir: Path,
+    *,
+    resize_width: int,
+    resize_height: int,
+) -> None:
+    if not subclips_dir.is_dir():
+        return
+
+    import cv2  # noqa: PLC0415
+
+    for image_path in sorted(subclips_dir.rglob("*")):
+        if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+            continue
+
+        image = cv2.imread(str(image_path))
+
+        if image is None:
+            continue
+
+        resized = cv2.resize(image, (resize_width, resize_height))
+        
+        cv2.imwrite(str(image_path), resized)
 
 if __name__ == "__main__":
     main()

@@ -20,6 +20,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from egomodelkit.bandini_metrics import (
+    DEFAULT_DOMINANT_HAND,
+    LEFT_HAND_LABEL,
+    RIGHT_HAND_LABEL,
+    HandLabel,
+    VideoProcessingConfig,
+)
 from egomodelkit.models.adl_recognition import (
     ADL_RECOGNITION_MODEL_ID,
     ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
@@ -156,6 +163,7 @@ class GuiRunState:
     operation_id: str
     cancellation: ProcessCancellation
     output_preview: dict[str, object]
+    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND
     worker_thread_name: str | None = None
     error_message: str | None = None
     runtime_status: RuntimeStatus | None = None
@@ -180,7 +188,8 @@ def create_app(
     runs: dict[str, GuiRunState] = {}
     operations: dict[str, CancelableGuiOperation] = {}
     runtime_ready_checker = runtime_checker or _check_runtime_ready_for_gui
-    
+    runtime_checker_was_injected = runtime_checker is not None   
+     
     app.add_middleware(
         CORSMiddleware,
         allow_origins = [
@@ -252,6 +261,7 @@ def create_app(
         model_id: Annotated[str, Form(alias = "modelId")],
         output_root_text: Annotated[str, Form(alias = "outputRoot")],
         files: Annotated[list[UploadFile], File()],
+        dominant_hand_text: Annotated[str | None, Form(alias = "dominantHand")] = None,
         operation_id_text: Annotated[str | None, Form(alias = "operationId")] = None,
     ) -> dict[str, object]:
         """ Validate uploaded files and output folder without running a model. """
@@ -263,10 +273,16 @@ def create_app(
             
             _validate_existing_output_root(output_root)
             
+            dominant_hand = _dominant_hand_from_text(
+                dominant_hand_text,
+                model_id = model_id,
+            )
+
             _validate_gui_request(
                 model_id = model_id,
                 input_path = staged.input_path,
                 output_root = output_root,
+                dominant_hand = dominant_hand,
             )
             
             runtime_ready_checker(
@@ -311,6 +327,7 @@ def create_app(
         model_id: Annotated[str, Form(alias = "modelId")],
         output_root_text: Annotated[str, Form(alias = "outputRoot")],
         files: Annotated[list[UploadFile], File()],
+        dominant_hand_text: Annotated[str | None, Form(alias = "dominantHand")] = None,
         operation_id_text: Annotated[str | None, Form(alias = "operationId")] = None,
     ) -> dict[str, object]:
         """ Start a model run and return immediately with a run id. """
@@ -321,12 +338,30 @@ def create_app(
             output_root = _normalize_output_root(output_root_text)
             
             _validate_existing_output_root(output_root)
-            
+
+            dominant_hand = _dominant_hand_from_text(
+                dominant_hand_text,
+                model_id = model_id,
+            )
+
             _validate_gui_request(
                 model_id = model_id,
                 input_path = staged.input_path,
                 output_root = output_root,
+                dominant_hand = dominant_hand,
             )
+            
+            if _should_run_start_preflight(
+                model_id = model_id,
+                hand_object_runner = hand_object_runner,
+                adl_runner = adl_runner,
+                runtime_checker_was_injected = runtime_checker_was_injected,
+            ):
+                runtime_ready_checker(
+                    model_id,
+                    _ignore_progress,
+                    _command_runner_for_operation(operation),
+                )
             
             run_id = _build_unique_run_id(output_root, runs)
             layout = build_run_output_layout(output_root, run_id = run_id)
@@ -344,6 +379,9 @@ def create_app(
                 input_path = staged.input_path,
                 scenario = context.scenario,
                 status = "running",
+                video_processing_config = VideoProcessingConfig(
+                    dominant_hand = dominant_hand,
+                ),
             )
             
             state = GuiRunState(
@@ -356,6 +394,7 @@ def create_app(
                 input_path = staged.input_path,
                 staged_root = staged.root_dir,
                 output_preview = _output_preview_response(context),
+                dominant_hand = dominant_hand,
                 operation_id = operation.operation_id,
                 cancellation = operation.cancellation,
             )
@@ -392,11 +431,17 @@ def create_app(
                 },
                 "outputPreview": state.output_preview,
             }
+        except CommandCancelledError as exc:
+            operations.pop(operation.operation_id, None)
+            shutil.rmtree(staged.root_dir, ignore_errors = True)
+
+            raise HTTPException(status_code = 499, detail = str(exc)) from exc
         except GUI_REQUEST_EXCEPTIONS as exc:
             operations.pop(operation.operation_id, None)
             shutil.rmtree(staged.root_dir, ignore_errors = True)
             
             raise HTTPException(status_code = 400, detail = str(exc)) from exc
+
     
     @app.get("/api/runs/{run_id}/progress")
     def run_progress(run_id: str) -> dict[str, object]:
@@ -503,6 +548,7 @@ def _execute_run(
                     state.layout.run_dir,
                     progress,
                     state.cancellation,
+                    dominant_hand = state.dominant_hand,
                 )
             else:
                 adl_runner(state.input_path, state.layout.run_dir, progress)
@@ -606,10 +652,16 @@ def _run_adl_recognition_for_gui(
     output_dir: Path,
     progress: Callable[[str], None],
     cancellation: ProcessCancellation,
+    *,
+    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
 ) -> None:
     """ Run the existing ADL-recognition runtime. """
     run_adl_recognition(
-        AdlRecognitionRequest(input_path = input_path, output_dir = output_dir),
+        AdlRecognitionRequest(
+            input_path = input_path,
+            output_dir = output_dir,
+            dominant_hand = dominant_hand,
+        ),
         command_runner = (
             lambda command: cancellable_subprocess_runner(command, cancellation)
         ),
@@ -667,6 +719,53 @@ def _operation_id_from_text(operation_id_text: str | None) -> str:
         return operation_id
 
     return f"operation-{uuid4().hex}"
+
+def _dominant_hand_from_text(
+    dominant_hand_text: str | None,
+    *,
+    model_id: str,
+) -> HandLabel:
+    """ Return a validated dominant hand for ADL GUI requests.
+
+    Non-ADL models ignore this field so older or model-neutral requests remain valid.
+    """
+    if model_id != ADL_RECOGNITION_MODEL_ID:
+        return DEFAULT_DOMINANT_HAND
+
+    normalized = (dominant_hand_text or DEFAULT_DOMINANT_HAND).strip().lower()
+
+    if normalized == LEFT_HAND_LABEL:
+        return LEFT_HAND_LABEL
+
+    if normalized == RIGHT_HAND_LABEL:
+        return RIGHT_HAND_LABEL
+
+    raise ValueError("Dominant hand must be 'left' or 'right'.")
+
+def _should_run_start_preflight(
+    *,
+    model_id: str,
+    hand_object_runner: ModelRunner | None,
+    adl_runner: ModelRunner | None,
+    runtime_checker_was_injected: bool,
+) -> bool:
+    """ Return whether /api/runs should preflight the packaged runtime.
+
+    Endpoint tests may inject model runners to avoid Docker/GPU. In that case,
+    preserve the test escape hatch unless a runtime checker was explicitly
+    injected for the test. Production uses the packaged runners and should
+    preflight before creating a run folder.
+    """
+    if runtime_checker_was_injected:
+        return True
+
+    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
+        return hand_object_runner is None
+
+    if model_id == ADL_RECOGNITION_MODEL_ID:
+        return adl_runner is None
+
+    return True
 
 def _command_runner_for_operation(
     operation: CancelableGuiOperation,
@@ -759,6 +858,7 @@ def _validate_gui_request(
     model_id: str,
     input_path: Path,
     output_root: Path,
+    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
 ) -> None:
     """ Validate GUI input through the existing model validators. """
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
@@ -773,9 +873,10 @@ def _validate_gui_request(
 
     if model_id == ADL_RECOGNITION_MODEL_ID:
         validate_adl_recognition_request(
-            AdlRecognitionRequest(
+           AdlRecognitionRequest(
                 input_path = input_path,
                 output_dir = output_root,
+                dominant_hand = dominant_hand,
             ),
         )
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import json
 import sys
 import threading
 import time
@@ -33,6 +34,7 @@ from egomodelkit.gui_backend import (
     _select_output_folder_macos,
     _select_output_folder_tkinter,
     _select_output_folder_windows,
+    _should_run_start_preflight,
     _stage_uploaded_files,
     _unique_destination_path,
     _validate_existing_output_root,
@@ -81,6 +83,36 @@ def _failing_runtime_checker(
     raise gui_backend.HostPrerequisiteError(
         "EgoModelKit model runs require a Linux host with an NVIDIA GPU; "
         "detected Darwin."
+    )
+
+def _write_adl_input_manifest(
+    output_dir: Path,
+    input_names: tuple[str, ...] = ("clip.mp4",),
+) -> None:
+    rows = [
+        "session_id,session_sort_index,input_name,staged_video_name,"
+        "staged_video_stem,input_modified_time",
+    ]
+
+    for index, input_name in enumerate(input_names, start = 1):
+        rows.append(
+            f"session001,{index},{input_name},video{index:03d}.MP4,"
+            f"video{index:03d},2026-07-05T10:{index:02d}:00+00:00"
+        )
+
+    (output_dir / "adl_input_manifest.csv").write_text(
+        "\n".join(rows) + "\n",
+        encoding = "utf-8",
+    )
+    
+    (output_dir / "adl_subclip_manifest.csv").write_text(
+        "session_id,input_name,staged_video_stem,"
+        "subclip_name,subclip_index,"
+        "source_start_seconds,source_end_seconds,"
+        "valid_duration_seconds,"
+        "processing_fps,"
+        "processing_subclip_duration_seconds\n",
+        encoding = "utf-8",
     )
 
 def _existing_output_root(tmp_path: Path) -> Path:
@@ -379,14 +411,22 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
 
         (runtime_adl_dir / "shan").mkdir(parents = True)
         (runtime_adl_dir / "shan" / "clip_001_frame_001_shan.pkl").write_bytes(b"shan")
+        
+        _write_adl_input_manifest(output_dir)
 
-    client = TestClient(create_app(adl_runner = fake_runner))
+    client = TestClient(
+        create_app(
+            adl_runner = fake_runner,
+            runtime_checker = _ready_runtime_checker,
+        )
+    )
 
     start_response = client.post(
         "/api/runs",
         data = {
             "modelId": ADL_RECOGNITION_MODEL_ID,
             "outputRoot": str(_existing_output_root(tmp_path)),
+            "dominantHand": "left",
         },
         files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
     )
@@ -399,6 +439,21 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
     assert progress_body["status"] == "completed"
 
     run_dir = Path(progress_body["outputFolder"]) / run_id
+
+    metrics_config = json.loads(
+        (
+            run_dir
+            / "technical"
+            / "post_processing"
+            / "metrics_config.json"
+        ).read_text(encoding = "utf-8")
+    )
+    
+    run_manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding = "utf-8"))
+
+    assert metrics_config["dominant_hand"] == "left"
+    assert run_manifest["model_configuration"]["dominant_hand"] == "left"
+    assert run_manifest["model_configuration"]["non_dominant_hand"] == "right"
 
     assert (run_dir / "technical" / "model_outputs" / "predictions.csv").exists()
     assert (run_dir / "technical" / "model_outputs" / "predictions_summary.csv").exists()
@@ -790,9 +845,16 @@ def test_run_endpoint_uses_injected_adl_runner(tmp_path: Path) -> None:
         assert output_dir.exists()
         
         progress("ADL step")
+        
+        _write_adl_input_manifest(output_dir)
     
-    client = TestClient(create_app(adl_runner = fake_runner))
-    
+    client = TestClient(
+        create_app(
+            adl_runner = fake_runner,
+            runtime_checker = _ready_runtime_checker,
+        )
+    )
+
     start_response = client.post(
         "/api/runs",
         data = {
@@ -969,15 +1031,17 @@ def test_runtime_wrappers_delegate_to_existing_runners(
     )
     
     _run_adl_recognition_for_gui(
-        tmp_path / "clip.mp4", 
-        tmp_path / "out", 
+        tmp_path / "clip.mp4",
+        tmp_path / "out",
         messages.append,
         ProcessCancellation(),
+        dominant_hand = "left",
     )
     
     assert captured["hand_request"].input_path == tmp_path / "frame.jpg"
     assert captured["adl_request"].input_path == tmp_path / "clip.mp4"
     assert messages == ["hand progress", "adl progress"]
+    assert captured["adl_request"].dominant_hand == "left"
 
 def test_validate_gui_request_accepts_adl(tmp_path: Path) -> None:
     video_path = tmp_path / "clip.mp4"
@@ -1314,8 +1378,15 @@ def test_run_endpoint_reports_wireframe_adl_single_video_progress(
             "input,prediction\nclip.mp4,meal\n",
             encoding = "utf-8",
         )
+        
+        _write_adl_input_manifest(output_dir, ("participant-session-01.mp4",))
 
-    client = TestClient(create_app(adl_runner = fake_runner))
+    client = TestClient(
+        create_app(
+            adl_runner = fake_runner,
+            runtime_checker = _ready_runtime_checker,
+        )
+    )
 
     response = client.post(
         "/api/runs",
@@ -1362,8 +1433,18 @@ def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
             "input,prediction\nparticipant-sessions,meal\n",
             encoding = "utf-8",
         )
+        
+        _write_adl_input_manifest(
+            output_dir,
+            tuple(f"participant-session-{index:02d}.mp4" for index in range(1, 6)),
+        )
 
-    client = TestClient(create_app(adl_runner = fake_runner))
+    client = TestClient(
+        create_app(
+            adl_runner = fake_runner,
+            runtime_checker = _ready_runtime_checker,
+        )
+    )
 
     response = client.post(
         "/api/runs",
@@ -1910,6 +1991,7 @@ def test_execute_run_uses_default_adl_gui_runner(
     state = _test_run_state(tmp_path)
     state.model_id = ADL_RECOGNITION_MODEL_ID
     state.scenario = "adl-single-video"
+    state.dominant_hand = "left"
 
     calls: list[tuple[Path, Path, ProcessCancellation]] = []
 
@@ -1918,8 +2000,10 @@ def test_execute_run_uses_default_adl_gui_runner(
         output_dir: Path,
         progress: ProgressCallback,
         cancellation: ProcessCancellation,
+        *,
+        dominant_hand: str,
     ) -> None:
-        calls.append((input_path, output_dir, cancellation))
+        calls.append((input_path, output_dir, cancellation, dominant_hand))
         progress("ADL runtime output")
 
     monkeypatch.setattr(
@@ -1956,8 +2040,124 @@ def test_execute_run_uses_default_adl_gui_runner(
             state.input_path,
             state.layout.run_dir,
             state.cancellation,
+            "left",
         )
     ]
 
     assert state.status == "completed"
     assert operations == {}
+
+def test_dry_run_rejects_invalid_adl_dominant_hand(tmp_path: Path) -> None:
+    client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
+
+    response = client.post(
+        "/api/dry-run",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(_existing_output_root(tmp_path)),
+            "dominantHand": "middle",
+        },
+        files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Dominant hand must be 'left' or 'right'."
+
+def test_run_endpoint_returns_same_preflight_error_as_dry_run(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(runtime_checker = _failing_runtime_checker))
+    output_root = _existing_output_root(tmp_path)
+
+    dry_run_response = client.post(
+        "/api/dry-run",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(output_root),
+            "dominantHand": "right",
+        },
+        files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
+    )
+
+    run_response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(output_root),
+            "dominantHand": "right",
+        },
+        files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
+    )
+
+    assert dry_run_response.status_code == 400
+    assert run_response.status_code == 400
+    assert run_response.json()["detail"] == dry_run_response.json()["detail"]
+    assert "Linux host with an NVIDIA GPU" in run_response.json()["detail"]
+
+def test_run_endpoint_preflight_failure_does_not_create_run_folder(
+    tmp_path: Path,
+) -> None:
+    client = TestClient(create_app(runtime_checker = _failing_runtime_checker))
+    output_root = _existing_output_root(tmp_path)
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": ADL_RECOGNITION_MODEL_ID,
+            "outputRoot": str(output_root),
+            "dominantHand": "right",
+        },
+        files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
+    )
+
+    assert response.status_code == 400
+    assert not any(path.name.startswith("run-") for path in output_root.iterdir())
+
+def test_start_run_returns_499_when_runtime_check_is_cancelled(
+    tmp_path: Path,
+) -> None:
+    def cancelling_runtime_checker(
+        _model_id: str,
+        _progress: ProgressCallback,
+        _command_runner: Callable[[list[str]], int],
+    ) -> None:
+        raise CommandCancelledError("Run was cancelled before start.")
+
+    client = TestClient(create_app(runtime_checker = cancelling_runtime_checker))
+
+    output_root = _existing_output_root(tmp_path)
+
+    response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(output_root),
+            "operationId": "operation-cancelled-start-run",
+        },
+        files = {
+            "files": (
+                "frame.jpg",
+                b"fake image",
+                "image/jpeg",
+            ),
+        },
+    )
+
+    assert response.status_code == 499
+    assert response.json()["detail"] == "Run was cancelled before start."
+    assert list(output_root.iterdir()) == []
+
+def test_run_start_preflight_policy_covers_adl_and_unknown_models() -> None:
+    assert _should_run_start_preflight(
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        hand_object_runner = None,
+        adl_runner = None,
+        runtime_checker_was_injected = False,
+    ) is True
+
+    assert _should_run_start_preflight(
+        model_id = "unsupported-model",
+        hand_object_runner = None,
+        adl_runner = None,
+        runtime_checker_was_injected = False,
+    ) is True
