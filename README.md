@@ -1,19 +1,103 @@
 # EgoModelKit
 
-EgoModelKit is a packaging and orchestration toolkit for reproducible egocentric-video model inference.
+EgoModelKit packages egocentric-video research models behind one command-line interface and one local browser GUI.
 
-The currently supported model adapters are:
+Supported model adapters:
 
 <details>
 <summary><strong>hand-object-contact</strong></summary>
 
-Shan's hand-object-contact detector can run on either one supported image file or a directory of supported image files:
+Detects hands, objects, and hand-object contact in images.
+
+Inputs:
+
+- one `.jpg`, `.jpeg`, `.png`, `.bmp`, or `.webp` image, or
+- one directory containing supported images.
+
+Directory input is processed non-recursively.
+
+</details>
+
+<details>
+<summary><strong>adl-recognition</strong></summary>
+
+Runs the packaged EgoVizML-based ADL pipeline and generates activity-recognition outputs plus Bandini-style hand-use metrics.
+
+Inputs:
+
+- one `.mp4` video,
+- one directory containing `.mp4` videos, or
+- an existing `all_preds.pkl` file for CLI prediction reuse.
+
+Directory input is processed non-recursively. Multiple videos selected together in the GUI are treated as one ADL session.
+
+</details>
+
+## Setup
+
+Real model runs currently require Python 3.10 or newer, a Linux environment with an NVIDIA GPU, Docker, and NVIDIA GPU container support.
+
+```bash
+git clone https://github.com/singh264/EgoModelKit.git
+cd EgoModelKit
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+python -m pip install --upgrade pip
+python -m pip install -e ".[gui]"
+```
+
+The `.[gui]` install includes the CLI and the optional local browser GUI dependencies.
+
+## Dry Run Command
+
+Use `--dry-run` to validate a CLI request without running model inference.
+
+<details>
+<summary><strong>hand-object-contact</strong></summary>
 
 ```bash
 egomodelkit run hand-object-contact \
-  --input /path/to/image \
+  --input /path/to/image.jpg \
+  --output /path/to/results \
+  --dry-run
+```
+
+The same dry-run flow also accepts a directory containing one or more supported image files.
+
+</details>
+
+<details>
+<summary><strong>adl-recognition</strong></summary>
+
+```bash
+egomodelkit run adl-recognition \
+  --input /path/to/video.mp4 \
+  --output /path/to/results \
+  --dry-run
+```
+
+The same dry-run flow also accepts a directory containing one or more MP4 videos, or an existing `all_preds.pkl` file.
+
+</details>
+
+## Run Command
+
+Real runs check the required host runtime, prepare or reuse the packaged Docker runtime, and print progress in the terminal.
+
+<details>
+<summary><strong>hand-object-contact</strong></summary>
+
+Run one image:
+
+```bash
+egomodelkit run hand-object-contact \
+  --input /path/to/image.jpg \
   --output /path/to/results
 ```
+
+Run multiple images from one directory:
 
 ```bash
 egomodelkit run hand-object-contact \
@@ -21,100 +105,12 @@ egomodelkit run hand-object-contact \
   --output /path/to/results
 ```
 
-`--input` may be either:
-
-- one supported image file, or
-- a directory containing one or more supported image files.
-
-Supported image suffixes:
-
-```text
-.jpg, .jpeg, .png, .bmp, .webp
-```
-
-Directory input is processed non-recursively in the current milestone.
-
 </details>
 
 <details>
 <summary><strong>adl-recognition</strong></summary>
 
-Adesh's ADL recognition adapter runs an EgoVizML-based activity recognition flow that uses video extraction, hand-object-contact outputs, Detic outputs, and a final ADL classifier:
-
-```bash
-egomodelkit run adl-recognition \
-  --input /path/to/video \
-  --output /path/to/results
-```
-
-```bash
-egomodelkit run adl-recognition \
-  --input /path/to/video-directory \
-  --output /path/to/results
-```
-
-`--input` may be either:
-
-- one MP4 video file,
-- a directory containing one or more MP4 video files, or
-- an existing `all_preds.pkl` file for prediction-only reuse.
-
-Directory input is processed non-recursively in the current milestone.
-
-</details>
-
-The public interfaces are the `run` command for direct CLI execution and the `gui` command for launching the local browser GUI. Runtime preparation, container use, external model repositories, model checkpoints, and model environment details stay hidden behind these interfaces.
-
-Model code and checkpoint provenance is centralized in `src/egomodelkit/runtime/external_code.py`. The hidden runtime images are built from pinned project-controlled fork URLs and pinned checkpoint sources so runs can be audited and reproduced.
-
-## Current Milestone
-
-The `run` command now performs real inference for both supported model adapters.
-
-<details>
-<summary><strong>hand-object-contact milestone</strong></summary>
-
-The `hand-object-contact` command performs real inference for either one supported image file or a directory of supported image files.
-
-Run:
-
-```bash
-egomodelkit run hand-object-contact \
-  --input /path/to/image.jpg \
-  --output /path/to/results
-```
-
-On the first real run, EgoModelKit prepares the hidden runtime automatically if it is not already available. Later runs reuse that prepared runtime.
-
-Expected output:
-
-```text
-Completed: hand-object-contact
-Outputs: /path/to/results
-```
-
-A successful run should write visualization output into the requested results directory, typically including:
-
-```text
-<image_stem>_det.png
-<image_stem>_shan.json
-<image_stem>_shan.pkl
-```
-
-For directory input, EgoModelKit writes one visualization image, one JSON file, and one pickle file for each processed input image stem.
-
-The JSON file provides a portable structured representation of detected hands and objects. The pickle file preserves Python-friendly raw prediction structures for downstream research workflows.
-
-The hidden hand-object-contact runtime is built from an EgoModelKit-maintained fork of the original hand-object-detector repository, pinned to a specific commit. This allows EgoModelKit to preserve the upstream model behavior while adding packaging-oriented outputs such as JSON and pickle prediction files.
-
-</details>
-
-<details>
-<summary><strong>adl-recognition milestone</strong></summary>
-
-The `adl-recognition` command now performs packaged ADL inference with hidden EgoVizML, hand-object-contact, Detic, and Detectron2 orchestration.
-
-Run from video:
+Run one video:
 
 ```bash
 egomodelkit run adl-recognition \
@@ -122,7 +118,7 @@ egomodelkit run adl-recognition \
   --output /path/to/results
 ```
 
-Run from a directory of videos:
+Run multiple videos from one directory:
 
 ```bash
 egomodelkit run adl-recognition \
@@ -130,7 +126,7 @@ egomodelkit run adl-recognition \
   --output /path/to/results
 ```
 
-Run from an existing EgoVizML combined prediction file:
+Reuse an existing combined prediction file:
 
 ```bash
 egomodelkit run adl-recognition \
@@ -138,296 +134,276 @@ egomodelkit run adl-recognition \
   --output /path/to/results
 ```
 
-On the first real run, EgoModelKit prepares the hidden runtime images automatically if they are not already available. Later runs reuse those prepared runtimes.
-
-Expected output:
-
-```text
-Completed: adl-recognition
-Outputs: /path/to/results
-```
-
-A successful full video run should write final outputs into the requested results directory, typically including:
-
-```text
-all_preds.pkl
-adl_predictions.csv
-adl_predictions_summary.csv
-adl_recognition_work/
-```
-
-`all_preds.pkl` is the combined EgoVizML-style prediction file. `adl_predictions.csv` contains the full classifier output. `adl_predictions_summary.csv` contains a smaller summary intended for quick review. `adl_recognition_work/` contains intermediate staged videos, extracted frames, and model-stage outputs.
-
-A prediction-only run from an existing `all_preds.pkl` writes:
-
-```text
-adl_predictions.csv
-adl_predictions_summary.csv
-```
-
-The hidden ADL runtime is built from pinned external code revisions for EgoVizML, Detic and Detectron2. This allows EgoModelKit to preserve comparable model behavior while hiding the multi-repository runtime orchestration behind one CLI command.
-
 </details>
 
-## Runtime Checks and Progress Messages
+## Model Outputs
 
-Before executing inference, the `run` command checks the host prerequisites needed by the current runtime and reports progress clearly.
-
-<details>
-<summary><strong>hand-object-contact example output</strong></summary>
-
-```text
-EgoModelKit: Validating hand-object-contact request.
-EgoModelKit: Checking host runtime prerequisites.
-EgoModelKit: Python 3.12.2 detected.
-EgoModelKit: Docker executable found: /usr/bin/docker
-EgoModelKit: Docker daemon is available.
-EgoModelKit: Using output directory: /path/to/results
-EgoModelKit: Checking packaged hand-object-contact runtime image.
-EgoModelKit: Packaged hand-object-contact runtime image is already available.
-EgoModelKit: Starting hand-object-contact inference.
-EgoModelKit runtime: preparing output directory.
-EgoModelKit runtime: staging input image(s) for hand-object-contact.
-EgoModelKit runtime: launching hand-object-contact demo inference.
-EgoModelKit runtime: hand-object-contact inference finished.
-EgoModelKit: hand-object-contact inference completed.
-Completed: hand-object-contact
-Outputs: /path/to/results
-```
-
-</details>
+The GUI creates one `run-*` folder inside the selected output folder for each run.
 
 <details>
-<summary><strong>adl-recognition example output</strong></summary>
+<summary><strong>Hand-object contact (HOC)</strong></summary>
 
-Full video run:
+- <details>
+  <summary><strong>Input: one image</strong></summary>
 
-```text
-EgoModelKit: Validating adl-recognition request.
-EgoModelKit: Checking host runtime prerequisites.
-EgoModelKit: Python 3.12.2 detected.
-EgoModelKit: Docker executable found: /usr/bin/docker
-EgoModelKit: Docker daemon is available.
-EgoModelKit: Using output directory: /path/to/results
-EgoModelKit: Checking packaged adl-recognition core runtime image.
-EgoModelKit: Packaged adl-recognition core runtime image is already available.
-EgoModelKit: Starting ADL video frame extraction.
-EgoModelKit runtime: preparing EgoVizML video workspace.
-EgoModelKit runtime: calling EgoVizML frame extraction.
-EgoModelKit runtime: EgoVizML frame extraction finished.
-EgoModelKit: Finished ADL video frame extraction.
-EgoModelKit: Checking packaged adl-recognition Detic runtime image.
-EgoModelKit: Packaged adl-recognition Detic runtime image is already available.
-EgoModelKit: Validating hand-object-contact request.
-EgoModelKit: Checking host runtime prerequisites.
-EgoModelKit: Python 3.12.2 detected.
-EgoModelKit: Docker executable found: /usr/bin/docker
-EgoModelKit: Docker daemon is available.
-EgoModelKit: Using output directory: /path/to/results/adl_recognition_work/egoviz_data/meal-preparation-cleanup/subclips_shan/video001--1
-EgoModelKit: Checking packaged hand-object-contact runtime image.
-EgoModelKit: Packaged hand-object-contact runtime image is already available.
-EgoModelKit: Starting hand-object-contact inference.
-EgoModelKit runtime: preparing output directory.
-EgoModelKit runtime: staging input image(s) for hand-object-contact.
-EgoModelKit runtime: launching hand-object-contact demo inference.
-EgoModelKit runtime: hand-object-contact inference finished.
-EgoModelKit: hand-object-contact inference completed.
-EgoModelKit: Starting Detic inference for video001--1.
-EgoModelKit: Finished Detic inference for video001--1.
-EgoModelKit: Starting ADL prediction finalization.
-EgoModelKit runtime: preparing EgoVizML prediction folders.
-EgoModelKit runtime: paired 1 Detic/Shan frame outputs.
-EgoModelKit runtime: calling EgoVizML process_all_preds.py
-EgoModelKit runtime: calling EgoVizML classifier wrapper.
-Saved predictions to: /workspace/output/adl_predictions.csv
-Saved prediction summary to: /workspace/output/adl_predictions_summary.csv
-EgoModelKit runtime: ADL prediction outputs are ready.
-EgoModelKit: Finished ADL prediction finalization.
-EgoModelKit: adl-recognition inference completed.
-Completed: adl-recognition
-Outputs: /path/to/results
-```
+  ```text
+  output-root/
+    run-YYYY-MM-DD-HHMMSS/
+      README.txt
+      run_summary.json
+      run_manifest.json
+      visual_outputs/
+        hand_object_contact/
+          image_det.png
+      technical/
+        model_outputs/
+          image_shan.json
+          image_shan.pkl
+      logs/
+        progress.jsonl
+        runtime.log
+  ```
 
-For longer videos, the hand-object-contact and Detic stage messages repeat for each extracted subclip frame directory.
+  Review `visual_outputs/hand_object_contact/` first. It contains the annotated detection image.
 
-Prediction-only run from an existing `all_preds.pkl`:
+  </details>
 
-```text
-EgoModelKit: Validating adl-recognition request.
-EgoModelKit: Checking host runtime prerequisites.
-EgoModelKit: Python 3.12.2 detected.
-EgoModelKit: Docker executable found: /usr/bin/docker
-EgoModelKit: Docker daemon is available.
-EgoModelKit: Using output directory: /path/to/results
-EgoModelKit: Checking packaged adl-recognition core runtime image.
-EgoModelKit: Packaged adl-recognition core runtime image is already available.
-EgoModelKit: Starting adl-recognition prediction.
-EgoModelKit runtime: calling EgoVizML classifier wrapper.
-Saved predictions to: /workspace/output/adl_predictions.csv
-Saved prediction summary to: /workspace/output/adl_predictions_summary.csv
-EgoModelKit runtime: ADL prediction outputs are ready.
-EgoModelKit: Finished adl-recognition prediction.
-EgoModelKit: adl-recognition inference completed.
-Completed: adl-recognition
-Outputs: /path/to/results
-```
+- <details>
+  <summary><strong>Input: multiple images</strong></summary>
 
-</details>
+  ```text
+  output-root/
+    run-YYYY-MM-DD-HHMMSS/
+      README.txt
+      run_summary.json
+      run_manifest.json
+      visual_outputs/
+        hand_object_contact/
+          image1_det.png
+          image2_det.png
+          image3_det.png
+      technical/
+        model_outputs/
+          image1_shan.json
+          image1_shan.pkl
+          image2_shan.json
+          image2_shan.pkl
+          image3_shan.json
+          image3_shan.pkl
+      logs/
+        progress.jsonl
+        runtime.log
+  ```
 
-## Optional Dry Run
+  Review `visual_outputs/hand_object_contact/` first. Each image has a visualization and matching technical model outputs.
 
-Use `--dry-run` to validate a request without executing inference:
-
-<details>
-<summary><strong>hand-object-contact dry run</strong></summary>
-
-```bash
-egomodelkit run hand-object-contact \
-  --input /path/to/image.jpg \
-  --output /path/to/results \
-  --dry-run
-```
-
-Expected output:
-
-```text
-Dry run: hand-object-contact request is valid.
-Input: /path/to/image.jpg
-Output: /path/to/results
-```
-
-The same dry-run flow also accepts a directory input that contains one or more supported image files.
+  </details>
 
 </details>
 
 <details>
-<summary><strong>adl-recognition dry run</strong></summary>
+<summary><strong>Activity recognition (ADL)</strong></summary>
 
-```bash
-egomodelkit run adl-recognition \
-  --input /path/to/video.mp4 \
-  --output /path/to/results \
-  --dry-run
-```
+- <details>
+  <summary><strong>Input: one video</strong></summary>
 
-Expected output:
+  ```text
+  output-root/
+    run-YYYY-MM-DD-HHMMSS/
+      README.txt
+      run_summary.json
+      run_manifest.json
+      results/
+        video_level_metrics.csv
+        session_level_metrics.csv
+        video_level_metrics_summary.csv
+      technical/
+        model_outputs/
+          predictions.csv
+          predictions_summary.csv
+          adl_input_manifest.csv
+          all_preds.pkl
+        post_processing/
+          adl_subclip_manifest.csv
+          frame_level_predictions.csv
+          interaction_segments.csv
+          metrics_config.json
+        intermediate_files/
+          extracted_frames/
+          detic_outputs/
+          shan_outputs/
+      logs/
+        progress.jsonl
+        runtime.log
+  ```
 
-```text
-Dry run: adl-recognition request is valid.
-Input: /path/to/video.mp4
-Output: /path/to/results
-```
+  Review `results/video_level_metrics.csv` first for the calculated hand-use metrics.
 
-The same dry-run flow also accepts a directory input that contains one or more supported video files, or an existing `all_preds.pkl` file.
+  </details>
+
+- <details>
+  <summary><strong>Input: multiple videos</strong></summary>
+
+  ```text
+  output-root/
+    run-YYYY-MM-DD-HHMMSS/
+      README.txt
+      run_summary.json
+      run_manifest.json
+      results/
+        video_level_metrics.csv
+        session_level_metrics.csv
+        video_level_metrics_summary.csv
+      technical/
+        model_outputs/
+          predictions.csv
+          predictions_summary.csv
+          adl_input_manifest.csv
+          all_preds.pkl
+        post_processing/
+          adl_subclip_manifest.csv
+          frame_level_predictions.csv
+          interaction_segments.csv
+          metrics_config.json
+        intermediate_files/
+          extracted_frames/
+            video1/
+            video2/
+            video3/
+          detic_outputs/
+          shan_outputs/
+      logs/
+        progress.jsonl
+        runtime.log
+  ```
+
+  The videos are treated as one ADL session. Review `results/session_level_metrics.csv` for the combined session and `results/video_level_metrics.csv` for each video.
+
+  </details>
+
+</details>
+
+<details>
+<summary><strong>Output file guide</strong></summary>
+
+| File or folder | Purpose |
+|---|---|
+| `README.txt` | Plain-language guide for one run folder. |
+| `run_summary.json` | Summary of the run and its status. |
+| `run_manifest.json` | Record of the run settings and model/runtime versions. |
+| `*_det.png` | HOC visualization with model detections. |
+| `*_shan.json` | Structured HOC model output. |
+| `*_shan.pkl` | Raw HOC model output. |
+| `video_level_metrics.csv` | Hand-use metrics for each video. |
+| `session_level_metrics.csv` | Combined hand-use metrics for the ADL session. |
+| `video_level_metrics_summary.csv` | Compact video-level metric summary. |
+| `predictions.csv` | Detailed ADL model predictions. |
+| `predictions_summary.csv` | Compact ADL prediction summary. |
+| `adl_input_manifest.csv` | Input order and source-video information. |
+| `all_preds.pkl` | Combined raw ADL prediction file. |
+| `adl_subclip_manifest.csv` | Source-time information used to exclude padded tail frames from metrics. |
+| `frame_level_predictions.csv` | Frame-level data used to calculate hand-use metrics. |
+| `interaction_segments.csv` | Continuous hand-interaction segments. |
+| `metrics_config.json` | Metric and preprocessing settings used for the run. |
+| `extracted_frames/` | Video frames used by the ADL pipeline. |
+| `detic_outputs/` | Technical Detic outputs. |
+| `shan_outputs/` | Technical HOC outputs generated from video frames. |
+| `progress.jsonl` | Run progress history. |
+| `runtime.log` | Runtime log for troubleshooting. |
 
 </details>
 
 ## Local Browser GUI
 
-EgoModelKit also provides a local browser GUI backend for users who should not need to run model commands directly.
+### Backend Layer
 
-Install the optional GUI dependencies:
-
-```bash
-python -m pip install -e ".[gui]"
-```
-
-Launch the GUI:
+Launch the local GUI and backend:
 
 ```bash
 egomodelkit gui
 ```
 
-Launch without automatically opening a browser window:
+Useful alternatives:
 
 ```bash
 egomodelkit gui --no-browser
-```
-
-Use a custom local port:
-
-```bash
 egomodelkit gui --port 7860 --no-browser
 ```
 
-The GUI server binds to `127.0.0.1` by default. This keeps the interface local-only for privacy-sensitive research workflows. The backend exposes a small local API for the React frontend:
+The server binds to `127.0.0.1` by default.
 
-```text
-GET  /api/models
-POST /api/output-preview
-POST /api/dry-run
-POST /api/runs
-GET  /api/runs/{run_id}/progress
-POST /api/open-output-folder
-POST /api/select-output-folder
-```
+### API Layer
 
-During backend development, the API documentation is available at:
+<details>
+<summary><strong>Local React frontend API</strong></summary>
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/api/models` | List the models and input types available in the GUI. |
+| `POST` | `/api/output-preview` | Build the output-folder preview shown before a run. |
+| `POST` | `/api/dry-run` | Check the selected inputs, output folder, and model requirements without running inference. |
+| `POST` | `/api/runs` | Check the request and start a model run. |
+| `GET` | `/api/runs/{run_id}/progress` | Return the current run status and progress. |
+| `POST` | `/api/cancel-run` | Cancel an active dry run or model run. |
+| `POST` | `/api/open-output-folder` | Open the output folder for a GUI run. |
+| `POST` | `/api/select-output-folder` | Open the system folder picker when available. |
+
+ADL runs can use either the left or right hand as the dominant hand; right is the default.
+
+Interactive FastAPI documentation is also available while the backend is running:
 
 ```text
 http://127.0.0.1:7860/docs
 ```
 
-The React frontend build is served from `src/egomodelkit/web/dist` when those frontend assets are present. The frontend source/build artifacts are tracked separately from the backend GUI API work.
+</details>
 
-Frontend development files live in:
+### Frontend Layer
 
-```text
-src/egomodelkit/web
-```
+The React frontend source lives in `src/egomodelkit/web`. Production assets are served from `src/egomodelkit/web/dist`; development uses the Vite server at `127.0.0.1:5173` with `/api` proxied to the local backend.
 
-Run the frontend locally during development:
+<details>
+<summary><strong>Current GUI features</strong></summary>
 
-```bash
-cd src/egomodelkit/web
-npm ci
-npm run dev
-```
+- Backend-loaded model selection and model-specific file filtering.
+- Single-file and multi-file input selection.
+- ADL dominant-hand selection and one-session treatment for multi-video input.
+- Output-folder selection, review, dry run, and model execution.
+- Consistent runtime preflight before GUI dry runs and real runs.
+- Cancellation for active dry runs and model runs.
+- Progress polling, refresh persistence, and guarded navigation during active work.
+- Completed/failed result views, output-folder preview, and open-output-folder actions.
 
-Run frontend checks:
+</details>
 
-```bash
-npm run typecheck
-npm test
-npm run build
-```
+## Current Platform Support
 
-The frontend uses Vite, React, Tailwind CSS, Vitest, and Testing Library. The implemented GUI flow currently includes the welcome/start screen, backend-loaded model-selection screen, single-file and multi-file input selection with backend-provided model-specific file filtering, output-folder selection screen, review screen, dry-run action with local Linux/NVIDIA runtime checks, backend-cancellable dry-run and model-run operations, run-progress polling with refresh persistence, guarded navigation away from active operations, completed/failed results screens, an output-folder preview screen available after a completed run, and open-output-folder actions from the results screen. The output folder selected in the GUI is treated as the output root; each run writes its files under a generated `run-*` subfolder inside that root, with runtime outputs normalized into `results/`, `visual_outputs/`, `technical/`, and `logs/` folders. 
+<details>
+<summary><strong>View platform support</strong></summary>
 
-For ADL recognition, multiple selected video files are treated as one session by default. The files are processed in the staged/session order and pooled into session-level Bandini-style metrics. Video-level outputs are still produced per input video where applicable, but `session_level_metrics.csv` summarizes the multi-file selection as a single ADL session.
+| Environment | Model runs | Notes |
+|---|---|---|
+| Linux + NVIDIA GPU | Supported | Primary runtime path. The packaged models and GPU containers are built and tested around Linux and NVIDIA CUDA. |
+| Windows + WSL2 + NVIDIA GPU | Supported | Uses the same Linux-based runtime through WSL2. Docker GPU access must be working inside WSL2. |
+| Native Windows | Not currently supported | EgoModelKit's Docker-based model runtimes are currently supported on Windows only through WSL2, and the underlying model repositories assume a Linux-style environment. Native support would require a separate Windows runtime and testing path. |
+| macOS | Not currently supported for model runs | Suitable for code, documentation, and GUI development, but the packaged models require NVIDIA CUDA GPU support. |
+| Linux without an NVIDIA GPU | Not currently supported for model runs | The application can still be used for development and non-model tasks, but model execution requires access to an NVIDIA CUDA GPU. |
 
-ADL runs generate Bandini-style hand-use metrics from Shan contact states using configurable preprocessing parameters. Outputs include per-video metrics, session-level metrics, frame-level predictions, hand-specific interaction segments, and a `metrics_config.json` traceability file. Metrics are computed from Statepool-style left/right hand interaction profiles and include dominant-hand, non-dominant-hand, and bilateral Perc/Dur/Num measures. In the GUI, ADL users choose the dominant hand after injury on the Select model screen; the selected value is shown again on Review and run and recorded in `metrics_config.json` and `run_manifest.json`.
+`--dry-run` checks a CLI request without running the model. GUI **Dry Run** also checks whether the selected model can run on the current computer.
 
-Currently, all videos selected in one ADL GUI run are grouped into `session001` by default, which supports camera chunking such as one recording session split into multiple video files. The session timeline follows the deterministic order recorded in `adl_input_manifest.csv`; directory input uses natural filename sorting, and `input_modified_time` is recorded for traceability but is not used as the main ordering rule. Users who want individual-file-only metrics can still run one file at a time.
-
-## Current Platform Target
-
-The current target is a research-group Linux NVIDIA GPU machine. EgoModelKit hides container execution, but the underlying runtime still depends on GPU-enabled container support. The public command remains intentionally stable and operating-system-neutral so the runtime layer can later be adjusted for additional lab environments without changing the CLI.
+</details>
 
 ## Development
 
-Clone the repository, then create and activate a virtual environment. Use Python 3.10 or newer for the EgoModelKit development environment.
+Use Python 3.10 or newer. Run backend/package checks from the repository root before starting the local backend:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python --version
-```
 
-The final `python --version` check should report Python 3.10 or newer.
-
-Install the package locally in editable mode:
-
-```bash
 python -m pip install --upgrade pip
 python -m pip install -e ".[dev,gui]"
-```
 
-The test suite includes GUI backend tests. Use `.[dev,gui]` for local development so FastAPI, Uvicorn, multipart upload handling, and HTTP test dependencies are available.
-
-Run the automated quality checks:
-
-```bash
 ruff check .
 
 pytest \
@@ -436,18 +412,22 @@ pytest \
   --cov-fail-under=90
 
 python -m build
-```
-
-Run a quick manual CLI smoke test:
-
-```bash
 egomodelkit --help
 ```
 
-Expected output:
+Start the backend in one terminal:
 
-```text
-Usage: egomodelkit [OPTIONS] COMMAND [ARGS]...
+```bash
+egomodelkit gui --no-browser
+```
 
-EgoModelKit: reproducible egocentric-video model packaging and inference.
+For frontend development, use Node.js 22.12.0. In a second terminal, install dependencies, run checks, build, then start Vite:
+
+```bash
+cd src/egomodelkit/web
+npm ci
+npm run typecheck
+npm test
+npm run build
+npm run dev
 ```
