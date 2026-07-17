@@ -396,21 +396,24 @@ export function App() {
 
             const backendSelection = await requestNativeOutputFolder();
 
-            const selectedOutputRoot =
-                backendSelection?.outputRoot ??
-                window.prompt(
-                    "Enter the output folder path:",
-                    "/Users/Research/Desktop/EgoModelKit Results",
+            if (backendSelection === null) {
+                setErrorMessage(
+                    "The native output folder picker is not available on this machine.",
                 );
-            
-            if (!selectedOutputRoot?.trim()) {
+
                 return;
             }
 
-            setOutputRoot(selectedOutputRoot.trim());
+            const selectedOutputRoot = backendSelection.outputRoot.trim();
+
+            if (selectedOutputRoot.length === 0) {
+                return;
+            }
+
+            setOutputRoot(selectedOutputRoot);
             clearReviewState();
         } catch {
-            setErrorMessage("Unable to choose output folder.")
+            setErrorMessage("Unable to choose output folder.");
         } finally {
             setIsBusy(false);
         }
@@ -435,15 +438,17 @@ export function App() {
             setIsBusy(true);
             setErrorMessage("");
 
-            const body = await requestOpenOutputFolder({ runId: targetRunId });
+            const outputFolder =
+                progress?.outputFolder ?? resultSummary?.outputFolder;
 
-            if (body === null) {
-                setErrorMessage(
-                    "Opening output folders is not available in this environment.",
-                );
-            }
-        } catch {
-            setErrorMessage("Unable to open output folder.");
+            await requestOpenOutputFolder({
+                runId: targetRunId,
+                outputFolder,
+            });
+        } catch (error) {
+            setErrorMessage(
+                userFacingRequestError(error, "Unable to open output folder."),
+            );
         } finally {
             setIsBusy(false);
         }
@@ -621,6 +626,8 @@ export function App() {
         }
 
         let isMounted = true;
+        let timeoutId: number | null = null;
+        let consecutiveFailures = 0;
 
         async function pollProgress() {
             try {
@@ -630,6 +637,8 @@ export function App() {
                     return;
                 }
 
+                consecutiveFailures = 0;
+                setErrorMessage("");
                 setProgress(body);
 
                 setOutputPreview((currentOutputPreview) => (
@@ -637,28 +646,43 @@ export function App() {
                 ));
 
                 if (body.status === "completed" || body.status === "failed") {
+                    isMounted = false;
                     setActiveOperationId("");
                     setReviewMode("ready");
                     setStep("results");
+
+                    return;
                 }
 
                 if (body.status === "cancelled") {
+                    isMounted = false;
                     goHome();
+
+                    return;
                 }
             } catch {
-                if (isMounted) {
+                if (!isMounted) {
+                    return;
+                }
+
+                consecutiveFailures += 1;
+
+                if (consecutiveFailures >= 3) {
                     setErrorMessage("Unable to refresh run progress.");
                 }
             }
+
+            timeoutId = window.setTimeout(pollProgress, 1000);
         }
 
         void pollProgress();
 
-        const intervalId = window.setInterval(pollProgress, 1000);
-
         return () => {
             isMounted = false;
-            window.clearInterval(intervalId);
+
+            if (timeoutId !== null) {
+                window.clearTimeout(timeoutId);
+            }
         };
     }, [reviewMode, runId]);
 
@@ -1314,23 +1338,21 @@ async function requestNativeOutputFolder(): Promise<SelectOutputFolderResponse |
 
 async function requestOpenOutputFolder({
     runId,
+    outputFolder,
 } : {
     runId: string;
-}) : Promise<OpenOutputFolderResponse | null> {
+    outputFolder?: string;
+}) : Promise<OpenOutputFolderResponse> {
     const response = await fetch("/api/open-output-folder", {
         method: "POST",
         headers: {
             "Content-Type": "application/json",
         },
-        body: JSON.stringify({ runId }),
+        body: JSON.stringify({ runId, outputFolder }),
     });
 
-    if ([404, 405].includes(response.status)) {
-        return null;
-    }
-
     if (!response.ok) {
-        throw new Error(`Request failed with status ${response.status}.`);
+        throw new ApiRequestError(await responseErrorDetail(response));
     }
 
     return (await response.json()) as OpenOutputFolderResponse;

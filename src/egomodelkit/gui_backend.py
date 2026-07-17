@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import platform
 import re
 import shutil
 import subprocess
 import tempfile
 import threading
-import webbrowser
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Final, Literal
 from uuid import uuid4
 
@@ -79,6 +79,7 @@ from egomodelkit.runtime.hand_object_contact import (
     HandObjectContactRuntimeError,
     run_hand_object_contact,
 )
+from egomodelkit.runtime.host_platform import is_wsl as host_is_wsl
 from egomodelkit.runtime.preflight import (
     HostPrerequisiteError,
     ensure_host_runtime_ready,
@@ -111,6 +112,7 @@ class OutputPreviewRequest(BaseModel):
 class OpenOutputFolderRequest(BaseModel):
     """ Request body for opening a completed run folder. """
     run_id: str = Field(alias = "runId")
+    output_folder: str | None = Field(default = None, alias = "outputFolder")
 
 class CancelRunRequest(BaseModel):
     """ Request body for cancelling an active GUI operation. """
@@ -120,6 +122,9 @@ class CancelRunRequest(BaseModel):
 class SelectOutputFolderResponse(BaseModel):
     """ Response body for native output-folder selection. """
     output_root: str = Field(alias = "outputRoot")
+
+class NativeOutputFolderPickerError(RuntimeError):
+    """ Raised when the host-native output folder picker cannot be started. """
 
 @dataclass(frozen = True, slots = True)
 class StagedInput:
@@ -292,7 +297,11 @@ def create_app(
             )
             
             run_id = _build_unique_run_id(output_root, runs)
-            layout = build_run_output_layout(output_root, run_id = run_id)
+            layout = build_run_output_layout(
+                output_root,
+                run_id = run_id,
+                display_run_dir = _display_run_dir(output_root_text, run_id),
+            )
             
             context = build_output_preview_context(
                 model_id = model_id,
@@ -309,7 +318,7 @@ def create_app(
                     "modelId": model_id,
                     "model": _model_display_name(model_id),
                     "input": _input_label(staged.input_names),
-                    "outputFolder": str(layout.run_dir),
+                    "outputFolder": layout.display_output_folder,
                     "status": "Ready",
                 },
                 "outputPreview": _output_preview_response(context),
@@ -364,7 +373,11 @@ def create_app(
                 )
             
             run_id = _build_unique_run_id(output_root, runs)
-            layout = build_run_output_layout(output_root, run_id = run_id)
+            layout = build_run_output_layout(
+                output_root,
+                run_id = run_id,
+                display_run_dir = _display_run_dir(output_root_text, run_id),
+            )
             
             context = build_output_preview_context(
                 model_id = model_id,
@@ -426,7 +439,7 @@ def create_app(
                     "modelId": model_id,
                     "model": _model_display_name(model_id),
                     "input": state.input_name,
-                    "outputFolder": str(layout.run_dir),
+                    "outputFolder": layout.display_output_folder,
                     "status": "Running",
                 },
                 "outputPreview": state.output_preview,
@@ -468,41 +481,52 @@ def create_app(
     
     @app.post("/api/open-output-folder")
     def open_output_folder(request: OpenOutputFolderRequest) -> dict[str, object]:
-        """ Open the output folder for a run created by this GUI session. """
+        """ Open a tracked run folder or a restored result-folder path. """
         state = runs.get(request.run_id)
-        
-        if state is None:
+
+        if state is None and (
+            request.output_folder is None or not request.output_folder.strip()
+        ):
             raise HTTPException(status_code = 404, detail = "Run was not found.")
-        
-        if not state.layout.run_dir.exists():
+
+        try:
+            output_folder, display_output_folder = _resolve_output_folder_to_open(
+                request = request,
+                state = state,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code = 400, detail = str(exc)) from exc
+
+        if not output_folder.exists() or not output_folder.is_dir():
             raise HTTPException(
                 status_code = 404,
-                detail = "Output folder does not exist yet.",
+                detail = "Output folder does not exist or is no longer available.",
             )
-        
-        webbrowser.open(state.layout.output_folder_path.resolve().as_uri())
-        
+
+        if not _open_output_folder(output_folder):
+            raise HTTPException(
+                status_code = 500,
+                detail = (
+                    "The output folder exists, but EgoModelKit could not start "
+                    "the host file manager. Open the displayed path manually."
+                ),
+            )
+
         return {
             "opened": True,
-            "runId": state.run_id,
-            "outputFolder": str(state.layout.output_folder_path),
+            "runId": request.run_id,
+            "outputFolder": display_output_folder,
         }
     
     @app.post("/api/select-output-folder")
     def select_output_folder() -> dict[str, str]:
         """Open a local native folder picker when the host platform supports it."""
-        output_root = _select_output_folder()
+        try:
+            output_root = _select_output_folder()
+        except NativeOutputFolderPickerError as exc:
+            raise HTTPException(status_code = 503, detail = str(exc)) from exc
 
-        if output_root is None:
-            raise HTTPException(
-                status_code = 404,
-                detail = (
-                    "Native output folder picker is not available on this host. "
-                    "Use the manual output path fallback."
-                ),
-            )
-
-        return {"outputRoot": output_root}
+        return {"outputRoot": output_root or ""}
     
     if static_dir is not None and static_dir.exists():
         app.mount(
@@ -1497,7 +1521,7 @@ def _progress_response(state: GuiRunState) -> dict[str, object]:
         "runId": state.run_id,
         "status": status,
         "errorMessage": error_message,
-        "outputFolder": str(state.layout.output_folder_path),
+        "outputFolder": state.layout.display_output_folder,
         "events": [
             {
                 "stage": event.stage,
@@ -1546,12 +1570,108 @@ def _output_preview_response(context) -> dict[str, object]:
         ],
     }
 
+def _display_run_dir(output_root_text: str, run_id: str) -> str:
+    """ Build the run path using the path style selected by the user. """
+    normalized_text = output_root_text.strip()
+
+    if _looks_like_windows_path(normalized_text):
+        return str(PureWindowsPath(normalized_text) / run_id)
+
+    return str(Path(normalized_text).expanduser() / run_id)
+
+
+def _resolve_output_folder_to_open(
+    *,
+    request: OpenOutputFolderRequest,
+    state: GuiRunState | None,
+) -> tuple[Path, str]:
+    """ Resolve an internal path while preserving its user-facing path style. """
+    if state is not None:
+        return state.layout.run_dir, state.layout.display_output_folder
+
+    if request.output_folder is None or not request.output_folder.strip():
+        raise ValueError(
+            "This run is no longer in backend memory and no saved output path was provided."
+        )
+
+    display_output_folder = request.output_folder.strip()
+    selected_name = (
+        PureWindowsPath(display_output_folder).name
+        if _looks_like_windows_path(display_output_folder)
+        else Path(display_output_folder).name
+    )
+
+    if selected_name != request.run_id:
+        raise ValueError("The saved output path does not match the requested run.")
+
+    return _normalize_output_root(display_output_folder), display_output_folder
+
+
 def _normalize_output_root(output_root_text: str) -> Path:
-    """ Return a validated output root path. """
+    """ Return a normalized host path for the selected output root. """
     if output_root_text is None or not output_root_text.strip():
         raise ValueError("Choose an output folder before continuing.")
-    
-    return Path(output_root_text).expanduser()
+
+    normalized_text = output_root_text.strip()
+
+    if _is_wsl() and _looks_like_windows_path(normalized_text):
+        return Path(_windows_path_to_wsl_path(normalized_text)).expanduser()
+
+    return Path(normalized_text).expanduser()
+
+def _is_wsl() -> bool:
+    """ Return whether EgoModelKit is running inside Windows Subsystem for Linux. """
+    return host_is_wsl()
+
+def _looks_like_windows_path(path_text: str) -> bool:
+    """ Return whether text starts with a Windows drive-root path. """
+    return re.match(r"^[A-Za-z]:[\\/]", path_text) is not None
+
+def _windows_path_to_wsl_path(path_text: str) -> str:
+    """ Convert a Windows drive path into the WSL mount path for backend use. """
+    try:
+        completed = subprocess.run(
+            ["wslpath", "-u", path_text],
+            check = False,
+            capture_output = True,
+            text = True,
+        )
+    except OSError:
+        completed = None
+
+    if (
+        completed is not None
+        and completed.returncode == 0
+        and completed.stdout.strip()
+    ):
+        return completed.stdout.strip()
+
+    windows_path = PureWindowsPath(path_text)
+    drive = windows_path.drive.rstrip(":").lower()
+
+    if len(drive) != 1 or not drive.isalpha():
+        raise ValueError(f"Unsupported Windows output path: {path_text}")
+
+    return str(Path("/mnt") / drive / Path(*windows_path.parts[1:]))
+
+def _wsl_path_to_windows_path(path: Path) -> str | None:
+    """ Convert a WSL path into a Windows path for Windows Explorer. """
+    try:
+        completed = subprocess.run(
+            ["wslpath", "-w", str(path.resolve())],
+            check = False,
+            capture_output = True,
+            text = True,
+        )
+    except OSError:
+        return None
+
+    if completed.returncode != 0:
+        return None
+
+    selected_path = completed.stdout.strip()
+
+    return selected_path or None
 
 def _validate_existing_output_root(output_root: Path) -> None:
     """ Validate that a GUI output root already exists and is a directory. """
@@ -1627,17 +1747,16 @@ def _model_display_name(model_id: str) -> str:
     raise ValueError(f"Unsupported model id: {model_id}")
 
 def _select_output_folder() -> str | None:
-    """ Return a user-selected output folder using a local native picker when possible. """
+    """ Return a user-selected output folder through the host desktop picker. """
     system_name = platform.system()
 
     if system_name == "Darwin":
         return _select_output_folder_macos()
 
-    if system_name == "Windows":
+    if system_name == "Windows" or _is_wsl():
         return _select_output_folder_windows()
 
-    return _select_output_folder_tkinter()
-
+    return _select_output_folder_linux()
 
 def _select_output_folder_macos() -> str | None:
     """ Return a folder selected through macOS Finder. """
@@ -1661,21 +1780,168 @@ def _select_output_folder_macos() -> str | None:
     return selected_path or None
 
 
+def _resolve_windows_powershell_executable() -> str | None:
+    """ Resolve Windows PowerShell on native Windows or from inside WSL. """
+    if _is_wsl():
+        candidates = (
+            "powershell.exe",
+            "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+        )
+    else:
+        candidates = ("powershell.exe", "powershell")
+
+    for candidate in candidates:
+        if "/" in candidate:
+            if Path(candidate).is_file():
+                return candidate
+            continue
+
+        resolved = shutil.which(candidate)
+        if resolved is not None:
+            return resolved
+
+    return None
+
+
+def _powershell_encoded_command(script: str) -> str:
+    """ Encode a PowerShell command without shell-quoting ambiguities. """
+    return base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+
+
 def _select_output_folder_windows() -> str | None:
     """ Return a folder selected through the Windows folder picker. """
     script = r"""
+[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
 $dialog.Description = "Choose an EgoModelKit output folder"
 $dialog.ShowNewFolderButton = $true
 $result = $dialog.ShowDialog()
 if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-    Write-Output $dialog.SelectedPath
+    [Console]::Out.WriteLine($dialog.SelectedPath)
+    exit 0
 }
-"""
+exit 2
+""".strip()
 
+    powershell_executable = _resolve_windows_powershell_executable()
+    if powershell_executable is None:
+        raise NativeOutputFolderPickerError(
+            "EgoModelKit could not locate Windows PowerShell for the native output "
+            "folder picker."
+        )
+
+    command = [
+        powershell_executable,
+        "-NoProfile",
+        "-NonInteractive",
+        "-STA",
+        "-EncodedCommand",
+        _powershell_encoded_command(script),
+    ]
+
+    windows_working_directory = Path("/mnt/c/Windows/System32")
+    working_directory = (
+        str(windows_working_directory)
+        if _is_wsl() and windows_working_directory.is_dir()
+        else None
+    )
+
+    try:
+        completed = subprocess.run(
+            command,
+            check = False,
+            capture_output = True,
+            text = True,
+            encoding = "utf-8",
+            errors = "replace",
+            cwd = working_directory,
+        )
+    except OSError as exc:
+        raise NativeOutputFolderPickerError(
+            "EgoModelKit could not start the Windows output folder picker."
+        ) from exc
+
+    if completed.returncode == 2:
+        return None
+
+    if completed.returncode != 0:
+        raise NativeOutputFolderPickerError(
+            "The Windows output folder picker could not be opened. Restart WSL "
+            "and try again if Windows interoperability is unavailable."
+        )
+
+    selected_path = completed.stdout.strip()
+
+    return selected_path or None
+
+def _select_output_folder_tkinter() -> str | None:
+    """ Return a folder selected through Tkinter on Linux/other desktop hosts. """
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+    except ImportError:
+        return None
+
+    root = None
+
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+
+        selected_path = filedialog.askdirectory(
+            title = "Choose an EgoModelKit output folder",
+            mustexist = True,
+        )
+
+        return selected_path or None
+    except Exception:
+        return None
+    finally:
+        if root is not None:
+            root.destroy()
+
+def _select_output_folder_linux() -> str | None:
+    """ Return a folder selected through a Linux desktop folder picker. """
+    zenity = shutil.which("zenity")
+
+    if zenity is not None:
+        selected_path = _run_folder_picker_command(
+            [
+                zenity,
+                "--file-selection",
+                "--directory",
+                "--title=Choose an EgoModelKit output folder",
+            ]
+        )
+
+        if selected_path is not None:
+            return selected_path
+
+    kdialog = shutil.which("kdialog")
+
+    if kdialog is not None:
+        selected_path = _run_folder_picker_command(
+            [
+                kdialog,
+                "--getexistingdirectory",
+                str(Path.home()),
+                "--title",
+                "Choose an EgoModelKit output folder",
+            ]
+        )
+
+        if selected_path is not None:
+            return selected_path
+
+    return _select_output_folder_tkinter()
+
+
+def _run_folder_picker_command(command: list[str]) -> str | None:
+    """ Run one desktop folder-picker command and return its selected path. """
     completed = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", script],
+        command,
         check = False,
         capture_output = True,
         text = True,
@@ -1688,27 +1954,53 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
 
     return selected_path or None
 
+def _open_output_folder(output_folder: Path) -> bool:
+    """ Open an existing output folder in the host operating system's file manager. """
+    resolved_output_folder = output_folder.resolve()
+    system_name = platform.system()
 
-def _select_output_folder_tkinter() -> str | None:
-    """ Return a folder selected through Tkinter on Linux/other desktop hosts. """
+    if system_name == "Darwin":
+        command = ["open", str(resolved_output_folder)]
+    elif system_name == "Windows":
+        command = ["explorer.exe", str(resolved_output_folder)]
+    elif _is_wsl():
+        windows_path = _wsl_path_to_windows_path(resolved_output_folder)
+
+        if windows_path is None:
+            return False
+
+        command = ["explorer.exe", windows_path]
+    else:
+        command = _linux_file_manager_command(resolved_output_folder)
+
+        if command is None:
+            return False
+
     try:
-        import tkinter as tk
-        from tkinter import filedialog
-    except ImportError:
-        return None
-
-    try:
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
-
-        selected_path = filedialog.askdirectory(
-            title = "Choose an EgoModelKit output folder",
-            mustexist = False,
+        subprocess.Popen(
+            command,
+            stdout = subprocess.DEVNULL,
+            stderr = subprocess.DEVNULL,
+            start_new_session = True,
         )
+    except OSError:
+        return False
 
-        root.destroy()
+    return True
 
-        return selected_path or None
-    except Exception:
-        return None
+def _linux_file_manager_command(output_folder: Path) -> list[str] | None:
+    """ Return a command that opens a Linux directory in a graphical file manager. """
+    for executable_name in (
+        "nautilus",
+        "dolphin",
+        "nemo",
+        "thunar",
+        "pcmanfm",
+        "xdg-open",
+    ):
+        executable = shutil.which(executable_name)
+
+        if executable is not None:
+            return [executable, str(output_folder)]
+
+    return None

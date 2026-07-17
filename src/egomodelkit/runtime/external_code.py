@@ -58,7 +58,7 @@ EGOVIZML_PIN: Final[ExternalModelCodePin] = ExternalModelCodePin(
     model_id = "egovizml",
     fork_repository_url = f"{PROJECT_GITHUB_BASE_URL}/EgoVizML",
     upstream_repository_url = "https://github.com/adeshkadambi/EgoVizML",
-    commit_sha = "c3e4117be73f9c1ac2684dd6d4229f32876d25ec",
+    commit_sha = "c129075eef8f818947b250d1116d00267c4a9455",
 )
 
 DETIC_PIN: Final[ExternalModelCodePin] = ExternalModelCodePin(

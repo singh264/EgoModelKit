@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Final, Literal
@@ -334,6 +335,7 @@ def write_bandini_metric_files(
     video_level_metrics_summary_path: Path,
     metrics_config_path: Path,
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
+    diagnostic_log: Callable[[str], None] | None = None,
 ) -> None:
     """ Write frame, segment, video, session, summary, and config files. """
     mappings = load_input_video_mappings(input_manifest_path = input_manifest_path)
@@ -347,6 +349,7 @@ def write_bandini_metric_files(
         mappings = mappings,
         subclip_mappings = subclip_mappings,
         config = config,
+        diagnostic_log = diagnostic_log,
     )
     
     segments = build_interaction_segments(frame_predictions, config = config)
@@ -487,9 +490,15 @@ def load_frame_interaction_predictions(
     mappings: list[InputVideoMapping],
     subclip_mappings: list[SubclipTimingMapping] | None = None,
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
+    diagnostic_log: Callable[[str], None] | None = None,
 ) -> list[FrameInteractionPrediction]:
     """ Convert Shan contact states into raw and pooled interaction predictions. """
     if not shan_outputs_dir.is_dir():
+        _write_diagnostic(
+            diagnostic_log,
+            f"Shan directory does not exist: {shan_outputs_dir}",
+        )
+
         return []
 
     raw_predictions: list[FrameInteractionPrediction] = []
@@ -497,6 +506,36 @@ def load_frame_interaction_predictions(
     session_frame_offsets: dict[str, int] = {}
     paths_by_clip = _prediction_paths_by_clip(shan_outputs_dir)
     require_subclip_mapping = subclip_mappings is not None
+
+    clip_counts = {
+        name: len(paths)
+        for name, paths in paths_by_clip.items()
+    }
+
+    staged_stems = [
+        mapping.staged_video_stem
+        for mapping in mappings
+    ]
+
+    subclip_names = [
+        mapping.subclip_name
+        for mapping in (subclip_mappings or [])
+    ]
+
+    _write_diagnostic(
+        diagnostic_log,
+        f"discovered Shan clip groups={clip_counts}",
+    )
+
+    _write_diagnostic(
+        diagnostic_log,
+        f"input manifest staged stems={staged_stems}",
+    )
+
+    _write_diagnostic(
+        diagnostic_log,
+        f"subclip manifest names={subclip_names}",
+    )
 
     subclip_timings = {
         (
@@ -520,6 +559,19 @@ def load_frame_interaction_predictions(
         ]
         
         clip_groups.sort(key = lambda item: _subclip_sort_key(item[0]))
+        
+        matched_clip_names = [
+            clip_name
+            for clip_name, _prediction_paths in clip_groups
+        ]
+
+        _write_diagnostic(
+            diagnostic_log,
+            (
+                f"staged stem {mapping.staged_video_stem!r} "
+                f"matched Shan folders={matched_clip_names}"
+            ),
+        )
 
         for clip_name, prediction_paths in clip_groups:
             subclip_timing = subclip_timings.get(
@@ -636,7 +688,17 @@ def load_frame_interaction_predictions(
                     )
                 )
 
-    return apply_statepool(raw_predictions, config = config)
+    pooled_predictions = apply_statepool(
+        raw_predictions,
+        config = config,
+    )
+
+    _write_diagnostic(
+        diagnostic_log,
+        f"frame predictions produced={len(pooled_predictions)}",
+    )
+
+    return pooled_predictions
 
 def apply_statepool(
     frame_predictions: list[FrameInteractionPrediction],
@@ -1089,6 +1151,13 @@ def _metric_notes(prefix: str) -> str:
         "hands visible in the frame may affect contact-state metrics. These are "
         "hand-use interaction metrics, not clinical scores."
     )
+
+def _write_diagnostic(
+    diagnostic_log: Callable[[str], None] | None,
+    message: str,
+) -> None:
+    if diagnostic_log is not None:
+        diagnostic_log(message)
 
 def _prediction_paths_by_clip(shan_outputs_dir: Path) -> dict[str, list[Path]]:
     """ Group Shan JSON frame predictions by subclip folder.

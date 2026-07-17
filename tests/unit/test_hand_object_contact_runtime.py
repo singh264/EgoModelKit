@@ -135,6 +135,30 @@ def test_ensure_runtime_image_builds_when_image_is_missing() -> None:
         f"download-tool={HAND_OBJECT_DETECTOR_WEIGHTS_PIN.download_tool}"
     ) in build_command
     
+    assert (
+        f"PYTORCH_VERSION="
+        f"{DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.pytorch_version}"
+        in build_command
+    )
+
+    assert (
+        f"TORCHVISION_VERSION="
+        f"{DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.torchvision_version}"
+        in build_command
+    )
+
+    assert (
+        f"TORCHAUDIO_VERSION="
+        f"{DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.torchaudio_version}"
+        in build_command
+    )
+
+    assert (
+        f"TORCH_CUDA_ARCH_LIST="
+        f"{DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.torch_cuda_arch_list}"
+        in build_command
+    )
+    
     assert any("preparing it now" in message for message in messages)
     assert "Packaged hand-object-contact runtime image is ready." in messages
 
@@ -241,7 +265,7 @@ def test_run_hand_object_contact_executes_hidden_runtime(tmp_path: Path) -> None
         "--rm",
         "--gpus",
         "all",
-        "nvidia/cuda:11.3.1-base-ubuntu20.04",
+        "nvidia/cuda:12.8.1-base-ubuntu22.04",
         "nvidia-smi",
     ]
 

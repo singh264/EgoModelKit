@@ -10,6 +10,13 @@ from dataclasses import dataclass, field
 OutputLineCallback = Callable[[str], None]
 CommandRunner = Callable[[list[str]], int]
 
+@dataclass(frozen = True, slots = True)
+class CommandResult:
+    """ Captured command result used by maintenance operations. """
+    returncode: int
+    stdout: str
+    stderr: str
+
 class CommandCancelledError(RuntimeError):
     """ Raised when a running command is cancelled by the GUI. """
     
@@ -100,6 +107,22 @@ def subprocess_runner(command: list[str]) -> int:
     completed = subprocess.run(command, check=False)
 
     return completed.returncode
+
+
+def capturing_subprocess_runner(command: list[str]) -> CommandResult:
+    """ Run a command and capture text output without raising. """
+    completed = subprocess.run(
+        command,
+        check = False,
+        capture_output = True,
+        text = True,
+    )
+
+    return CommandResult(
+        returncode = completed.returncode,
+        stdout = completed.stdout,
+        stderr = completed.stderr,
+    )
 
 def streaming_subprocess_runner(
     command: list[str],

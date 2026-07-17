@@ -18,7 +18,16 @@ from egomodelkit.models.adl_recognition import (
 )
 from egomodelkit.models.hand_object_contact import HandObjectContactRequest
 from egomodelkit.progress import external_progress_line, parse_external_progress_line
-from egomodelkit.runtime.commands import subprocess_runner
+from egomodelkit.runtime.commands import (
+    CommandResult,
+    capturing_subprocess_runner,
+    subprocess_runner,
+)
+from egomodelkit.runtime.docker_images import (
+    DockerImageIdentity,
+    build_runtime_image_identity,
+    remove_stale_runtime_images,
+)
 from egomodelkit.runtime.external_code import (
     DETECTRON2_PIN,
     DETIC_PIN,
@@ -40,6 +49,7 @@ from egomodelkit.runtime.preflight import (
 )
 
 CommandRunner = Callable[[list[str]], int]
+CaptureRunner = Callable[[list[str]], CommandResult]
 StreamingCommandRunner = Callable[[list[str], ProgressReporter], int]
 
 AdlRecognitionStage = Literal["extract", "predict", "finalize"]
@@ -59,8 +69,8 @@ DETIC_WEIGHTS_FILENAME: Final[str] = DETIC_WEIGHTS_PIN.filename
 class AdlRecognitionRuntimeSpec:
     """ Build and execution settings for the hidden adl-recognition runtime. """
     docker_executable: str
-    core_image_tag: str
-    detic_image_tag: str
+    core_image_repository: str
+    detic_image_repository: str
     container_input_dir: PurePosixPath
     container_output_dir: PurePosixPath
     work_dir_name: str
@@ -80,6 +90,7 @@ class AdlRecognitionRuntimeSpec:
     torchvision_version: str
     torchaudio_version: str
     pytorch_cuda_index_url: str
+    torch_cuda_arch_list: str
     
     detic_confidence_threshold: float
     detic_num_workers: int
@@ -91,11 +102,21 @@ class AdlRecognitionRuntimeSpec:
     host_uid: int
     host_gid: int
 
+    @property
+    def core_image_tag(self) -> str:
+        """ Return the content-addressed ADL core image tag. """
+        return adl_core_image_identity(self).tag
+
+    @property
+    def detic_image_tag(self) -> str:
+        """ Return the content-addressed Detic image tag. """
+        return adl_detic_image_identity(self).tag
+
 DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC: Final[AdlRecognitionRuntimeSpec] = (
     AdlRecognitionRuntimeSpec(
         docker_executable = "docker",
-        core_image_tag = "egomodelkit-adl-recognition-core:dev",
-        detic_image_tag = "egomodelkit-adl-recognition-detic:dev",
+        core_image_repository = "egomodelkit-adl-recognition-core",
+        detic_image_repository = "egomodelkit-adl-recognition-detic",
         container_input_dir = PurePosixPath("/workspace/input"),
         container_output_dir = PurePosixPath("/workspace/output"),
         work_dir_name = "adl_recognition_work",
@@ -111,10 +132,11 @@ DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC: Final[AdlRecognitionRuntimeSpec] = (
         detectron2_commit_sha = DETECTRON2_COMMIT_SHA,
         detic_weights_url = DETIC_WEIGHTS_URL,
         detic_weights_filename = DETIC_WEIGHTS_FILENAME,
-        pytorch_version = "1.10.0+cu113",
-        torchvision_version = "0.11.1+cu113",
-        torchaudio_version = "0.10.0+cu113",
-        pytorch_cuda_index_url = "https://download.pytorch.org/whl/cu113",
+        pytorch_version = "2.11.0",
+        torchvision_version = "0.26.0",
+        torchaudio_version = "2.11.0",
+        pytorch_cuda_index_url = "https://download.pytorch.org/whl/cu128",
+        torch_cuda_arch_list = "7.5;8.0;8.6;8.9;9.0;12.0+PTX",
         detic_confidence_threshold = 0.3,
         detic_num_workers = 1,
         video_processing_config = DEFAULT_VIDEO_PROCESSING_CONFIG,
@@ -180,24 +202,52 @@ def _detic_docker_build_arguments(runtime_spec: AdlRecognitionRuntimeSpec) -> li
         f"TORCHAUDIO_VERSION={runtime_spec.torchaudio_version}",
         "--build-arg",
         f"PYTORCH_CUDA_INDEX_URL={runtime_spec.pytorch_cuda_index_url}",
+        "--build-arg",
+        f"TORCH_CUDA_ARCH_LIST={runtime_spec.torch_cuda_arch_list}",
     ]
+
+def adl_core_image_identity(
+    runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
+) -> DockerImageIdentity:
+    """ Return the deterministic identity for the ADL core image. """
+    return build_runtime_image_identity(
+        runtime_name = "adl-recognition-core",
+        repository = runtime_spec.core_image_repository,
+        context_dir = _container_resource_dir(),
+        build_arguments = _core_docker_build_arguments(runtime_spec),
+    )
+
+
+def adl_detic_image_identity(
+    runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
+) -> DockerImageIdentity:
+    """ Return the deterministic identity for the ADL Detic image. """
+    return build_runtime_image_identity(
+        runtime_name = "adl-recognition-detic",
+        repository = runtime_spec.detic_image_repository,
+        context_dir = _detic_resource_dir(),
+        build_arguments = _detic_docker_build_arguments(runtime_spec),
+    )
+
 
 def ensure_core_runtime_image(
     *,
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
     streaming_command_runner: StreamingCommandRunner | None = None,
+    capture_runner: CaptureRunner = capturing_subprocess_runner,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Build the ADL core image only when it is missing. """
     _ensure_runtime_image(
-        image_tag = runtime_spec.core_image_tag,
+        image_identity = adl_core_image_identity(runtime_spec),
         dockerfile_path = _container_resource_dir() / "Dockerfile",
         context_dir = _container_resource_dir(),
         build_arguments = _core_docker_build_arguments(runtime_spec),
         runtime_spec = runtime_spec,
         command_runner = command_runner,
         streaming_command_runner = streaming_command_runner,
+        capture_runner = capture_runner,
         progress = progress,
         runtime_name = "adl-recognition core",
     )
@@ -207,30 +257,33 @@ def ensure_detic_runtime_image(
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
     streaming_command_runner: StreamingCommandRunner | None = None,
+    capture_runner: CaptureRunner = capturing_subprocess_runner,
     progress: ProgressReporter = _ignore_progress,
 ) -> None:
     """ Build the ADL Detic image only when it is missing. """
     _ensure_runtime_image(
-        image_tag = runtime_spec.detic_image_tag,
+        image_identity = adl_detic_image_identity(runtime_spec),
         dockerfile_path = _detic_resource_dir() / "Dockerfile",
         context_dir = _detic_resource_dir(),
         build_arguments = _detic_docker_build_arguments(runtime_spec),
         runtime_spec = runtime_spec,
         command_runner = command_runner,
         streaming_command_runner = streaming_command_runner,
+        capture_runner = capture_runner,
         progress = progress,
         runtime_name = "adl-recognition Detic",
     )
 
 def _ensure_runtime_image(
     *,
-    image_tag: str,
+    image_identity: DockerImageIdentity,
     dockerfile_path: Path,
     context_dir: Path,
     build_arguments: list[str],
     runtime_spec: AdlRecognitionRuntimeSpec,
     command_runner: CommandRunner,
     streaming_command_runner: StreamingCommandRunner | None = None,
+    capture_runner: CaptureRunner,
     progress: ProgressReporter,
     runtime_name: str,
 ) -> None:
@@ -240,7 +293,7 @@ def _ensure_runtime_image(
         runtime_spec.docker_executable,
         "image",
         "inspect",
-        image_tag,
+        image_identity.tag,
     ]
     
     if command_runner(inspect_command) == 0:
@@ -258,7 +311,8 @@ def _ensure_runtime_image(
         "-f",
         str(dockerfile_path),
         "-t",
-        image_tag,
+        image_identity.tag,
+        *image_identity.label_arguments,
         *build_arguments,
         str(context_dir),
     ]
@@ -274,6 +328,12 @@ def _ensure_runtime_image(
         )
     
     progress(f"Packaged {runtime_name} runtime image is ready.")
+    remove_stale_runtime_images(
+        docker_executable = runtime_spec.docker_executable,
+        current_image = image_identity,
+        capture_runner = capture_runner,
+        progress = progress,
+    )
 
 def build_core_run_command(
     request: AdlRecognitionRequest,
@@ -417,6 +477,7 @@ def run_adl_recognition(
     runtime_spec: AdlRecognitionRuntimeSpec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
     command_runner: CommandRunner = subprocess_runner,
     streaming_command_runner: StreamingCommandRunner | None = None,
+    capture_runner: CaptureRunner = capturing_subprocess_runner,
     executable_locator: ExecutableLocator | None = None,
     platform_detector: PlatformDetector | None = None,
     progress: ProgressReporter = _ignore_progress,
@@ -450,6 +511,7 @@ def run_adl_recognition(
         runtime_spec = runtime_spec,
         command_runner = command_runner,
         streaming_command_runner = streaming_command_runner,
+        capture_runner = capture_runner,
         progress = progress,
     )
     
@@ -541,6 +603,7 @@ def run_adl_recognition(
         runtime_spec = runtime_spec,
         command_runner = command_runner,
         streaming_command_runner = streaming_command_runner,
+        capture_runner = capture_runner,
         progress = progress,
     )
     
@@ -617,6 +680,7 @@ def run_adl_recognition(
             runtime_spec = runtime_spec.hand_object_contact_runtime_spec,
             command_runner = command_runner,
             streaming_command_runner = streaming_command_runner,
+            capture_runner = capture_runner,
             executable_locator = executable_locator,
             platform_detector = platform_detector,
             progress = _global_frame_progress(

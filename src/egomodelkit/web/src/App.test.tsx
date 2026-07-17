@@ -416,6 +416,18 @@ async function renderCompletedResultsWithCustomProgress(
             };
         }
 
+        if (url === "/api/open-output-folder") {
+            return {
+                ok: true,
+                status: 200,
+                json: async () => ({
+                    opened: true,
+                    runId: "run-1",
+                    outputFolder: "/tmp/egomodelkit-results",
+                }),
+            };
+        }
+
         throw new Error(`Unexpected fetch call: ${url}`);
     });
 
@@ -1343,7 +1355,7 @@ describe("App", () => {
     });
 
     it(
-        "falls back to manually entered output path when the backend picker is unavailable",
+        "shows an error without a manual path fallback when the backend picker is unavailable",
         async () => {
             const user = userEvent.setup();
 
@@ -1354,45 +1366,24 @@ describe("App", () => {
                     status: 405,
                     json: async () => ({}),
                 }),
-            );        
-            
-            vi.spyOn(window, "prompt").mockReturnValue("/manual/results");
+            );
+
+            const promptSpy = vi.spyOn(window, "prompt");
 
             await navigateToOutputStep(user);
 
             await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
 
-            expect(window.prompt).toHaveBeenCalledWith(
-                "Enter the output folder path:",
-                "/Users/Research/Desktop/EgoModelKit Results"
+            expect(promptSpy).not.toHaveBeenCalled();
+
+            expect(screen.getByRole("alert")).toHaveTextContent(
+                "The native output folder picker is not available on this machine.",
             );
 
-            expect(screen.getByText("/manual/results")).toBeInTheDocument();
-            expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+            expect(screen.getByText("No output folder selected")).toBeInTheDocument();
+            expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
         }
     );
-
-    it("keeps output selection empty when the fallback prompt is cancelled", async () => {
-        const user = userEvent.setup();
-
-        vi.stubGlobal(
-            "fetch",
-            vi.fn().mockResolvedValue({
-                ok: false,
-                status: 404,
-                json: async () => ({}),
-            }),
-        );
-
-        vi.spyOn(window, "prompt").mockReturnValue(null);
-
-        await navigateToOutputStep(user);
-
-        await user.click(screen.getByRole("button", { name: "Choose Output Folder"}));
-
-        expect(screen.getByText("No output folder selected")).toBeInTheDocument();
-        expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
-    });
 
     it("shows an error if output folder selection fails", async () => {
         const user = userEvent.setup();
@@ -1580,23 +1571,21 @@ describe("App", () => {
         const fetchMock = vi
             .fn()
             .mockResolvedValueOnce({
-                ok: false,
-                status: 405,
-                json: async () => ({}),
+                ok: true,
+                status: 200,
+                json: async () => ({ outputRoot: "/manual/missing-results" }),
             })
             .mockResolvedValueOnce({
                 ok: false,
                 status: 400,
                 json: async () => ({
-                    detail: 
-                        "Output folder does not exist. " + 
+                    detail:
+                        "Output folder does not exist. " +
                         "Choose an existing folder before continuing.",
                 }),
             });
 
         stubFetchWithModels(fetchMock);
-
-        vi.spyOn(window, "prompt").mockReturnValue("/manual/missing-results");
 
         await navigateToOutputStep(user);
         
@@ -2581,6 +2570,16 @@ describe("App", () => {
                     ok: false,
                     status: 500,
                     json: async () => ({}),
+                })
+                .mockResolvedValueOnce({
+                    ok: false,
+                    status: 500,
+                    json: async () => ({}),
+                })
+                .mockResolvedValueOnce({
+                    ok: false,
+                    status: 500,
+                    json: async () => ({}),
                 });
             
             stubFetchWithModels(fetchMock);
@@ -2595,9 +2594,9 @@ describe("App", () => {
             await user.click(screen.getByRole("button", { name: "Continue" }));
             await user.click(screen.getByRole("button", { name: "Run Model" }));
 
-            expect(await screen.findByRole("alert")).toHaveTextContent(
-                "Unable to refresh run progress.",
-            );
+            expect(
+                await screen.findByRole("alert", {}, { timeout: 3500 }),
+            ).toHaveTextContent("Unable to refresh run progress.");
 
             expect(screen.getByText("Running model...")).toBeInTheDocument();
         }
@@ -2869,25 +2868,30 @@ describe("App", () => {
                     headers: {
                         "Content-Type": "application/json",
                     },
-                    body: JSON.stringify({ runId: "run-1" }),
+                    body: JSON.stringify({
+                        runId: "run-1",
+                        outputFolder: "/tmp/egomodelkit-results/run-1",
+                    }),
                 }),
             );
         });
     });
 
-    it("shows an alert when opening the output folder is unavailable", async () => {
+    it("shows the backend detail when the saved output folder is unavailable", async () => {
         const user = userEvent.setup();
-        
+
         await renderCompletedResultsWithFetchMock(user, {
             ok: false,
-            status: 405,
-            json: async () => ({}),
+            status: 404,
+            json: async () => ({
+                detail: "The saved output folder no longer exists.",
+            }),
         });
 
         await user.click(screen.getByRole("button", { name: "Open Output Folder" }));
 
         expect(await screen.findByRole("alert")).toHaveTextContent(
-            "Opening output folders is not available in this environment."
+            "The saved output folder no longer exists.",
         );
     });
 
@@ -3060,6 +3064,22 @@ describe("App", () => {
             });
 
             expect(screen.getByText("/tmp/egomodelkit-results")).toBeInTheDocument();
+
+            await user.click(
+                screen.getByRole("button", { name: "Open Output Folder" }),
+            );
+
+            await waitFor(() => {
+                expect(fetch).toHaveBeenCalledWith(
+                    "/api/open-output-folder",
+                    expect.objectContaining({
+                        body: JSON.stringify({
+                            runId: "run-1",
+                            outputFolder: "/tmp/egomodelkit-results",
+                        }),
+                    }),
+                );
+            });
         }
     );
 
@@ -3550,4 +3570,24 @@ it("shows the selected ADL dominant hand on completed results", async () => {
     expect(await screen.findByRole("heading", {name: "Run completed"})).toBeInTheDocument();
     expect(screen.getByText("Dominant hand:")).toBeInTheDocument();
     expect(screen.getByText("Right")).toBeInTheDocument();
+});
+
+it("keeps output selection empty when the backend picker returns a blank path", async () => {
+    const user = userEvent.setup();
+
+    vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+            ok: true,
+            status: 200,
+            json: async () => ({ outputRoot: "   " }),
+        }),
+    );
+
+    await navigateToOutputStep(user);
+
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder"}));
+
+    expect(screen.getByText("No output folder selected")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
 });

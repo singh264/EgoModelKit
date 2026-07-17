@@ -26,6 +26,7 @@ from egomodelkit.gui_backend import (
     _input_label,
     _model_display_name,
     _normalize_output_root,
+    _open_output_folder,
     _register_operation,
     _run_adl_recognition_for_gui,
     _run_hand_object_contact_for_gui,
@@ -289,16 +290,13 @@ def test_run_endpoint_uses_injected_runner_without_docker(tmp_path: Path) -> Non
 
     runtime_log = (
         Path(progress_body["outputFolder"])
-        / run_id
         / "logs"
         / "runtime.log"
     )
 
     assert "Fake model step" in runtime_log.read_text(encoding="utf-8")
     
-    output_folder = Path(progress_body["outputFolder"])
-    
-    run_dir = output_folder / run_id
+    run_dir = Path(progress_body["outputFolder"])
 
     assert (
         run_dir / "visual_outputs" / "hand_object_contact" / "frame_det.png"
@@ -349,7 +347,7 @@ def test_run_endpoint_organizes_hand_object_runtime_outputs(tmp_path: Path) -> N
 
     assert progress_body["status"] == "completed"
 
-    run_dir = Path(progress_body["outputFolder"]) / run_id
+    run_dir = Path(progress_body["outputFolder"])
 
     assert (
         run_dir / "visual_outputs" / "hand_object_contact" / "frame_det.png"
@@ -438,7 +436,7 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
 
     assert progress_body["status"] == "completed"
 
-    run_dir = Path(progress_body["outputFolder"]) / run_id
+    run_dir = Path(progress_body["outputFolder"])
 
     metrics_config = json.loads(
         (
@@ -555,11 +553,11 @@ def test_open_output_folder_uses_tracked_run(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    opened_urls: list[str] = []
-    
-    def fake_open(url: str) -> bool:
-        opened_urls.append(url)
-        
+    opened_folders: list[Path] = []
+
+    def fake_open_output_folder(output_folder: Path) -> bool:
+        opened_folders.append(output_folder)
+
         return True
     
     def fake_runner(
@@ -569,8 +567,11 @@ def test_open_output_folder_uses_tracked_run(
     ) -> None:
         progress("Fake model step")
     
-    monkeypatch.setattr("egomodelkit.gui_backend.webbrowser.open", fake_open)
-    
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._open_output_folder",
+        fake_open_output_folder,
+    )
+        
     client = TestClient(
         create_app(hand_object_runner = fake_runner),
     )
@@ -598,8 +599,11 @@ def test_open_output_folder_uses_tracked_run(
     
     assert open_response.status_code == 200
     assert open_response.json()["opened"] is True
-    assert opened_urls
-    assert opened_urls[0].startswith("file://")
+
+    expected_run_dir = tmp_path / "results" / run_id
+
+    assert opened_folders == [expected_run_dir]
+    assert open_response.json()["outputFolder"] == str(expected_run_dir)
     
 def test_open_output_folder_rejects_unknown_run() -> None:
     client = TestClient(create_app())
@@ -629,7 +633,9 @@ def _wait_for_run_completion(
 
     raise AssertionError("Run did not complete.")
 
-def test_select_output_folder_returns_404_when_picker_unavailable(monkeypatch) -> None:
+def test_select_output_folder_returns_empty_path_when_picker_is_cancelled(
+    monkeypatch,
+) -> None:
     monkeypatch.setattr(
         "egomodelkit.gui_backend._select_output_folder",
         lambda: None,
@@ -639,7 +645,25 @@ def test_select_output_folder_returns_404_when_picker_unavailable(monkeypatch) -
 
     response = client.post("/api/select-output-folder")
 
-    assert response.status_code == 404
+    assert response.status_code == 200
+    assert response.json() == {"outputRoot": ""}
+
+
+def test_select_output_folder_returns_503_when_picker_cannot_start(monkeypatch) -> None:
+    def unavailable_picker() -> None:
+        raise gui_backend.NativeOutputFolderPickerError("picker failed")
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._select_output_folder",
+        unavailable_picker,
+    )
+
+    client = TestClient(create_app())
+
+    response = client.post("/api/select-output-folder")
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "picker failed"}
 
 def test_select_output_folder_returns_selected_path(monkeypatch) -> None:
     monkeypatch.setattr(
@@ -882,14 +906,12 @@ def test_run_endpoint_uses_injected_adl_runner(tmp_path: Path) -> None:
 
     runtime_log = (
         Path(body["outputFolder"])
-        / run_id
         / "logs"
         / "runtime.log"
     )
 
     progress_log = (
         Path(body["outputFolder"])
-        / run_id
         / "logs"
         / "progress.jsonl"
     )
@@ -1167,6 +1189,7 @@ def test_model_display_name_accepts_adl_and_rejects_unknown() -> None:
         _model_display_name("unknown")
 
 def test_select_output_folder_dispatches_by_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("egomodelkit.gui_backend._is_wsl", lambda: False)
     monkeypatch.setattr("egomodelkit.gui_backend.platform.system", lambda: "Darwin")
     monkeypatch.setattr("egomodelkit.gui_backend._select_output_folder_macos", lambda: "/mac")
     assert _select_output_folder() == "/mac"
@@ -1176,8 +1199,11 @@ def test_select_output_folder_dispatches_by_platform(monkeypatch: pytest.MonkeyP
     assert _select_output_folder() == "C:/out"
     
     monkeypatch.setattr("egomodelkit.gui_backend.platform.system", lambda: "Linux")
-    monkeypatch.setattr("egomodelkit.gui_backend._select_output_folder_tkinter", lambda: "/linux")
+    monkeypatch.setattr("egomodelkit.gui_backend._select_output_folder_linux", lambda: "/linux")
     assert _select_output_folder() == "/linux"
+
+    monkeypatch.setattr("egomodelkit.gui_backend._is_wsl", lambda: True)
+    assert _select_output_folder() == "C:/out"
 
 def test_select_output_folder_macos_handles_success_cancel_and_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -1206,26 +1232,67 @@ def test_select_output_folder_macos_handles_success_cancel_and_failure(
 def test_select_output_folder_windows_handles_success_cancel_and_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    commands: list[tuple[list[str], dict[str, object]]] = []
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._resolve_windows_powershell_executable",
+        lambda: "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+    )
+    monkeypatch.setattr("egomodelkit.gui_backend._is_wsl", lambda: True)
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.Path.is_dir",
+        lambda self: str(self) == "/mnt/c/Windows/System32",
+    )
+
+    def successful_run(command, **kwargs):
+        commands.append((command, kwargs))
+        return SimpleNamespace(returncode = 0, stdout = "C:/out\n", stderr = "")
+
     monkeypatch.setattr(
         "egomodelkit.gui_backend.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode = 0, stdout = "C:/out\n"),
+        successful_run,
     )
-    
+
     assert _select_output_folder_windows() == "C:/out"
-    
+    assert commands[0][0][0] == (
+        "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+    )
+    assert "-STA" in commands[0][0]
+    assert "-EncodedCommand" in commands[0][0]
+    assert commands[0][1]["cwd"] == "/mnt/c/Windows/System32"
+
     monkeypatch.setattr(
         "egomodelkit.gui_backend.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode = 0, stdout = "\n"),
+        lambda *args, **kwargs: SimpleNamespace(returncode = 2, stdout = "", stderr = ""),
     )
-    
+
     assert _select_output_folder_windows() is None
-    
+
     monkeypatch.setattr(
         "egomodelkit.gui_backend.subprocess.run",
-        lambda *args, **kwargs: SimpleNamespace(returncode = 1, stdout = ""),
+        lambda *args, **kwargs: SimpleNamespace(returncode = 1, stdout = "", stderr = ""),
     )
-    
-    assert _select_output_folder_windows() is None
+
+    with pytest.raises(
+        gui_backend.NativeOutputFolderPickerError,
+        match = "could not be opened",
+    ):
+        _select_output_folder_windows()
+
+
+def test_select_output_folder_windows_reports_missing_powershell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._resolve_windows_powershell_executable",
+        lambda: None,
+    )
+
+    with pytest.raises(
+        gui_backend.NativeOutputFolderPickerError,
+        match = "could not locate Windows PowerShell",
+    ):
+        _select_output_folder_windows()
 
 def test_select_output_folder_tkinter_handles_missing_tkinter(
     monkeypatch: pytest.MonkeyPatch,
@@ -1504,13 +1571,13 @@ def test_run_endpoint_writes_technical_progress_without_showing_it(
     assert "Checking packaged hand-object-contact runtime image." not in visible_lines
 
     output_folder = Path(progress_body["outputFolder"])
-    runtime_log = output_folder / run_id / "logs" / "runtime.log"
+    runtime_log = output_folder / "logs" / "runtime.log"
 
     assert "Checking packaged hand-object-contact runtime image." in runtime_log.read_text(
         encoding="utf-8",
     )
     
-    progress_log = output_folder / run_id / "logs" / "progress.jsonl"
+    progress_log = output_folder / "logs" / "progress.jsonl"
 
     assert "Checking packaged hand-object-contact runtime image." not in progress_log.read_text(
         encoding="utf-8",
@@ -2161,3 +2228,115 @@ def test_run_start_preflight_policy_covers_adl_and_unknown_models() -> None:
         adl_runner = None,
         runtime_checker_was_injected = False,
     ) is True
+
+
+def test_windows_display_path_is_preserved_in_run_responses_and_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_root = _existing_output_root(tmp_path)
+    windows_output_root = r"C:\Users\researcher\EgoModelKit Results"
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._normalize_output_root",
+        lambda output_root_text: output_root,
+    )
+
+    def fake_runner(input_path: Path, output_dir: Path, progress) -> None:
+        progress("done")
+
+    client = TestClient(create_app(hand_object_runner = fake_runner))
+    start_response = client.post(
+        "/api/runs",
+        data = {
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": windows_output_root,
+        },
+        files = [("files", ("frame.jpg", b"fake-image", "image/jpeg"))],
+    )
+
+    assert start_response.status_code == 200
+    run_id = start_response.json()["runId"]
+    expected_display_path = windows_output_root + "\\" + run_id
+
+    assert start_response.json()["summary"]["outputFolder"] == expected_display_path
+
+    progress_response = _wait_for_run_completion(client, run_id)
+    assert progress_response["outputFolder"] == expected_display_path
+
+    summary_payload = json.loads(
+        (output_root / run_id / "run_summary.json").read_text(encoding = "utf-8")
+    )
+    assert summary_payload["output_folder"] == expected_display_path
+
+
+def test_open_output_folder_accepts_restored_saved_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "run-restored"
+    run_dir = tmp_path / run_id
+    run_dir.mkdir()
+    opened_folders: list[Path] = []
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._open_output_folder",
+        lambda output_folder: opened_folders.append(output_folder) or True,
+    )
+
+    client = TestClient(create_app())
+    response = client.post(
+        "/api/open-output-folder",
+        json = {
+            "runId": run_id,
+            "outputFolder": str(run_dir),
+        },
+    )
+
+    assert response.status_code == 200
+    assert opened_folders == [run_dir]
+    assert response.json()["outputFolder"] == str(run_dir)
+
+
+def test_open_output_folder_rejects_mismatched_restored_saved_path(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "different-run"
+    run_dir.mkdir()
+    client = TestClient(create_app())
+
+    response = client.post(
+        "/api/open-output-folder",
+        json = {
+            "runId": "run-restored",
+            "outputFolder": str(run_dir),
+        },
+    )
+
+    assert response.status_code == 400
+    assert "does not match" in response.json()["detail"]
+
+
+def test_open_output_folder_returns_success_after_file_manager_spawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started_commands: list[list[str]] = []
+
+    def fake_popen(command: list[str], **kwargs):
+        del kwargs
+        started_commands.append(command)
+        return SimpleNamespace()
+
+    monkeypatch.setattr("egomodelkit.gui_backend.platform.system", lambda: "Linux")
+    monkeypatch.setattr("egomodelkit.gui_backend._is_wsl", lambda: True)
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._wsl_path_to_windows_path",
+        lambda path: r"C:\Users\researcher\results\run-1",
+    )
+    monkeypatch.setattr("egomodelkit.gui_backend.subprocess.Popen", fake_popen)
+
+    assert _open_output_folder(tmp_path) is True
+    assert started_commands == [
+        ["explorer.exe", r"C:\Users\researcher\results\run-1"]
+    ]

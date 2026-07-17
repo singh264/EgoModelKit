@@ -4,10 +4,11 @@ import argparse
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 from typing import Final
 
-PYTHON_EXECUTABLE: Final[str] = "python3.8"
+PYTHON_EXECUTABLE: Final[str] = sys.executable
 SHAN_DEMO_SCRIPT: Final[str] = "demo.py"
 
 INPUT_PATH_FLAG: Final[str] = "--input-path"

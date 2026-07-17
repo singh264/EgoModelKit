@@ -201,6 +201,18 @@ def test_ensure_detic_runtime_image_builds_when_missing() -> None:
         in build_command 
     )
     
+    assert f"TORCHAUDIO_VERSION={runtime_spec.torchaudio_version}" in build_command
+
+    assert (
+        f"PYTORCH_CUDA_INDEX_URL={runtime_spec.pytorch_cuda_index_url}"
+        in build_command
+    )
+
+    assert (
+        f"TORCH_CUDA_ARCH_LIST={runtime_spec.torch_cuda_arch_list}"
+        in build_command
+    )
+    
     assert "Packaged adl-recognition Detic runtime image is ready." in messages
     
 def test_build_core_command_mounts_input_and_output(tmp_path: Path) -> None:
@@ -667,7 +679,9 @@ def test_build_output_ownership_repair_command_restores_host_ownership(
 def test_detic_dockerfile_configures_detectron2_import_smoke_test() -> None:
     dockerfile_text = (_detic_resource_dir() / "Dockerfile").read_text()
     
-    assert "python3.8 -m pip install --no-build-isolation -e ." in dockerfile_text
+    assert "python3.10 -m pip install" in dockerfile_text
+    assert "--no-build-isolation" in dockerfile_text
+    assert "-e ." in dockerfile_text
     assert "PYTHONPATH" in dockerfile_text
     assert "/opt/detectron2" in dockerfile_text
     assert "/opt/Detic" in dockerfile_text

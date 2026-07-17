@@ -28,6 +28,7 @@ from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
     HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
 )
+from egomodelkit.progress import write_runtime_log_line
 
 InputScenario = Literal[
     "hand-object-single-image",
@@ -77,8 +78,9 @@ class OutputPreviewContext:
 
 @dataclass(frozen = True, slots = True)
 class RunOutputLayout:
-    """ Stable output-folder paths for one EgoModelKit run. """
+    """ Stable internal and user-facing paths for one EgoModelKit run. """
     run_dir: Path
+    display_run_dir: str | None = None
     
     @property
     def readme_path(self) -> Path:
@@ -158,7 +160,13 @@ class RunOutputLayout:
     
     @property
     def output_folder_path(self) -> Path:
-        return self.run_dir.parent
+        """ Return the actual run folder used for file operations. """
+        return self.run_dir
+
+    @property
+    def display_output_folder(self) -> str:
+        """ Return the host-style run folder shown to the user. """
+        return self.display_run_dir or str(self.run_dir)
     
     @property
     def session_level_metrics_path(self) -> Path:
@@ -176,15 +184,31 @@ class RunOutputLayout:
     def metrics_config_path(self) -> Path:
         return self.post_processing_dir / METRICS_CONFIG_FILENAME
     
+@dataclass(frozen = True, slots = True)
+class _AdlMetricInputPaths:
+    """ Runtime paths used before ADL outputs are reorganized. """
+    shan_outputs_dir: Path
+    input_manifest_path: Path
+    subclip_manifest_path: Path
+    metrics_config_path: Path
+
 def build_run_id(now: datetime | None = None) -> str:
     """ Return a neutral run id safe for privacy-sensitive workflows. """
     timestamp = now if now is not None else datetime.now().astimezone()
     
     return f"run-{timestamp:%Y-%m-%d-%H%M%S}"
 
-def build_run_output_layout(output_root: Path, *, run_id: str) -> RunOutputLayout:
-    """ Return the output layout for one run under a user-selected output root. """
-    return RunOutputLayout(run_dir = output_root / run_id)
+def build_run_output_layout(
+    output_root: Path,
+    *,
+    run_id: str,
+    display_run_dir: str | None = None,
+) -> RunOutputLayout:
+    """ Return one run layout with separate internal and display paths. """
+    return RunOutputLayout(
+        run_dir = output_root / run_id,
+        display_run_dir = display_run_dir,
+    )
 
 def infer_input_scenario(*, model_id: str, input_path: Path) -> InputScenario:
     """ Infer the GUI/output-preview scenario from a model id and input path. """
@@ -734,14 +758,38 @@ def finalize_runtime_outputs(
         return
 
     if model_id == ADL_RECOGNITION_MODEL_ID:
-        _organize_adl_runtime_outputs(layout)
+        metric_inputs = _resolve_adl_metric_input_paths(layout)
         
-        config = read_video_processing_config(layout.metrics_config_path)
+        expected_prediction_count = _count_shan_prediction_files(
+            metric_inputs.shan_outputs_dir
+        )
         
+        manifest_has_subclips = _csv_has_data_rows(
+            metric_inputs.subclip_manifest_path
+        )
+
+        _write_adl_metric_input_diagnostics(
+            layout = layout,
+            metric_inputs = metric_inputs,
+            expected_prediction_count = expected_prediction_count,
+            manifest_has_subclips = manifest_has_subclips,
+        )
+
+        if manifest_has_subclips and expected_prediction_count == 0:
+            raise RuntimeError(
+                "ADL inference produced a subclip manifest but no Shan JSON "
+                "frame predictions were found for Bandini metric computation. "
+                f"Resolved Shan directory: {metric_inputs.shan_outputs_dir}"
+            )
+
+        config = read_video_processing_config(
+            metric_inputs.metrics_config_path
+        )
+
         write_bandini_metric_files(
-            shan_outputs_dir = layout.adl_shan_outputs_dir,
-            input_manifest_path = layout.adl_input_manifest_path,
-            subclip_manifest_path = layout.adl_subclip_manifest_path,
+            shan_outputs_dir = metric_inputs.shan_outputs_dir,
+            input_manifest_path = metric_inputs.input_manifest_path,
+            subclip_manifest_path = metric_inputs.subclip_manifest_path,
             frame_level_predictions_path = layout.frame_level_predictions_path,
             interaction_segments_path = layout.interaction_segments_path,
             video_level_metrics_path = layout.video_level_metrics_path,
@@ -749,8 +797,38 @@ def finalize_runtime_outputs(
             video_level_metrics_summary_path = layout.video_level_metrics_summary_path,
             metrics_config_path = layout.metrics_config_path,
             config = config,
+            diagnostic_log = lambda message: write_runtime_log_line(
+                layout.runtime_log_path,
+                f"Bandini diagnostics: {message}",
+            ),
         )
-        
+
+        actual_prediction_count = _count_csv_data_rows(
+            layout.frame_level_predictions_path
+        )
+
+        write_runtime_log_line(
+            layout.runtime_log_path,
+            (
+                "Bandini diagnostics: generated Shan JSON count="
+                f"{expected_prediction_count}; frame-level rows written="
+                f"{actual_prediction_count}."
+            ),
+        )
+
+        if actual_prediction_count != expected_prediction_count:
+            raise RuntimeError(
+                "Bandini metric computation did not consume every Shan JSON "
+                "prediction: expected "
+                f"{expected_prediction_count}, wrote {actual_prediction_count}. "
+                f"See {layout.runtime_log_path} for path and matching details."
+            )
+
+        # Preserve the enriched config written by write_bandini_metric_files().
+        _remove_path(layout.run_dir / METRICS_CONFIG_FILENAME)
+
+        _organize_adl_runtime_outputs(layout)
+
         return
 
     raise ValueError(f"Unsupported model id: {model_id}")
@@ -941,6 +1019,149 @@ def _organize_hand_object_runtime_outputs(layout: RunOutputLayout) -> None:
             _move_path(output_path, layout.model_outputs_dir / output_path.name)
 
     _remove_non_contract_root_outputs(layout)
+
+def _resolve_adl_metric_input_paths(
+    layout: RunOutputLayout,
+) -> _AdlMetricInputPaths:
+    """ Resolve authoritative ADL metric inputs before moving runtime files. """
+    runtime_work_dir = layout.run_dir / "adl_recognition_work"
+    staged_adl_dirs = _adl_runtime_staging_dirs(runtime_work_dir)
+
+    shan_outputs_dir = _first_existing_child_dir_path(
+        search_roots = staged_adl_dirs,
+        dirnames = ["subclips_shan", "shan"],
+    )
+
+    if shan_outputs_dir is None:
+        shan_outputs_dir = layout.adl_shan_outputs_dir
+
+    return _AdlMetricInputPaths(
+        shan_outputs_dir = shan_outputs_dir,
+        input_manifest_path = _first_existing_file_path(
+            [
+                layout.run_dir / ADL_INPUT_MANIFEST_FILENAME,
+                layout.adl_input_manifest_path,
+            ]
+        ),
+        subclip_manifest_path = _first_existing_file_path(
+            [
+                layout.run_dir / ADL_SUBCLIP_MANIFEST_FILENAME,
+                layout.adl_subclip_manifest_path,
+            ]
+        ),
+        metrics_config_path = _first_existing_file_path(
+            [
+                layout.run_dir / METRICS_CONFIG_FILENAME,
+                layout.metrics_config_path,
+            ]
+        ),
+    )
+
+def _first_existing_file_path(paths: list[Path]) -> Path:
+    """ Return the first existing file, or the final candidate for errors. """
+    for path in paths:
+        if path.is_file():
+            return path
+
+    return paths[-1]
+
+def _first_existing_child_dir_path(
+    *,
+    search_roots: list[Path],
+    dirnames: list[str],
+) -> Path | None:
+    """ Return the first matching child directory without moving it. """
+    for search_root in search_roots:
+        if not search_root.is_dir():
+            continue
+
+        for dirname in dirnames:
+            candidate = search_root / dirname
+
+            if candidate.is_dir():
+                return candidate
+
+    return None
+
+def _count_shan_prediction_files(shan_outputs_dir: Path) -> int:
+    """ Count Shan JSON frame predictions under one output tree. """
+    if not shan_outputs_dir.is_dir():
+        return 0
+
+    return sum(
+        1
+        for _ in shan_outputs_dir.rglob("*_shan.json")
+    )
+
+def _csv_has_data_rows(path: Path) -> bool:
+    """ Return whether a CSV file contains at least one data row. """
+    if not path.is_file():
+        return False
+
+    with path.open(
+        "r",
+        encoding = "utf-8",
+        newline = "",
+    ) as csv_file:
+        return next(csv.DictReader(csv_file), None) is not None
+
+def _count_csv_data_rows(path: Path) -> int:
+    """ Count data rows in a CSV file. """
+    if not path.is_file():
+        return 0
+
+    with path.open(
+        "r",
+        encoding = "utf-8",
+        newline = "",
+    ) as csv_file:
+        return sum(1 for _ in csv.DictReader(csv_file))
+
+def _write_adl_metric_input_diagnostics(
+    *,
+    layout: RunOutputLayout,
+    metric_inputs: _AdlMetricInputPaths,
+    expected_prediction_count: int,
+    manifest_has_subclips: bool,
+) -> None:
+    """ Persist paths and counts needed to diagnose Bandini failures. """
+    shan_clip_names = (
+        sorted(
+            {
+                prediction_path.parent.name
+                for prediction_path in (
+                    metric_inputs.shan_outputs_dir.rglob("*_shan.json")
+                )
+            }
+        )
+        if metric_inputs.shan_outputs_dir.is_dir()
+        else []
+    )
+
+    messages = [
+        f"run directory={layout.run_dir}",
+        (
+            "run directory is WSL-mounted Windows path="
+            f"{str(layout.run_dir).startswith('/mnt/')}"
+        ),
+        f"resolved Shan directory={metric_inputs.shan_outputs_dir}",
+        (
+            "resolved Shan directory exists="
+            f"{metric_inputs.shan_outputs_dir.is_dir()}"
+        ),
+        f"Shan subclip folders={shan_clip_names}",
+        f"Shan JSON count={expected_prediction_count}",
+        f"input manifest={metric_inputs.input_manifest_path}",
+        f"subclip manifest={metric_inputs.subclip_manifest_path}",
+        f"subclip manifest has rows={manifest_has_subclips}",
+        f"metrics config={metric_inputs.metrics_config_path}",
+    ]
+
+    for message in messages:
+        write_runtime_log_line(
+            layout.runtime_log_path,
+            f"Bandini diagnostics: {message}",
+        )
 
 def _organize_adl_runtime_outputs(layout: RunOutputLayout) -> None:
     layout.results_dir.mkdir(parents = True, exist_ok = True)
@@ -1157,7 +1378,7 @@ def _run_summary_payload(
     return {
         "model_id": model_id,
         "input_names": list(input_names),
-        "output_folder": str(layout.run_dir),
+        "output_folder": layout.display_output_folder,
         "scenario": scenario,
         "status": status,
     }

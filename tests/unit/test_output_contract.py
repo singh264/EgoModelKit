@@ -498,11 +498,11 @@ def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metrics(
     layout.adl_detic_outputs_dir.rmdir()
 
     (runtime_adl_dir / "shan").mkdir(parents=True)
-    (runtime_adl_dir / "shan" / "video001.--1_frame5_shan.pkl").write_bytes(
+    (runtime_adl_dir / "shan" / "video001--1_frame5_shan.pkl").write_bytes(
         b"flat-shan",
     )
 
-    nested_shan_dir = runtime_adl_dir / "subclips_shan" / "video001.--1"
+    nested_shan_dir = runtime_adl_dir / "subclips_shan" / "video001--1"
     nested_shan_dir.mkdir(parents=True)
 
     (nested_shan_dir / "frame_5_shan.pkl").write_bytes(b"nested-shan")
@@ -533,7 +533,7 @@ def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metrics(
         "session_id,input_name,staged_video_stem,subclip_name,subclip_index,"
         "source_start_seconds,source_end_seconds,valid_duration_seconds,"
         "processing_fps,processing_subclip_duration_seconds\n"
-        "session001,clip.mp4,video001,video001.--1,1,0,10,10,30,10\n",
+        "session001,clip.mp4,video001,video001--1,1,0,10,10,30,10\n",
         encoding = "utf-8",
     )
 
@@ -549,9 +549,9 @@ def test_finalize_runtime_outputs_normalizes_adl_outputs_and_writes_metrics(
     assert (layout.model_outputs_dir / "all_preds.pkl").read_bytes() == b"pickle"
     assert (layout.adl_extracted_frames_dir / "video001_001" / "frame_001.jpg").exists()
     assert (layout.adl_detic_outputs_dir / "video001_001" / "frame_001_detic.pkl").exists()
-    assert (layout.adl_shan_outputs_dir / "video001.--1" / "frame_5_shan.json").exists()
-    assert (layout.adl_shan_outputs_dir / "video001.--1" / "frame_5_shan.pkl").exists()
-    assert not (layout.adl_shan_outputs_dir / "video001.--1_frame5_shan.pkl").exists()    
+    assert (layout.adl_shan_outputs_dir / "video001--1" / "frame_5_shan.json").exists()
+    assert (layout.adl_shan_outputs_dir / "video001--1" / "frame_5_shan.pkl").exists()
+    assert not (layout.adl_shan_outputs_dir / "video001--1_frame5_shan.pkl").exists()    
     assert "clip.mp4" in layout.frame_level_predictions_path.read_text(encoding = "utf-8")
     assert layout.session_level_metrics_path.exists()
     assert "computed" in layout.video_level_metrics_path.read_text(encoding="utf-8")
@@ -663,3 +663,169 @@ def test_private_preview_helpers_cover_small_lists_and_unsupported_model(tmp_pat
     
     with pytest.raises(ValueError, match = "Unsupported model id"):
         _input_names_for_preview(model_id = "unknown", input_path = input_dir)
+
+def test_finalize_runtime_outputs_rejects_manifest_without_shan_json(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake-video")
+
+    layout = build_run_output_layout(
+        tmp_path / "results",
+        run_id = "run-adl-no-shan",
+    )
+
+    create_output_scaffold(
+        layout = layout,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = video,
+        scenario = "adl-single-video",
+    )
+
+    runtime_adl_dir = (
+        layout.run_dir
+        / "adl_recognition_work"
+        / "egoviz_data"
+        / "meal-preparation-cleanup"
+    )
+
+    (
+        runtime_adl_dir
+        / "subclips_shan"
+        / "video001--1"
+    ).mkdir(parents = True)
+
+    (layout.run_dir / "adl_input_manifest.csv").write_text(
+        "session_id,session_sort_index,input_name,staged_video_name,"
+        "staged_video_stem,input_modified_time\n"
+        "session001,1,clip.mp4,video001.MP4,video001,"
+        "2026-07-16T10:00:00+00:00\n",
+        encoding = "utf-8",
+    )
+
+    (layout.run_dir / "adl_subclip_manifest.csv").write_text(
+        "session_id,input_name,staged_video_stem,subclip_name,"
+        "subclip_index,source_start_seconds,source_end_seconds,"
+        "valid_duration_seconds,processing_fps,"
+        "processing_subclip_duration_seconds\n"
+        "session001,clip.mp4,video001,video001--1,"
+        "1,0,8,8,30,10\n",
+        encoding = "utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match = "no Shan JSON frame predictions",
+    ):
+        finalize_runtime_outputs(
+            layout = layout,
+            model_id = ADL_RECOGNITION_MODEL_ID,
+            input_path = video,
+            scenario = "adl-single-video",
+        )
+
+    runtime_log = layout.runtime_log_path.read_text(
+        encoding = "utf-8",
+    )
+
+    assert "Shan JSON count=0" in runtime_log
+    assert "subclip manifest has rows=True" in runtime_log
+
+    # Failed finalization must preserve runtime evidence.
+    assert runtime_adl_dir.exists()
+
+def test_finalize_runtime_outputs_rejects_unmatched_shan_folder_and_logs_details(
+    tmp_path: Path,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake-video")
+
+    layout = build_run_output_layout(
+        tmp_path / "results",
+        run_id = "run-adl-unmatched-shan",
+    )
+
+    create_output_scaffold(
+        layout = layout,
+        model_id = ADL_RECOGNITION_MODEL_ID,
+        input_path = video,
+        scenario = "adl-single-video",
+    )
+
+    runtime_adl_dir = (
+        layout.run_dir
+        / "adl_recognition_work"
+        / "egoviz_data"
+        / "meal-preparation-cleanup"
+    )
+
+    unmatched_dir = (
+        runtime_adl_dir
+        / "subclips_shan"
+        / "unexpected--1"
+    )
+
+    unmatched_dir.mkdir(parents = True)
+
+    (unmatched_dir / "frame_1_shan.json").write_text(
+        '{"hands": []}',
+        encoding = "utf-8",
+    )
+
+    (layout.run_dir / "adl_input_manifest.csv").write_text(
+        "session_id,session_sort_index,input_name,staged_video_name,"
+        "staged_video_stem,input_modified_time\n"
+        "session001,1,clip.mp4,video001.MP4,video001,"
+        "2026-07-16T10:00:00+00:00\n",
+        encoding = "utf-8",
+    )
+
+    (layout.run_dir / "adl_subclip_manifest.csv").write_text(
+        "session_id,input_name,staged_video_stem,subclip_name,"
+        "subclip_index,source_start_seconds,source_end_seconds,"
+        "valid_duration_seconds,processing_fps,"
+        "processing_subclip_duration_seconds\n"
+        "session001,clip.mp4,video001,video001--1,"
+        "1,0,8,8,30,10\n",
+        encoding = "utf-8",
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match = "expected 1, wrote 0",
+    ):
+        finalize_runtime_outputs(
+            layout = layout,
+            model_id = ADL_RECOGNITION_MODEL_ID,
+            input_path = video,
+            scenario = "adl-single-video",
+        )
+
+    runtime_log = layout.runtime_log_path.read_text(
+        encoding = "utf-8",
+    )
+
+    assert (
+        "discovered Shan clip groups={'unexpected--1': 1}"
+        in runtime_log
+    )
+
+    assert (
+        "input manifest staged stems=['video001']"
+        in runtime_log
+    )
+
+    assert (
+        "subclip manifest names=['video001--1']"
+        in runtime_log
+    )
+
+    assert (
+        "staged stem 'video001' matched Shan folders=[]"
+        in runtime_log
+    )
+
+    assert "frame predictions produced=0" in runtime_log
+
+    # Preserve the files needed to diagnose a failed run.
+    assert unmatched_dir.exists()

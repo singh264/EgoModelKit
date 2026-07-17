@@ -43,6 +43,13 @@ include-package-data = true
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.exclude-package-data]
+egomodelkit = [
+    "**/__pycache__/*",
+    "**/*.pyc",
+    "**/*.pyo",
+]
+
 [tool.setuptools.package-data]
 egomodelkit = [
     "resources/*.yaml",
@@ -69,7 +76,7 @@ source = ["egomodelkit"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 90
+fail_under = 100
 
 [tool.ruff]
 line-length = 100
