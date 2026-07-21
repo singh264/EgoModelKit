@@ -7,7 +7,7 @@ Supported model adapters:
 <details>
 <summary><strong>hand-object-contact</strong></summary>
 
-Detects hands, objects, and hand-object contact in images.
+Detects hands, contacted objects, hand side, and hand-object contact state in images using the 100 Days of Hands detector [1], [2].
 
 Inputs:
 
@@ -21,7 +21,7 @@ Directory input is processed non-recursively.
 <details>
 <summary><strong>adl-recognition</strong></summary>
 
-Runs the packaged EgoVizML-based ADL pipeline and generates activity-recognition outputs plus Bandini-style hand-use metrics.
+Runs the packaged EgoVizML activity-recognition pipeline [3], [4]. The workflow combines Detic object detection [5], [6], which builds on top of Detectron2 [7], with the hand-object detector and generates activity-recognition outputs plus hand-use metrics [8].
 
 Inputs:
 
@@ -29,7 +29,7 @@ Inputs:
 - one directory containing `.mp4` videos, or
 - an existing `all_preds.pkl` file for CLI prediction reuse.
 
-Directory input is processed non-recursively. Multiple videos selected together in the GUI are treated as one ADL session.
+Directory input is processed non-recursively. Multiple videos provided together through either the CLI or GUI are treated as one ADL session.
 
 </details>
 
@@ -138,7 +138,7 @@ egomodelkit run adl-recognition \
 
 ## Model Outputs
 
-The GUI creates one `run-*` folder inside the selected output folder for each run.
+Both the CLI and GUI create one `run-*` folder inside the selected output folder for each run.
 
 <details>
 <summary><strong>Hand-object contact (HOC)</strong></summary>
@@ -431,3 +431,26 @@ npm test
 npm run build
 npm run dev
 ```
+
+## References
+
+<details>
+<summary><strong>View references</strong></summary>
+
+[1] D. Shan, J. Geng, M. Shu, and D. F. Fouhey, “Understanding human hands in contact at Internet scale,” in *Proc. IEEE/CVF Conf. Computer Vision and Pattern Recognition (CVPR)*, pp. 9866–9875, Jun. 2020. [Online]. Available: [IEEE Xplore](https://ieeexplore.ieee.org/document/9157473)
+
+[2] D. Shan, J. Geng, M. Shu, and D. F. Fouhey, “Hand Object Detector,” GitHub repository. [Online]. Available: [https://github.com/ddshan/hand_object_detector](https://github.com/ddshan/hand_object_detector)
+
+[3] A. Kadambi and J. Zariffa, “Detecting activities of daily living in egocentric video to contextualize hand use at home in outpatient neurorehabilitation settings,” *IEEE Transactions on Neural Systems and Rehabilitation Engineering*, vol. 33, pp. 1951–1957, 2025. [Online]. Available: [IEEE Xplore](https://ieeexplore.ieee.org/document/11000436)
+
+[4] A. Kadambi, “EgoVizML,” GitHub repository. [Online]. Available: [https://github.com/adeshkadambi/EgoVizML](https://github.com/adeshkadambi/EgoVizML)
+
+[5] X. Zhou, R. Girdhar, A. Joulin, P. Krähenbühl, and I. Misra, “Detecting twenty-thousand classes using image-level supervision,” in *Computer Vision – ECCV 2022*, Lecture Notes in Computer Science, vol. 13669, pp. 350–368, 2022. [Online]. Available: [Springer Nature](https://link.springer.com/chapter/10.1007/978-3-031-20077-9_21)
+
+[6] Meta AI Research, “Detic,” GitHub repository. [Online]. Available: [https://github.com/facebookresearch/Detic](https://github.com/facebookresearch/Detic)
+
+[7] Y. Wu, A. Kirillov, F. Massa, W.-Y. Lo, and R. Girshick, “Detectron2,” GitHub repository, 2019. [Online]. Available: [https://github.com/facebookresearch/detectron2](https://github.com/facebookresearch/detectron2)
+
+[8] A. Bandini, M. Dousty, S. L. Hitzig, B. C. Craven, S. Kalsi-Ryan, and J. Zariffa, “Measuring hand use in the home after cervical spinal cord injury using egocentric video,” *Journal of Neurotrauma*, vol. 39, nos. 23–24, pp. 1697–1707, Dec. 2022. [Online]. Available: [Publisher website](https://journals.sagepub.com/doi/10.1089/neu.2022.0156)
+
+</details>
