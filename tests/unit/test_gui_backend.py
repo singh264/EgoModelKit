@@ -838,9 +838,9 @@ def test_open_output_folder_rejects_missing_output_folder(tmp_path: Path) -> Non
     
     run_id = start_response.json()["runId"]
     
-    progress_response = client.get(f"/api/runs/{run_id}/progress")
-    
-    output_folder = Path(progress_response.json()["outputFolder"])
+    progress_body = _wait_for_run_completion(client, run_id)
+
+    output_folder = Path(progress_body["outputFolder"])
     
     import shutil
     
