@@ -2340,3 +2340,314 @@ def test_open_output_folder_returns_success_after_file_manager_spawn(
     assert started_commands == [
         ["explorer.exe", r"C:\Users\researcher\results\run-1"]
     ]
+
+
+def test_models_endpoint_includes_hand_interaction_in_preferred_order() -> None:
+    from egomodelkit.models.hand_interaction import (
+        HAND_INTERACTION_MODEL_ID,
+        HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
+    )
+
+    body = TestClient(create_app()).get("/api/models").json()
+    assert [model["id"] for model in body["models"]] == [
+        HAND_OBJECT_CONTACT_MODEL_ID,
+        HAND_INTERACTION_MODEL_ID,
+        ADL_RECOGNITION_MODEL_ID,
+    ]
+    model = body["models"][1]
+    assert model["name"] == "Hand interaction"
+    assert model["supportedInputExtensions"] == sorted(
+        HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES
+    )
+    assert "functional hand-object interactions" in model["description"]
+
+
+def test_hand_interaction_preview_and_dry_run_endpoints(tmp_path: Path) -> None:
+    from egomodelkit.models.hand_interaction import HAND_INTERACTION_MODEL_ID
+
+    client = TestClient(create_app(runtime_checker=_ready_runtime_checker))
+    output_root = _existing_output_root(tmp_path)
+    preview = client.post(
+        "/api/output-preview",
+        json={
+            "modelId": HAND_INTERACTION_MODEL_ID,
+            "inputNames": ["one.mp4", "two.mp4"],
+            "outputRoot": str(output_root),
+        },
+    )
+    assert preview.status_code == 200
+    assert preview.json()["scenario"] == "hand-interaction-video-directory"
+    assert "hand_interaction_input_manifest.csv" in preview.json()["folderTree"]
+    assert "detic_outputs" not in preview.json()["folderTree"]
+
+    dry_run = client.post(
+        "/api/dry-run",
+        data={
+            "modelId": HAND_INTERACTION_MODEL_ID,
+            "outputRoot": str(output_root),
+            "dominantHand": "left",
+        },
+        files=[("files", ("clip.mp4", b"video", "video/mp4"))],
+    )
+    assert dry_run.status_code == 200
+    body = dry_run.json()
+    assert body["scenario"] == "hand-interaction-single-video"
+    assert body["summary"]["model"] == "Hand interaction"
+
+    invalid = client.post(
+        "/api/dry-run",
+        data={
+            "modelId": HAND_INTERACTION_MODEL_ID,
+            "outputRoot": str(output_root),
+            "dominantHand": "middle",
+        },
+        files=[("files", ("clip.mp4", b"video", "video/mp4"))],
+    )
+    assert invalid.status_code == 400
+    assert "Dominant hand" in invalid.json()["detail"]
+
+
+def test_hand_interaction_run_endpoint_persists_dominant_hand(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from egomodelkit.models.hand_interaction import HAND_INTERACTION_MODEL_ID
+
+    runner_calls: list[tuple[Path, Path]] = []
+
+    def fake_runner(input_path: Path, output_dir: Path, progress: ProgressCallback) -> None:
+        runner_calls.append((input_path, output_dir))
+        progress(_progress_line("hand_interaction_frame_extracted", current=30, total=30))
+
+    monkeypatch.setattr(gui_backend, "finalize_runtime_outputs", lambda **_kwargs: None)
+    client = TestClient(
+        create_app(
+            hand_interaction_runner=fake_runner,
+            runtime_checker=_ready_runtime_checker,
+        )
+    )
+    response = client.post(
+        "/api/runs",
+        data={
+            "modelId": HAND_INTERACTION_MODEL_ID,
+            "outputRoot": str(_existing_output_root(tmp_path)),
+            "dominantHand": "left",
+        },
+        files=[("files", ("clip.mp4", b"video", "video/mp4"))],
+    )
+    assert response.status_code == 200
+    run_id = response.json()["runId"]
+    body = _wait_for_run_completion(client, run_id)
+    assert body["status"] == "completed"
+    assert response.json()["summary"]["model"] == "Hand interaction"
+    assert runner_calls and runner_calls[0][0].suffix == ".mp4"
+    run_dir = Path(body["outputFolder"])
+    config = json.loads(
+        (run_dir / "technical" / "post_processing" / "metrics_config.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
+    assert config["dominant_hand"] == "left"
+    assert manifest["model_configuration"] == {
+        "dominant_hand": "left",
+        "non_dominant_hand": "right",
+    }
+
+
+def test_default_hand_interaction_gui_runner_uses_cancellable_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from egomodelkit.gui_backend import _run_hand_interaction_for_gui
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    cancellation = ProcessCancellation()
+    captured: dict[str, object] = {}
+
+    def fake_runtime(request, **kwargs):
+        captured["request"] = request
+        captured["kwargs"] = kwargs
+        assert kwargs["command_runner"](["true"]) == 0
+        assert kwargs["streaming_command_runner"](
+            ["true"],
+            lambda _message: None,
+        ) == 0
+        return []
+
+    monkeypatch.setattr(gui_backend, "run_hand_interaction", fake_runtime)
+    monkeypatch.setattr(gui_backend, "cancellable_subprocess_runner", lambda command, token: 0)
+    monkeypatch.setattr(
+        gui_backend,
+        "cancellable_streaming_subprocess_runner",
+        lambda command, progress, token: 0,
+    )
+    _run_hand_interaction_for_gui(
+        video,
+        tmp_path / "results",
+        lambda _message: None,
+        cancellation,
+        dominant_hand="left",
+    )
+    assert captured["request"].dominant_hand == "left"
+    assert captured["request"].input_path == video
+
+
+def test_hand_interaction_backend_helpers_and_progress(tmp_path: Path, monkeypatch) -> None:
+    from egomodelkit.gui_backend import (
+        _initialize_wireframe_progress,
+        _record_external_progress_update,
+    )
+    from egomodelkit.models.hand_interaction import HAND_INTERACTION_MODEL_ID
+
+    checked: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        gui_backend,
+        "ensure_host_runtime_ready",
+        lambda **kwargs: checked.append(kwargs),
+    )
+    _check_runtime_ready_for_gui(HAND_INTERACTION_MODEL_ID)
+    assert checked[0]["docker_executable"] == "docker"
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    _validate_gui_request(
+        model_id=HAND_INTERACTION_MODEL_ID,
+        input_path=video,
+        output_root=tmp_path / "results",
+        dominant_hand="left",
+    )
+    assert _model_display_name(HAND_INTERACTION_MODEL_ID) == "Hand interaction"
+    assert _should_run_start_preflight(
+        model_id=HAND_INTERACTION_MODEL_ID,
+        hand_object_runner=None,
+        hand_interaction_runner=None,
+        adl_runner=None,
+        runtime_checker_was_injected=False,
+    )
+    assert not _should_run_start_preflight(
+        model_id=HAND_INTERACTION_MODEL_ID,
+        hand_object_runner=None,
+        hand_interaction_runner=lambda *_args: None,
+        adl_runner=None,
+        runtime_checker_was_injected=False,
+    )
+
+    state = _test_run_state(
+        tmp_path,
+        model_id=HAND_INTERACTION_MODEL_ID,
+        scenario="hand-interaction-video-directory",
+    )
+    _initialize_wireframe_progress(state)
+    assert [event.stage for event in state.progress_events] == [
+        "prepare_input",
+        "check_input",
+        "extract_frames",
+        "run_hand_object",
+        "calculate_profiles",
+        "calculate_metrics",
+        "save_outputs",
+    ]
+    updates = [
+        ExternalProgressUpdate("hand_interaction_video_checked", {"current": 2, "total": 2}),
+        ExternalProgressUpdate("hand_interaction_frame_extracted", {"current": 60, "total": 60}),
+        ExternalProgressUpdate(
+            "hand_interaction_hoc_frame_processed",
+            {"current": 60, "total": 60},
+        ),
+        ExternalProgressUpdate("hand_interaction_profiles_calculating", {}),
+        ExternalProgressUpdate("hand_interaction_metrics_calculating", {}),
+        ExternalProgressUpdate(
+            "hand_interaction_metrics_calculated",
+            {"current": 1, "total": 1},
+        ),
+        ExternalProgressUpdate("hand_interaction_outputs_organizing", {}),
+    ]
+    for update in updates:
+        _record_external_progress_update(state, update)
+    events = {event.stage: event for event in state.progress_events}
+    assert events["check_input"].current == 2
+    assert events["extract_frames"].current == 60
+    assert events["run_hand_object"].current == 60
+    assert events["calculate_profiles"].message == "Calculating interaction profiles..."
+    assert events["calculate_metrics"].current == 1
+    assert events["save_outputs"].current == 1
+
+    single_state = _test_run_state(
+        tmp_path / "single",
+        model_id=HAND_INTERACTION_MODEL_ID,
+        scenario="hand-interaction-single-video",
+    )
+    _initialize_wireframe_progress(single_state)
+    _record_external_progress_update(
+        single_state,
+        ExternalProgressUpdate("hand_interaction_video_checked", {"current": 1, "total": 1}),
+    )
+    _record_external_progress_update(
+        single_state,
+        ExternalProgressUpdate("hand_interaction_frame_extracted", {"current": 30, "total": 30}),
+    )
+    assert single_state.progress_events[1].message == "Extracting frames"
+
+
+def test_execute_run_uses_default_hand_interaction_gui_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id="hand-interaction",
+        scenario="hand-interaction-single-video",
+    )
+    state.dominant_hand = "left"
+    calls: list[tuple[Path, Path, ProcessCancellation, str]] = []
+
+    def fake_hand_interaction_gui_runner(
+        input_path: Path,
+        output_dir: Path,
+        progress: ProgressCallback,
+        cancellation: ProcessCancellation,
+        *,
+        dominant_hand: str,
+    ) -> None:
+        calls.append((input_path, output_dir, cancellation, dominant_hand))
+        progress("Hand-interaction runtime output")
+
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend._run_hand_interaction_for_gui",
+        fake_hand_interaction_gui_runner,
+    )
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.finalize_runtime_outputs",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "egomodelkit.gui_backend.write_run_summary",
+        lambda **_kwargs: None,
+    )
+
+    operations = {
+        state.operation_id: CancelableGuiOperation(
+            operation_id=state.operation_id,
+            cancellation=state.cancellation,
+        )
+    }
+    _execute_run(
+        state=state,
+        hand_object_runner=None,
+        hand_interaction_runner=None,
+        adl_runner=None,
+        operations=operations,
+    )
+
+    assert calls == [
+        (
+            state.input_path,
+            state.layout.run_dir,
+            state.cancellation,
+            "left",
+        )
+    ]
+    assert state.status == "completed"
+    assert operations == {}

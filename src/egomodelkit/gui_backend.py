@@ -34,6 +34,13 @@ from egomodelkit.models.adl_recognition import (
     AdlRecognitionRequest,
     validate_adl_recognition_request,
 )
+from egomodelkit.models.hand_interaction import (
+    HAND_INTERACTION_MODEL_ID,
+    HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
+    HandInteractionInputError,
+    HandInteractionRequest,
+    validate_hand_interaction_request,
+)
 from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
     HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
@@ -74,6 +81,11 @@ from egomodelkit.runtime.commands import (
     cancellable_subprocess_runner,
     subprocess_runner,
 )
+from egomodelkit.runtime.hand_interaction import (
+    DEFAULT_HAND_INTERACTION_RUNTIME_SPEC,
+    HandInteractionRuntimeError,
+    run_hand_interaction,
+)
 from egomodelkit.runtime.hand_object_contact import (
     DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
     HandObjectContactRuntimeError,
@@ -97,10 +109,12 @@ RuntimeReadyChecker = Callable[[str, ProgressCallback, Callable[[list[str]], int
 GUI_REQUEST_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
     ValueError,
     HandObjectContactInputError,
+    HandInteractionInputError,
     AdlRecognitionInputError,
     HostPrerequisiteError,
     HandObjectContactRuntimeError,
-    AdlRecognitionRuntimeError
+    HandInteractionRuntimeError,
+    AdlRecognitionRuntimeError,
 )
 
 class OutputPreviewRequest(BaseModel):
@@ -181,6 +195,7 @@ def create_app(
     *,
     static_dir: Path | None = None,
     hand_object_runner: ModelRunner | None = None,
+    hand_interaction_runner: ModelRunner | None = None,
     adl_runner: ModelRunner | None = None,
     runtime_checker: RuntimeReadyChecker | None = None,
 ) -> FastAPI:
@@ -220,6 +235,19 @@ def create_app(
                         HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
                     ),
                     "outputLabel": "detection visualizations and structured results",
+                },
+                {
+                    "id": HAND_INTERACTION_MODEL_ID,
+                    "name": "Hand interaction",
+                    "description": (
+                        "Measures functional hand-object interactions in "
+                        "egocentric videos."
+                    ),
+                    "supportedInputExtensions": sorted(
+                        HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
+                    ),
+                    "acceptedInputLabel": "single MP4 video or multiple MP4 videos",
+                    "outputLabel": "interaction profiles and hand-use metrics",
                 },
                 {
                     "id": ADL_RECOGNITION_MODEL_ID,
@@ -362,8 +390,9 @@ def create_app(
             
             if _should_run_start_preflight(
                 model_id = model_id,
-                hand_object_runner = hand_object_runner,
-                adl_runner = adl_runner,
+                hand_object_runner=hand_object_runner,
+                hand_interaction_runner=hand_interaction_runner,
+                adl_runner=adl_runner,
                 runtime_checker_was_injected = runtime_checker_was_injected,
             ):
                 runtime_ready_checker(
@@ -422,6 +451,7 @@ def create_app(
                 kwargs = {
                     "state": state,
                     "hand_object_runner": hand_object_runner,
+                    "hand_interaction_runner": hand_interaction_runner,
                     "adl_runner": adl_runner,
                     "operations": operations,
                 },
@@ -541,7 +571,8 @@ def _execute_run(
     *,
     state: GuiRunState,
     hand_object_runner: ModelRunner | None,
-    adl_runner: ModelRunner | None,
+    hand_interaction_runner: ModelRunner | None = None,
+    adl_runner: ModelRunner | None = None,
     operations: dict[str, CancelableGuiOperation],
 ) -> None:
     """ Execute one run in a background thread. """
@@ -565,6 +596,21 @@ def _execute_run(
                 )
             else:
                 hand_object_runner(state.input_path, state.layout.run_dir, progress)
+        elif state.model_id == HAND_INTERACTION_MODEL_ID:
+            if hand_interaction_runner is None:
+                _run_hand_interaction_for_gui(
+                    state.input_path,
+                    state.layout.run_dir,
+                    progress,
+                    state.cancellation,
+                    dominant_hand=state.dominant_hand,
+                )
+            else:
+                hand_interaction_runner(
+                    state.input_path,
+                    state.layout.run_dir,
+                    progress,
+                )
         elif state.model_id == ADL_RECOGNITION_MODEL_ID:
             if adl_runner is None:
                 _run_adl_recognition_for_gui(
@@ -572,7 +618,7 @@ def _execute_run(
                     state.layout.run_dir,
                     progress,
                     state.cancellation,
-                    dominant_hand = state.dominant_hand,
+                    dominant_hand=state.dominant_hand,
                 )
             else:
                 adl_runner(state.input_path, state.layout.run_dir, progress)
@@ -585,9 +631,10 @@ def _execute_run(
             layout = state.layout,
             model_id = state.model_id,
             input_path = state.input_path,
-            scenario = state.scenario,
+            scenario=state.scenario,
+            progress=progress,
         )
-        
+
         _record_final_output_progress(state)
         
         _finish_runtime_build_stage(state)
@@ -671,6 +718,36 @@ def _run_hand_object_contact_for_gui(
         progress = progress,
     )
 
+def _run_hand_interaction_for_gui(
+    input_path: Path,
+    output_dir: Path,
+    progress: Callable[[str], None],
+    cancellation: ProcessCancellation,
+    *,
+    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
+) -> None:
+    """Run the standalone hand-interaction runtime."""
+    run_hand_interaction(
+        HandInteractionRequest(
+            input_path=input_path,
+            output_dir=output_dir,
+            dominant_hand=dominant_hand,
+        ),
+        command_runner=lambda command: cancellable_subprocess_runner(
+            command,
+            cancellation,
+        ),
+        streaming_command_runner=lambda command, progress_callback: (
+            cancellable_streaming_subprocess_runner(
+                command,
+                progress_callback,
+                cancellation,
+            )
+        ),
+        progress=progress,
+    )
+
+
 def _run_adl_recognition_for_gui(
     input_path: Path,
     output_dir: Path,
@@ -712,6 +789,8 @@ def _check_runtime_ready_for_gui(
     """ Validate that the host can run packaged GPU model containers. """
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
         docker_executable = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.docker_executable
+    elif model_id == HAND_INTERACTION_MODEL_ID:
+        docker_executable = DEFAULT_HAND_INTERACTION_RUNTIME_SPEC.docker_executable
     elif model_id == ADL_RECOGNITION_MODEL_ID:
         docker_executable = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC.docker_executable
     else:
@@ -744,16 +823,18 @@ def _operation_id_from_text(operation_id_text: str | None) -> str:
 
     return f"operation-{uuid4().hex}"
 
+def _model_uses_dominant_hand(model_id: str) -> bool:
+    """Return whether the selected model exposes hand-role mapping."""
+    return model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}
+
+
 def _dominant_hand_from_text(
     dominant_hand_text: str | None,
     *,
     model_id: str,
 ) -> HandLabel:
-    """ Return a validated dominant hand for ADL GUI requests.
-
-    Non-ADL models ignore this field so older or model-neutral requests remain valid.
-    """
-    if model_id != ADL_RECOGNITION_MODEL_ID:
+    """Return a validated dominant hand for models with hand-use metrics."""
+    if not _model_uses_dominant_hand(model_id):
         return DEFAULT_DOMINANT_HAND
 
     normalized = (dominant_hand_text or DEFAULT_DOMINANT_HAND).strip().lower()
@@ -770,7 +851,8 @@ def _should_run_start_preflight(
     *,
     model_id: str,
     hand_object_runner: ModelRunner | None,
-    adl_runner: ModelRunner | None,
+    hand_interaction_runner: ModelRunner | None = None,
+    adl_runner: ModelRunner | None = None,
     runtime_checker_was_injected: bool,
 ) -> bool:
     """ Return whether /api/runs should preflight the packaged runtime.
@@ -785,6 +867,9 @@ def _should_run_start_preflight(
 
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
         return hand_object_runner is None
+
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        return hand_interaction_runner is None
 
     if model_id == ADL_RECOGNITION_MODEL_ID:
         return adl_runner is None
@@ -895,6 +980,16 @@ def _validate_gui_request(
         
         return
 
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        validate_hand_interaction_request(
+            HandInteractionRequest(
+                input_path=input_path,
+                output_dir=output_root,
+                dominant_hand=dominant_hand,
+            ),
+        )
+        return
+
     if model_id == ADL_RECOGNITION_MODEL_ID:
         validate_adl_recognition_request(
            AdlRecognitionRequest(
@@ -986,6 +1081,48 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 stage = "save_outputs", 
                 message = "Saving detection outputs: waiting",
             ),
+        ]
+
+    if state.scenario == "hand-interaction-single-video":
+        return [
+            ProgressEvent(stage="prepare_input", message="Preparing video input..."),
+            ProgressEvent(stage="extract_frames", message="Extracting frames: waiting"),
+            ProgressEvent(
+                stage="run_hand_object",
+                message="Running hand-object contact on extracted frames: waiting",
+            ),
+            ProgressEvent(
+                stage="calculate_profiles",
+                message="Calculating interaction profiles: waiting",
+            ),
+            ProgressEvent(
+                stage="calculate_metrics",
+                message="Calculating hand-use metrics: waiting",
+            ),
+            ProgressEvent(stage="save_outputs", message="Saving outputs: waiting"),
+        ]
+
+    if state.scenario == "hand-interaction-video-directory":
+        return [
+            ProgressEvent(stage="prepare_input", message="Preparing video inputs..."),
+            ProgressEvent(stage="check_input", message="Checking videos: waiting"),
+            ProgressEvent(
+                stage="extract_frames",
+                message="Extracting frames across all videos: waiting",
+            ),
+            ProgressEvent(
+                stage="run_hand_object",
+                message="Running hand-object contact on extracted frames: waiting",
+            ),
+            ProgressEvent(
+                stage="calculate_profiles",
+                message="Calculating interaction profiles: waiting",
+            ),
+            ProgressEvent(
+                stage="calculate_metrics",
+                message="Calculating session hand-use metrics: waiting",
+            ),
+            ProgressEvent(stage="save_outputs", message="Saving outputs: waiting"),
         ]
 
     if state.scenario == "adl-single-video":
@@ -1141,6 +1278,99 @@ def _record_external_progress_update(
 
         return
 
+    if update.kind == "hand_interaction_video_checked":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+        if state.scenario == "hand-interaction-video-directory":
+            _upsert_progress_event(
+                state,
+                ProgressEvent(
+                    stage="check_input",
+                    message="Checking videos",
+                    current=current,
+                    total=total,
+                    unit="valid videos",
+                ),
+            )
+        return
+
+    if update.kind == "hand_interaction_frame_extracted":
+        current = _payload_int(payload, "current")
+        total = _payload_int(payload, "total")
+        message = (
+            "Extracting frames across all videos"
+            if state.scenario == "hand-interaction-video-directory"
+            else "Extracting frames"
+        )
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="extract_frames",
+                message=message,
+                current=current,
+                total=total,
+                unit="frames",
+            ),
+        )
+        return
+
+    if update.kind == "hand_interaction_hoc_frame_processed":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="run_hand_object",
+                message="Running hand-object contact on extracted frames",
+                current=_payload_int(payload, "current"),
+                total=_payload_int(payload, "total"),
+                unit="frames",
+            ),
+        )
+        return
+
+    if update.kind == "hand_interaction_profiles_calculating":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="calculate_profiles",
+                message="Calculating interaction profiles...",
+            ),
+        )
+        return
+
+    if update.kind == "hand_interaction_metrics_calculating":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="calculate_metrics",
+                message="Calculating hand-use metrics...",
+            ),
+        )
+        return
+
+    if update.kind == "hand_interaction_metrics_calculated":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="calculate_metrics",
+                message="Calculating hand-use metrics",
+                current=_payload_int(payload, "current"),
+                total=_payload_int(payload, "total"),
+            ),
+        )
+        return
+
+    if update.kind == "hand_interaction_outputs_organizing":
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="save_outputs",
+                message="Saving outputs",
+                current=1,
+                total=1,
+            ),
+        )
+        return
+
     if update.kind == "adl_video_checked":
         current = _payload_int(payload, "current")
         total = _payload_int(payload, "total")
@@ -1275,7 +1505,7 @@ def _stage_has_numeric_progress(state: GuiRunState, stage: str) -> bool:
         
 def _record_final_output_progress(state: GuiRunState) -> None:
     """ Mark final wireframe rows complete once output finalization is reached. """
-    if state.model_id == ADL_RECOGNITION_MODEL_ID:
+    if state.model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}:
         return
 
     if not _stage_has_numeric_progress(state, "save_outputs"):
@@ -1741,6 +1971,9 @@ def _model_display_name(model_id: str) -> str:
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
         return "Hand-object contact"
     
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        return "Hand interaction"
+
     if model_id == ADL_RECOGNITION_MODEL_ID:
         return "Activity recognition (ADL)"
     

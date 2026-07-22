@@ -335,3 +335,124 @@ def test_run_executes_adl_recognition(
     assert "Completed: adl-recognition" in result.output
     assert f"Outputs: {output_dir / 'run-test'}" in result.output
     assert "request" in captured
+
+
+def test_run_dry_run_accepts_hand_interaction_video_and_directory(tmp_path: Path) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "hand-interaction",
+            "--input",
+            str(video),
+            "--output",
+            str(tmp_path / "single-results"),
+            "--dominant-hand",
+            "left",
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Dry run: hand-interaction request is valid." in result.output
+    assert "Dominant hand: left" in result.output
+
+    videos = tmp_path / "videos"
+    videos.mkdir()
+    (videos / "one.mp4").write_bytes(b"video")
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "hand-interaction",
+            "--input",
+            str(videos),
+            "--output",
+            str(tmp_path / "directory-results"),
+            "--dry-run",
+        ],
+    )
+    assert result.exit_code == 0
+
+
+def test_run_executes_hand_interaction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    output = tmp_path / "results"
+    captured: dict[str, object] = {}
+
+    def fake_run(request) -> Path:
+        captured["request"] = request
+        return output / "run-test"
+
+    monkeypatch.setattr(
+        "egomodelkit.cli._run_hand_interaction_with_output_contract",
+        fake_run,
+    )
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "hand-interaction",
+            "--input",
+            str(video),
+            "--output",
+            str(output),
+            "--dominant-hand",
+            "left",
+        ],
+    )
+    assert result.exit_code == 0
+    assert "Completed: hand-interaction" in result.output
+    assert f"Outputs: {output / 'run-test'}" in result.output
+    assert captured["request"].dominant_hand == "left"
+
+
+def test_shared_output_contract_dispatches_hand_interaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from egomodelkit import cli
+    from egomodelkit.models.adl_recognition import AdlRecognitionRequest
+    from egomodelkit.models.hand_interaction import HandInteractionRequest
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    captured: dict[str, object] = {}
+
+    def fake_runtime(request, **kwargs):
+        captured["request"] = request
+        captured["kwargs"] = kwargs
+        return [["docker", "run"]]
+
+    monkeypatch.setattr(cli, "run_hand_interaction", fake_runtime)
+    monkeypatch.setattr(cli, "finalize_runtime_outputs", lambda **_kwargs: None)
+    run_dir = cli._run_hand_interaction_with_output_contract(
+        HandInteractionRequest(
+            input_path=video,
+            output_dir=tmp_path / "results",
+            dominant_hand="left",
+        )
+    )
+    assert run_dir.is_dir()
+    assert captured["request"].output_dir == run_dir
+    assert captured["request"].dominant_hand == "left"
+
+    with pytest.raises(TypeError, match="Hand interaction requires"):
+        cli._run_model_with_output_contract(
+            model_id="hand-interaction",
+            request=AdlRecognitionRequest(input_path=video, output_dir=tmp_path / "bad"),
+        )
+
+
+def test_shared_output_contract_rejects_unknown_model_directly(tmp_path: Path) -> None:
+    from egomodelkit import cli
+    from egomodelkit.models.hand_interaction import HandInteractionRequest
+
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    request = HandInteractionRequest(input_path=video, output_dir=tmp_path / "results")
+
+    with pytest.raises(ValueError, match="Unsupported model id"):
+        cli._run_model_with_output_contract(model_id="unknown", request=request)

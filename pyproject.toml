@@ -58,6 +58,8 @@ egomodelkit = [
     "resources/containers/hand_object_contact/**/*",
     "resources/containers/adl_recognition/*",
     "resources/containers/adl_recognition/**/*",
+    "resources/containers/hand_interaction/*",
+    "resources/containers/hand_interaction/**/*",
     "web/dist/*",
     "web/dist/assets/*",
 ]

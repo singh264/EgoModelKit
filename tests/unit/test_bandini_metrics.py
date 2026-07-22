@@ -201,7 +201,10 @@ def test_config_serialization_records_defaults_and_derived_values(tmp_path: Path
     )
 
 def test_manifest_is_required_for_metric_mapping(tmp_path: Path) -> None:
-    with pytest.raises(FileNotFoundError, match = "ADL input manifest is required"):
+    with pytest.raises(
+        FileNotFoundError,
+        match = "Input manifest is required for Bandini metric computation",
+    ):
         load_input_video_mappings(
             input_manifest_path=tmp_path / "missing.csv",
         )
@@ -514,7 +517,7 @@ def test_session_metrics_combine_multiple_camera_chunks(tmp_path: Path) -> None:
     assert session_metrics[0].input_video_count == 2
     assert session_metrics[0].recording_time_seconds == 2.0
 
-def test_session_interaction_crossing_camera_chunk_boundary_is_not_double_counted(
+def test_session_interaction_continues_across_input_video_boundary(
     tmp_path: Path,
 ) -> None:
     shan_dir = tmp_path / "shan_outputs"
@@ -528,25 +531,25 @@ def test_session_interaction_crossing_camera_chunk_boundary_is_not_double_counte
 
     mappings = [
         _mapping(
-            input_name = FIRST_VIDEO, 
-            staged_stem = FIRST_STAGED_STEM, 
-            session_sort_index = 1
+            input_name = FIRST_VIDEO,
+            staged_stem = FIRST_STAGED_STEM,
+            session_sort_index = 1,
         ),
         _mapping(
-            input_name = SECOND_VIDEO, 
-            staged_stem = SECOND_STAGED_STEM, 
-            session_sort_index = 2
+            input_name = SECOND_VIDEO,
+            staged_stem = SECOND_STAGED_STEM,
+            session_sort_index = 2,
         ),
     ]
-    
+
     frames = load_frame_interaction_predictions(
         shan_outputs_dir = shan_dir,
         mappings = mappings,
         config = DEFAULT_VIDEO_PROCESSING_CONFIG,
     )
-    
+
     segments = build_interaction_segments(frames, config = DEFAULT_VIDEO_PROCESSING_CONFIG)
-    
+
     session_metrics = build_session_level_metrics(
         frames,
         segments,
@@ -557,7 +560,10 @@ def test_session_interaction_crossing_camera_chunk_boundary_is_not_double_counte
     assert len(segments) == 1
     assert segments[0].start_input_name == FIRST_VIDEO
     assert segments[0].end_input_name == SECOND_VIDEO
+    assert segments[0].start_session_frame_index == 1
+    assert segments[0].end_session_frame_index == 2 * ONE_SECOND_FRAME_COUNT
     assert segments[0].duration_seconds == 2.0
+    assert session_metrics[0].dur_dominant_hand_seconds == 2.0
     assert session_metrics[0].num_dominant_hand_per_hour == 1800.0
     assert session_metrics[0].num_non_dominant_hand_per_hour == 0.0
     assert session_metrics[0].num_bilateral_per_hour == 1800.0
@@ -1105,10 +1111,13 @@ def test_multi_file_session_concatenates_only_valid_source_frames(
     assert len(segments) == 1
     assert segments[0].start_input_name == "part1.mp4"
     assert segments[0].end_input_name == "part3.mp4"
+    assert segments[0].start_session_time_seconds == 0.0
+    assert segments[0].end_session_time_seconds == 8.0
     assert segments[0].duration_seconds == 8.0
 
     assert session_metrics[0].analyzed_frame_count == 8
     assert session_metrics[0].recording_time_seconds == 8.0
+    assert session_metrics[0].dur_dominant_hand_seconds == 8.0
     assert session_metrics[0].num_dominant_hand_per_hour == 450.0
 
 def test_defensive_config_manifest_and_subclip_validation_branches(tmp_path: Path) -> None:
@@ -1138,7 +1147,10 @@ def test_defensive_config_manifest_and_subclip_validation_branches(tmp_path: Pat
 
     missing_subclip_manifest = tmp_path / "missing-subclip-manifest.csv"
 
-    with pytest.raises(FileNotFoundError, match = "ADL subclip manifest is required"):
+    with pytest.raises(
+        FileNotFoundError,
+        match = "Subclip manifest is required for Bandini metric computation",
+    ):
         load_subclip_timing_mappings(subclip_manifest_path = missing_subclip_manifest)
 
     invalid_subclip_manifest = tmp_path / "invalid-subclip-manifest.csv"
@@ -1195,7 +1207,7 @@ def test_private_parsing_and_segment_defensive_branches(tmp_path: Path) -> None:
     assert bandini_metrics._hand_label([0] * 9 + [99]) is None
     assert bandini_metrics._as_hand_label("unknown", "right") == "right"
 
-    assert bandini_metrics._segments_from_video_frames(
+    assert bandini_metrics._segments_from_frames(
         [],
         config = DEFAULT_VIDEO_PROCESSING_CONFIG,
     ) == []
@@ -1223,7 +1235,7 @@ def test_private_parsing_and_segment_defensive_branches(tmp_path: Path) -> None:
     ]
 
     with pytest.raises(ValueError, match = "single session"):
-        bandini_metrics._segments_from_video_frames(
+        bandini_metrics._segments_from_frames(
             mixed_session_frames,
             config = DEFAULT_VIDEO_PROCESSING_CONFIG,
         )

@@ -17,6 +17,7 @@ function dropInputFiles(target: HTMLElement, files: File[]) {
 }
 
 const APP_STATE_STORAGE_KEY = "egomodelkit.gui.state.v1";
+const scrollIntoViewMock = vi.fn();
 
 function createTestLocalStorage() {
     const storedValues = new Map<string, string>();
@@ -40,6 +41,12 @@ function createTestLocalStorage() {
 }
 
 beforeEach(() => {
+    scrollIntoViewMock.mockClear();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+        configurable: true,
+        value: scrollIntoViewMock,
+        writable: true,
+    });
     vi.stubGlobal("localStorage", createTestLocalStorage());
 });
 
@@ -68,6 +75,15 @@ function modelsResponse() {
                 acceptedInputLabel: "an image or multiple images",
                 supportedInputExtensions: [".jpg", ".jpeg", ".png", ".bmp", ".webp"],
                 outputLabel: "detection visualizations and structured results",
+            },
+            {
+                id: "hand-interaction",
+                name: "Hand interaction",
+                description:
+                    "Measures functional hand-object interactions in egocentric videos.",
+                acceptedInputLabel: "a single MP4 video or multiple MP4 videos",
+                supportedInputExtensions: [".mp4"],
+                outputLabel: "interaction profiles and hand-use metrics",
             },
             {
                 id: "adl-recognition",
@@ -3338,24 +3354,24 @@ describe("App", () => {
     });
 });
 
-it("shows ADL dominant-hand settings only when ADL is selected", async () => {
+it("shows interaction settings only for models with hand metrics", async () => {
     const user = userEvent.setup();
 
     render(<App />);
 
     await user.click(screen.getByRole("button", { name: "Start New Run" }));
 
-    expect(screen.queryByText("ADL settings")).not.toBeInTheDocument();
+    expect(screen.queryByText("Interaction settings")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
 
-    expect(screen.queryByText("ADL settings")).not.toBeInTheDocument();
+    expect(screen.queryByText("Interaction settings")).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", {
         name: /Activity recognition \(ADL\)/,
     }));
 
-    expect(screen.getByText("ADL settings")).toBeInTheDocument();
+    expect(screen.getByText("Interaction settings")).toBeInTheDocument();
     expect(screen.getByLabelText("Right")).toBeChecked();
     expect(screen.getByLabelText("Left")).not.toBeChecked();
 
@@ -3590,4 +3606,113 @@ it("keeps output selection empty when the backend picker returns a blank path", 
 
     expect(screen.getByText("No output folder selected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Continue" })).toBeDisabled();
+});
+
+it("supports the standalone hand-interaction workflow", async () => {
+    const user = userEvent.setup();
+    const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okJson({ outputRoot: "/tmp/egomodelkit-results" }))
+        .mockResolvedValueOnce(okJson({
+            ...dryRunResponse("hand-interaction-dry-run"),
+            scenario: "hand-interaction-single-video",
+            summary: {
+                modelId: "hand-interaction",
+                model: "Hand interaction",
+                input: "clip.mp4",
+                outputFolder: "/tmp/egomodelkit-results",
+                status: "ready",
+            },
+        }));
+    const wrappedFetchMock = stubFetchWithModels(fetchMock);
+
+    await navigateToOutputStep(user, {
+        modelName: /Hand interaction/,
+        file: new File(["fake video"], "clip.mp4", { type: "video/mp4" }),
+    });
+
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    await user.click(screen.getByRole("button", { name: "Back" }));
+    expect(screen.getByText("Interaction settings")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("Left"));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.click(screen.getByRole("button", { name: "Choose Output Folder" }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+
+    expect(screen.getByText("Dominant hand:")).toBeInTheDocument();
+    expect(screen.getByText("Left")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Dry Run" }));
+
+    const dryRunCall = wrappedFetchMock.mock.calls.find(
+        ([input]) => String(input) === "/api/dry-run",
+    );
+    const formData = dryRunCall?.[1]?.body as FormData;
+    expect(formData.get("modelId")).toBe("hand-interaction");
+    expect(formData.get("dominantHand")).toBe("left");
+    expect(formData.getAll("files")).toHaveLength(1);
+});
+
+it("filters unsupported files for hand interaction", async () => {
+    const user = userEvent.setup({ applyAccept: false });
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+    await user.click(await screen.findByRole("button", { name: /Hand interaction/ }));
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await user.upload(screen.getByLabelText("Choose input files"), [
+        new File(["video"], "clip.mp4", { type: "video/mp4" }),
+        new File(["image"], "frame.jpg", { type: "image/jpeg" }),
+    ]);
+
+    expect(screen.getByText("Selected: 1 file")).toBeInTheDocument();
+    expect(screen.getByText("clip.mp4")).toBeInTheDocument();
+    expect(screen.getByText("Ignored: 1 file")).toBeInTheDocument();
+    expect(screen.getByText("frame.jpg")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Continue" })).toBeEnabled();
+});
+
+it("scrolls to hand-interaction settings when the model is selected", async () => {
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
+
+    await user.click(await screen.findByRole("button", { name: /Hand interaction/ }));
+
+    await waitFor(() => {
+        expect(scrollIntoViewMock).toHaveBeenCalledWith({
+            behavior: "smooth",
+            block: "center",
+        });
+    });
+});
+
+it("restores hand-interaction dominant-hand state", async () => {
+    localStorage.setItem(
+        APP_STATE_STORAGE_KEY,
+        JSON.stringify({
+            step: "select-model",
+            modelId: "hand-interaction",
+            dominantHand: "left",
+            inputNames: [],
+            ignoredInputNames: [],
+            outputRoot: "",
+            reviewMode: "ready",
+            runId: "",
+            activeOperationId: "",
+            progress: null,
+            resultSummary: null,
+            outputPreview: null,
+        }),
+    );
+
+    render(<App />);
+    expect(await screen.findByText("Interaction settings")).toBeInTheDocument();
+    expect(screen.getByLabelText("Left")).toBeChecked();
+    expect(screen.getByRole("button", { name: /Hand interaction/ })).toHaveAttribute(
+        "aria-pressed",
+        "true",
+    );
 });

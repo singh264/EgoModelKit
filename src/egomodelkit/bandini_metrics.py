@@ -1,4 +1,4 @@
-""" Configurable Bandini-style hand-use metrics for ADL post-processing. """
+"""Configurable Bandini-style hand-interaction metrics."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ HandRole = Literal["dominant", "non_dominant"]
 
 @dataclass(frozen=True, slots=True)
 class VideoProcessingConfig:
-    """ Shared video-processing and metric assumptions for one ADL run. """
+    """Shared video-processing and metric assumptions for one video run."""
     subclip_length_seconds: int = DEFAULT_SUBCLIP_LENGTH_SECONDS
     subclip_fps: int = DEFAULT_SUBCLIP_FPS
     frame_fps: int = DEFAULT_FRAME_FPS
@@ -88,12 +88,14 @@ class VideoProcessingConfig:
             "subclip_length_seconds": self.subclip_length_seconds,
             "subclip_fps": self.subclip_fps,
             "frame_fps": self.frame_fps,
+            "processing_fps": self.frame_fps,
             "resize_width": self.resize_width,
             "resize_height": self.resize_height,
             "pooling_window_seconds": self.pooling_window_seconds,
             "pooling_window_frames": self.pooling_window_frames,
             "interaction_contact_state_threshold": self.interaction_contact_state_threshold,
             "dominant_hand": self.dominant_hand,
+            "non_dominant_hand": _non_dominant_hand(self.dominant_hand),
         }
 
     @classmethod
@@ -126,7 +128,7 @@ DEFAULT_VIDEO_PROCESSING_CONFIG: Final[VideoProcessingConfig] = VideoProcessingC
 
 @dataclass(frozen = True, slots = True)
 class InputVideoMapping:
-    """ Mapping from EgoVizML staged names back to original user inputs. """
+    """Mapping from staged video names back to original user inputs."""
     session_id: str
     session_sort_index: int
     input_name: str
@@ -139,7 +141,7 @@ class InputVideoMapping:
 
 @dataclass(frozen = True, slots = True)
 class SubclipTimingMapping:
-    """ Source-time validity metadata for one processed EgoVizML subclip. """
+    """Source-time validity metadata for one processed video subclip."""
     session_id: str
     input_name: str
     staged_video_stem: str
@@ -384,10 +386,10 @@ def load_input_video_mappings(
     *,
     input_manifest_path: Path,
 ) -> list[InputVideoMapping]:
-    """ Load staged-name mappings from the required ADL input manifest. """
+    """Load staged-name mappings from the required input manifest."""
     if not input_manifest_path.is_file():
         raise FileNotFoundError(
-            "ADL input manifest is required for Bandini metric computation: "
+            "Input manifest is required for Bandini metric computation: "
             f"{input_manifest_path}"
         )
 
@@ -415,7 +417,7 @@ def load_input_video_mappings(
 
     if not mappings:
         raise ValueError(
-            "ADL input manifest does not contain any valid input mappings: "
+            "Input manifest does not contain any valid input mappings: "
             f"{input_manifest_path}"
         )
 
@@ -428,10 +430,10 @@ def load_subclip_timing_mappings(
     *,
     subclip_manifest_path: Path,
 ) -> list[SubclipTimingMapping]:
-    """ Load source-time validity metadata for processed EgoVizML subclips. """
+    """Load source-time validity metadata for processed video subclips."""
     if not subclip_manifest_path.is_file():
         raise FileNotFoundError(
-            "ADL subclip manifest is required for Bandini metric computation: "
+            "Subclip manifest is required for Bandini metric computation: "
             f"{subclip_manifest_path}"
         )
 
@@ -470,7 +472,7 @@ def load_subclip_timing_mappings(
 
     if invalid_processing_fps:
         raise ValueError(
-            "ADL subclip manifest contains non-positive "
+            "Subclip manifest contains non-positive "
             "processing_fps for: "
             + ", ".join(invalid_processing_fps[:5])
         )
@@ -584,7 +586,7 @@ def load_frame_interaction_predictions(
 
             if require_subclip_mapping and subclip_timing is None:
                 raise ValueError(
-                    "ADL subclip manifest does not contain timing metadata for "
+                    "Subclip manifest does not contain timing metadata for "
                     f"Shan output folder: {clip_name}"
                 )
 
@@ -705,18 +707,18 @@ def apply_statepool(
     *,
     config: VideoProcessingConfig,
 ) -> list[FrameInteractionPrediction]:
-    """ Apply Statepool only across source-valid session frames. """
+    """Apply Statepool within each original video using source-valid frames."""
     pooled_by_key: dict[tuple[str, str], FrameInteractionPrediction] = {}
     window_size = config.pooling_window_frames
 
-    for _session_id, session_frames in _group_frames_by_session(frame_predictions).items():
+    for _video_key, video_frames in _group_frames_by_video(frame_predictions).items():
         valid_frames = sorted(
             [
                 frame
-                for frame in session_frames
+                for frame in video_frames
                 if frame.is_valid_source_frame
             ],
-            key = lambda item: item.session_frame_index,
+            key = lambda item: item.video_frame_index,
         )
 
         for start in range(0, len(valid_frames), window_size):
@@ -790,34 +792,21 @@ def build_interaction_segments(
     *,
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
 ) -> list[InteractionSegment]:
-    """ Build continuous hand-specific interaction segments from pooled frames. """
+    """Build segments from each session's concatenated valid-frame profile."""
     segments: list[InteractionSegment] = []
 
-    for session_id, session_frames in _group_frames_by_session(frame_predictions).items():
+    for _session_id, session_frames in _group_frames_by_session(
+        frame_predictions
+    ).items():
         sorted_frames = sorted(
             [frame for frame in session_frames if frame.is_valid_source_frame],
-            key = lambda item: item.session_frame_index,
+            key=lambda item: item.session_frame_index,
         )
-
-        for hand_label in [LEFT_HAND_LABEL, RIGHT_HAND_LABEL]:
-            hand_role = _hand_role(
-                hand_label = hand_label,
-                dominant_hand = config.dominant_hand,
-            )
-            
-            segments.extend(
-                _segments_from_frames_for_hand(
-                    sorted_frames,
-                    session_id = session_id,
-                    hand_label = hand_label,
-                    hand_role = hand_role,
-                    config = config,
-                )
-            )
+        segments.extend(_segments_from_frames(sorted_frames, config=config))
 
     return sorted(
         segments,
-        key = lambda segment: (
+        key=lambda segment: (
             segment.session_id,
             segment.hand_role,
             segment.start_session_frame_index,
@@ -872,7 +861,7 @@ def build_video_level_metrics(
             
             continue
 
-        video_segments = _segments_from_video_frames(video_frames, config = config)
+        video_segments = _segments_from_frames(video_frames, config = config)
         
         metrics.append(
             _video_metric_from_frames_and_segments(
@@ -892,7 +881,7 @@ def build_session_level_metrics(
     mappings: list[InputVideoMapping],
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
 ) -> list[SessionLevelMetric]:
-    """ Calculate session-level metrics from session-continuous segments. """
+    """Calculate session metrics from the concatenated session segments."""
     frames_by_session = _group_frames_by_session(frame_predictions)
     segments_by_session = _group_segments_by_session(segments)
     mappings_by_session = _group_mappings_by_session(mappings)
@@ -935,8 +924,19 @@ def build_session_level_metrics(
 
             continue
 
-        recording_time_seconds = analyzed_frame_count / config.frame_fps
-        
+        recording_time_seconds = sum(
+            _recording_time_seconds_for_mapping(
+                mapping,
+                frames=[
+                    frame
+                    for frame in session_frames
+                    if frame.staged_video_stem == mapping.staged_video_stem
+                ],
+                config=config,
+            )
+            for mapping in session_mappings
+        )
+
         role_metrics = _metric_values_by_role(
             segments = session_segments,
             recording_time_seconds = recording_time_seconds,
@@ -1000,25 +1000,25 @@ def _segment_from_frames(
         end_session_frame_index = end_frame.session_frame_index,
     )
 
-def _segments_from_video_frames(
-    video_frames: list[FrameInteractionPrediction],
+def _segments_from_frames(
+    frames: list[FrameInteractionPrediction],
     *,
     config: VideoProcessingConfig,
 ) -> list[InteractionSegment]:
-    if not video_frames:
+    if not frames:
         return []
 
-    session_id = video_frames[0].session_id
+    session_id = frames[0].session_id
 
-    if any(frame.session_id != session_id for frame in video_frames):
-        raise ValueError("video_frames must belong to a single session.")
+    if any(frame.session_id != session_id for frame in frames):
+        raise ValueError("frames must belong to a single session.")
 
     segments: list[InteractionSegment] = []
 
     for hand_label in [LEFT_HAND_LABEL, RIGHT_HAND_LABEL]:
         segments.extend(
             _segments_from_frames_for_hand(
-                video_frames,
+                frames,
                 session_id = session_id,
                 hand_label = hand_label,
                 hand_role = _hand_role(
@@ -1113,8 +1113,12 @@ def _video_metric_from_frames_and_segments(
     segments: list[InteractionSegment],
     config: VideoProcessingConfig,
 ) -> VideoLevelMetric:
-    recording_time_seconds = len(frames) / config.frame_fps
-    
+    recording_time_seconds = _recording_time_seconds_for_mapping(
+        mapping,
+        frames=frames,
+        config=config,
+    )
+
     role_metrics = _metric_values_by_role(
         segments = segments,
         recording_time_seconds = recording_time_seconds,
@@ -1143,6 +1147,19 @@ def _video_metric_from_frames_and_segments(
         num_bilateral_per_hour = _bilateral_num(dominant, non_dominant),
         notes = _metric_notes("Video metrics are computed per original input video."),
     )
+
+
+def _recording_time_seconds_for_mapping(
+    mapping: InputVideoMapping,
+    *,
+    frames: list[FrameInteractionPrediction],
+    config: VideoProcessingConfig,
+) -> float:
+    """Return valid source duration, with analyzed frames as a legacy fallback."""
+    if mapping.source_duration_seconds > 0:
+        return mapping.source_duration_seconds
+
+    return len(frames) / config.frame_fps
 
 def _metric_notes(prefix: str) -> str:
     return (
@@ -1213,7 +1230,7 @@ def _clip_belongs_to_mapping(clip_name: str, mapping: InputVideoMapping) -> bool
 
     This maps real EgoVizML/Shan subclip folders such as "video001--1" and
     older test fixtures such as "video001.--1" back to the staged video
-    recorded in adl_input_manifest.csv.
+    recorded in the input manifest.
     """
     staged_stem = mapping.staged_video_stem
 

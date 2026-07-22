@@ -19,9 +19,23 @@ Directory input is processed non-recursively.
 </details>
 
 <details>
+<summary><strong>hand-interaction</strong></summary>
+
+Measures functional hand-object interactions in egocentric videos using hand-object-contact detections and hand-use processing [3]. Outputs include frame profiles, segments, and Perc, Dur, and Num.
+
+Inputs:
+
+- one `.mp4` video, or
+- one directory containing `.mp4` videos.
+
+Directory input is non-recursive. Multiple videos form one session: Statepool resets per video, session segments may merge across adjacent videos, and per-video metrics remain separate. Processing uses 30 FPS, 720 × 405 frames, 30-frame Statepool, and contact state ≥3. The dominant hand defaults to right.
+
+</details>
+
+<details>
 <summary><strong>adl-recognition</strong></summary>
 
-Runs the packaged EgoVizML activity-recognition pipeline [3], [4]. The workflow combines Detic object detection [5], [6], which builds on top of Detectron2 [7], with the hand-object detector and generates activity-recognition outputs plus hand-use metrics [8].
+Runs the packaged EgoVizML activity-recognition pipeline [4], [5]. The workflow combines Detic object detection [6], [7], which builds on Detectron2 [8], with the hand-object detector and generates activity-recognition outputs plus hand-use metrics [3].
 
 Inputs:
 
@@ -69,6 +83,21 @@ The same dry-run flow also accepts a directory containing one or more supported 
 </details>
 
 <details>
+<summary><strong>hand-interaction</strong></summary>
+
+```bash
+egomodelkit run hand-interaction \
+  --input /path/to/video.mp4 \
+  --output /path/to/results \
+  --dominant-hand right \
+  --dry-run
+```
+
+Directory input and `--dominant-hand left` are also supported.
+
+</details>
+
+<details>
 <summary><strong>adl-recognition</strong></summary>
 
 ```bash
@@ -103,6 +132,29 @@ Run multiple images from one directory:
 egomodelkit run hand-object-contact \
   --input /path/to/image-directory \
   --output /path/to/results
+```
+
+</details>
+
+<details>
+<summary><strong>hand-interaction</strong></summary>
+
+Run one video:
+
+```bash
+egomodelkit run hand-interaction \
+  --input /path/to/video.mp4 \
+  --output /path/to/results \
+  --dominant-hand right
+```
+
+Run multiple videos as one session:
+
+```bash
+egomodelkit run hand-interaction \
+  --input /path/to/video-directory \
+  --output /path/to/results \
+  --dominant-hand left
 ```
 
 </details>
@@ -202,6 +254,89 @@ Both the CLI and GUI create one `run-*` folder inside the selected output folder
 </details>
 
 <details>
+<summary><strong>Hand interaction</strong></summary>
+
+- <details>
+  <summary><strong>Input: one video</strong></summary>
+
+  ```text
+  output-root/
+    run-YYYY-MM-DD-HHMMSS/
+      README.txt
+      run_summary.json
+      run_manifest.json
+      results/
+        video_level_metrics.csv
+        session_level_metrics.csv
+        video_level_metrics_summary.csv
+      technical/
+        model_outputs/
+          hand_interaction_input_manifest.csv
+        post_processing/
+          hand_interaction_subclip_manifest.csv
+          frame_level_predictions.csv
+          interaction_segments.csv
+          metrics_config.json
+        intermediate_files/
+          extracted_frames/
+            video001--1/
+            ...
+          shan_outputs/
+            video001--1/
+            ...
+      logs/
+        progress.jsonl
+        runtime.log
+  ```
+
+  Review `results/video_level_metrics.csv` first.
+
+  </details>
+
+- <details>
+  <summary><strong>Input: multiple videos</strong></summary>
+
+  ```text
+  output-root/
+    run-YYYY-MM-DD-HHMMSS/
+      README.txt
+      run_summary.json
+      run_manifest.json
+      results/
+        video_level_metrics.csv
+        session_level_metrics.csv
+        video_level_metrics_summary.csv
+      technical/
+        model_outputs/
+          hand_interaction_input_manifest.csv
+        post_processing/
+          hand_interaction_subclip_manifest.csv
+          frame_level_predictions.csv
+          interaction_segments.csv
+          metrics_config.json
+        intermediate_files/
+          extracted_frames/
+            video001--1/
+            ...
+            video002--1/
+            ...
+          shan_outputs/
+            video001--1/
+            ...
+            video002--1/
+            ...
+      logs/
+        progress.jsonl
+        runtime.log
+  ```
+
+  Review `results/session_level_metrics.csv` for the combined session and `results/video_level_metrics.csv` for each video.
+
+  </details>
+
+</details>
+
+<details>
 <summary><strong>Activity recognition (ADL)</strong></summary>
 
 - <details>
@@ -295,17 +430,19 @@ Both the CLI and GUI create one `run-*` folder inside the selected output folder
 | `*_shan.json` | Structured HOC model output. |
 | `*_shan.pkl` | Raw HOC model output. |
 | `video_level_metrics.csv` | Hand-use metrics for each video. |
-| `session_level_metrics.csv` | Combined hand-use metrics for the ADL session. |
+| `session_level_metrics.csv` | Combined hand-use metrics for the input-video session. |
 | `video_level_metrics_summary.csv` | Compact video-level metric summary. |
 | `predictions.csv` | Detailed ADL model predictions. |
 | `predictions_summary.csv` | Compact ADL prediction summary. |
 | `adl_input_manifest.csv` | Input order and source-video information. |
+| `hand_interaction_input_manifest.csv` | Hand-interaction input order and source-video information. |
 | `all_preds.pkl` | Combined raw ADL prediction file. |
 | `adl_subclip_manifest.csv` | Source-time information used to exclude padded tail frames from metrics. |
+| `hand_interaction_subclip_manifest.csv` | Hand-interaction source-time and analyzed-frame mapping. |
 | `frame_level_predictions.csv` | Frame-level data used to calculate hand-use metrics. |
 | `interaction_segments.csv` | Continuous hand-interaction segments. |
 | `metrics_config.json` | Metric and preprocessing settings used for the run. |
-| `extracted_frames/` | Video frames used by the ADL pipeline. |
+| `extracted_frames/` | Video frames used by the video pipeline. |
 | `detic_outputs/` | Technical Detic outputs. |
 | `shan_outputs/` | Technical HOC outputs generated from video frames. |
 | `progress.jsonl` | Run progress history. |
@@ -348,7 +485,7 @@ The server binds to `127.0.0.1` by default.
 | `POST` | `/api/open-output-folder` | Open the output folder for a GUI run. |
 | `POST` | `/api/select-output-folder` | Open the system folder picker when available. |
 
-ADL runs can use either the left or right hand as the dominant hand; right is the default.
+ADL and hand-interaction runs support left- or right-hand dominance; right is the default.
 
 Interactive FastAPI documentation is also available while the backend is running:
 
@@ -367,7 +504,7 @@ The React frontend source lives in `src/egomodelkit/web`. Production assets are 
 
 - Backend-loaded model selection and model-specific file filtering.
 - Single-file and multi-file input selection.
-- ADL dominant-hand selection and one-session treatment for multi-video input.
+- Dominant-hand selection and one-session treatment for ADL and hand-interaction multi-video input.
 - Output-folder selection, review, dry run, and model execution.
 - Consistent runtime preflight before GUI dry runs and real runs.
 - Cancellation for active dry runs and model runs.
@@ -441,16 +578,16 @@ npm run dev
 
 [2] D. Shan, J. Geng, M. Shu, and D. F. Fouhey, “Hand Object Detector,” GitHub repository. [Online]. Available: [https://github.com/ddshan/hand_object_detector](https://github.com/ddshan/hand_object_detector)
 
-[3] A. Kadambi and J. Zariffa, “Detecting activities of daily living in egocentric video to contextualize hand use at home in outpatient neurorehabilitation settings,” *IEEE Transactions on Neural Systems and Rehabilitation Engineering*, vol. 33, pp. 1951–1957, 2025. [Online]. Available: [IEEE Xplore](https://ieeexplore.ieee.org/document/11000436)
+[3] A. Bandini, M. Dousty, S. L. Hitzig, B. C. Craven, S. Kalsi-Ryan, and J. Zariffa, “Measuring hand use in the home after cervical spinal cord injury using egocentric video,” *Journal of Neurotrauma*, vol. 39, nos. 23–24, pp. 1697–1707, Dec. 2022. [Online]. Available: [Publisher website](https://journals.sagepub.com/doi/10.1089/neu.2022.0156)
 
-[4] A. Kadambi, “EgoVizML,” GitHub repository. [Online]. Available: [https://github.com/adeshkadambi/EgoVizML](https://github.com/adeshkadambi/EgoVizML)
+[4] A. Kadambi and J. Zariffa, “Detecting activities of daily living in egocentric video to contextualize hand use at home in outpatient neurorehabilitation settings,” *IEEE Transactions on Neural Systems and Rehabilitation Engineering*, vol. 33, pp. 1951–1957, 2025. [Online]. Available: [IEEE Xplore](https://ieeexplore.ieee.org/document/11000436)
 
-[5] X. Zhou, R. Girdhar, A. Joulin, P. Krähenbühl, and I. Misra, “Detecting twenty-thousand classes using image-level supervision,” in *Computer Vision – ECCV 2022*, Lecture Notes in Computer Science, vol. 13669, pp. 350–368, 2022. [Online]. Available: [Springer Nature](https://link.springer.com/chapter/10.1007/978-3-031-20077-9_21)
+[5] A. Kadambi, “EgoVizML,” GitHub repository. [Online]. Available: [https://github.com/adeshkadambi/EgoVizML](https://github.com/adeshkadambi/EgoVizML)
 
-[6] Meta AI Research, “Detic,” GitHub repository. [Online]. Available: [https://github.com/facebookresearch/Detic](https://github.com/facebookresearch/Detic)
+[6] X. Zhou, R. Girdhar, A. Joulin, P. Krähenbühl, and I. Misra, “Detecting twenty-thousand classes using image-level supervision,” in *Computer Vision – ECCV 2022*, Lecture Notes in Computer Science, vol. 13669, pp. 350–368, 2022. [Online]. Available: [Springer Nature](https://link.springer.com/chapter/10.1007/978-3-031-20077-9_21)
 
-[7] Y. Wu, A. Kirillov, F. Massa, W.-Y. Lo, and R. Girshick, “Detectron2,” GitHub repository, 2019. [Online]. Available: [https://github.com/facebookresearch/detectron2](https://github.com/facebookresearch/detectron2)
+[7] Meta AI Research, “Detic,” GitHub repository. [Online]. Available: [https://github.com/facebookresearch/Detic](https://github.com/facebookresearch/Detic)
 
-[8] A. Bandini, M. Dousty, S. L. Hitzig, B. C. Craven, S. Kalsi-Ryan, and J. Zariffa, “Measuring hand use in the home after cervical spinal cord injury using egocentric video,” *Journal of Neurotrauma*, vol. 39, nos. 23–24, pp. 1697–1707, Dec. 2022. [Online]. Available: [Publisher website](https://journals.sagepub.com/doi/10.1089/neu.2022.0156)
+[8] Y. Wu, A. Kirillov, F. Massa, W.-Y. Lo, and R. Girshick, “Detectron2,” GitHub repository, 2019. [Online]. Available: [https://github.com/facebookresearch/detectron2](https://github.com/facebookresearch/detectron2)
 
 </details>

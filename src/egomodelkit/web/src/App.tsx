@@ -160,7 +160,8 @@ type PersistedAppState = {
 
 type DominantHand = "right" | "left";
 
-const ADL_MODEL_ID = "adl-recognition"
+const HAND_INTERACTION_MODEL_ID = "hand-interaction";
+const ADL_MODEL_ID = "adl-recognition";
 const DEFAULT_DOMINANT_HAND: DominantHand = "right";
 
 const STEPS: Array<{ id: StepperStep; label: string }> = [
@@ -290,7 +291,7 @@ export function App() {
 
     function selectModel(nextModelId: string) {
         if (nextModelId !== modelId) {
-            if (nextModelId !== ADL_MODEL_ID) {
+            if (!modelUsesDominantHand(nextModelId)) {
                 setDominantHand(DEFAULT_DOMINANT_HAND);
             }
 
@@ -803,9 +804,9 @@ export function App() {
                                 <ReviewScreen
                                     selectedModel={selectedModel}
                                     dominantHand={
-                                        selectedModel.id === ADL_MODEL_ID 
-                                        ? dominantHand 
-                                        : null
+                                        modelUsesDominantHand(selectedModel.id)
+                                            ? dominantHand
+                                            : null
                                     }
                                     files={files}
                                     outputRoot={outputRoot}
@@ -823,9 +824,9 @@ export function App() {
                                 <ResultsScreen
                                     selectedModel={selectedModel}
                                     dominantHand={
-                                        selectedModel.id === ADL_MODEL_ID 
-                                        ? dominantHand 
-                                        : null
+                                        modelUsesDominantHand(selectedModel.id)
+                                            ? dominantHand
+                                            : null
                                     }
                                     files={files}
                                     runId={runId}
@@ -950,6 +951,17 @@ function SelectModelScreen({
     onBack: () => void;
     onContinue: () => void;
 }) {
+    const interactionSettingsRef = useRef<HTMLElement | null>(null);
+
+    useEffect(() => {
+        if (selectedModelId === HAND_INTERACTION_MODEL_ID) {
+            interactionSettingsRef.current!.scrollIntoView({
+                behavior: "smooth",
+                block: "center",
+            });
+        }
+    }, [selectedModelId]);
+
     return (
         <>
             <PageHeading
@@ -1061,8 +1073,9 @@ function SelectModelScreen({
                 </div>
             )}
 
-           {selectedModelId === ADL_MODEL_ID ? (
-                <AdlSettingsPanel
+           {modelUsesDominantHand(selectedModelId) ? (
+                <InteractionSettingsPanel
+                    sectionRef={interactionSettingsRef}
                     dominantHand={dominantHand}
                     onDominantHandChange={onDominantHandChange}
                 />
@@ -1078,10 +1091,12 @@ function SelectModelScreen({
     );
 }
 
-function AdlSettingsPanel({
+function InteractionSettingsPanel({
+    sectionRef,
     dominantHand,
     onDominantHandChange,
 }: {
+    sectionRef: RefObject<HTMLElement | null>;
     dominantHand: DominantHand;
     onDominantHandChange: (dominantHand: DominantHand) => void;
 }) {
@@ -1089,17 +1104,18 @@ function AdlSettingsPanel({
 
     return (
         <section
-            aria-labelledby="adl-settings-heading"
+            ref={sectionRef}
+            aria-labelledby="interaction-settings-heading"
             className="
                 mt-6 rounded-2xl border border-egm-card-border bg-white px-5 py-5
                 text-base text-egm-body-copy
             "
         >
             <h2
-                id="adl-settings-heading"
+                id="interaction-settings-heading"
                 className="text-base font-semibold text-black"
             >
-                ADL settings
+                Interaction settings
             </h2>
 
             <fieldset className="mt-5">
@@ -1147,7 +1163,7 @@ function AdlSettingsPanel({
             </fieldset>
 
             <p className="mt-3 text-sm leading-6 text-egm-secondary-copy">
-                Used to label dominant-hand and non-dominant-hand clinical hand-use metrics.
+                Used to label dominant-hand and non-dominant-hand interaction metrics.
             </p>
         </section>
     );
@@ -1487,6 +1503,10 @@ function isDominantHand(value: unknown): value is DominantHand {
     return value === "right" || value === "left";
 }
 
+function modelUsesDominantHand(modelId: string): boolean {
+    return modelId === HAND_INTERACTION_MODEL_ID || modelId === ADL_MODEL_ID;
+}
+
 function dominantHandLabel(value: DominantHand): string {
     return value === "right" ? "Right" : "Left";
 }
@@ -1567,7 +1587,7 @@ async function postMultipart<T>(
     formData.append("modelId", modelId);
     formData.append("outputRoot", outputRoot);
 
-    if (modelId === ADL_MODEL_ID) {
+    if (modelUsesDominantHand(modelId)) {
         formData.append("dominantHand", dominantHand);
     }
 

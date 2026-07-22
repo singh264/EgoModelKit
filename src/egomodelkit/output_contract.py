@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -24,15 +25,21 @@ from egomodelkit.models.adl_recognition import (
     ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
     COMBINED_PREDS_FILENAME,
 )
+from egomodelkit.models.hand_interaction import (
+    HAND_INTERACTION_MODEL_ID,
+    HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
+)
 from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
     HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
 )
-from egomodelkit.progress import write_runtime_log_line
+from egomodelkit.progress import external_progress_line, write_runtime_log_line
 
 InputScenario = Literal[
     "hand-object-single-image",
     "hand-object-image-directory",
+    "hand-interaction-single-video",
+    "hand-interaction-video-directory",
     "adl-single-video",
     "adl-video-directory",
     "adl-combined-predictions",
@@ -60,6 +67,12 @@ HAND_OBJECT_DETECTION_VISUAL_SUFFIX: Final[str] = ".png"
 SESSION_LEVEL_METRICS_FILENAME: Final[str] = "session_level_metrics.csv"
 ADL_INPUT_MANIFEST_FILENAME: Final[str] = "adl_input_manifest.csv"
 ADL_SUBCLIP_MANIFEST_FILENAME: Final[str] = "adl_subclip_manifest.csv"
+HAND_INTERACTION_INPUT_MANIFEST_FILENAME: Final[str] = (
+    "hand_interaction_input_manifest.csv"
+)
+HAND_INTERACTION_SUBCLIP_MANIFEST_FILENAME: Final[str] = (
+    "hand_interaction_subclip_manifest.csv"
+)
 METRICS_CONFIG_FILENAME: Final[str] = "metrics_config.json"
 
 @dataclass(frozen = True, slots = True)
@@ -119,16 +132,28 @@ class RunOutputLayout:
         return self.technical_dir / INTERMEDIATE_FILES_DIRNAME
 
     @property
-    def adl_extracted_frames_dir(self) -> Path:
+    def extracted_frames_dir(self) -> Path:
         return self.intermediate_files_dir / "extracted_frames"
 
     @property
-    def adl_detic_outputs_dir(self) -> Path:
+    def detic_outputs_dir(self) -> Path:
         return self.intermediate_files_dir / "detic_outputs"
 
     @property
-    def adl_shan_outputs_dir(self) -> Path:
+    def shan_outputs_dir(self) -> Path:
         return self.intermediate_files_dir / "shan_outputs"
+
+    @property
+    def adl_extracted_frames_dir(self) -> Path:
+        return self.extracted_frames_dir
+
+    @property
+    def adl_detic_outputs_dir(self) -> Path:
+        return self.detic_outputs_dir
+
+    @property
+    def adl_shan_outputs_dir(self) -> Path:
+        return self.shan_outputs_dir
 
     @property
     def frame_level_predictions_path(self) -> Path:
@@ -181,12 +206,30 @@ class RunOutputLayout:
         return self.post_processing_dir / ADL_SUBCLIP_MANIFEST_FILENAME
 
     @property
+    def hand_interaction_input_manifest_path(self) -> Path:
+        return self.model_outputs_dir / HAND_INTERACTION_INPUT_MANIFEST_FILENAME
+
+    @property
+    def hand_interaction_subclip_manifest_path(self) -> Path:
+        return self.post_processing_dir / HAND_INTERACTION_SUBCLIP_MANIFEST_FILENAME
+
+    @property
     def metrics_config_path(self) -> Path:
         return self.post_processing_dir / METRICS_CONFIG_FILENAME
     
 @dataclass(frozen = True, slots = True)
 class _AdlMetricInputPaths:
     """ Runtime paths used before ADL outputs are reorganized. """
+    shan_outputs_dir: Path
+    input_manifest_path: Path
+    subclip_manifest_path: Path
+    metrics_config_path: Path
+
+@dataclass(frozen=True, slots=True)
+class _HandInteractionMetricInputPaths:
+    """Runtime paths used before hand-interaction outputs are reorganized."""
+
+    extracted_frames_dir: Path
     shan_outputs_dir: Path
     input_manifest_path: Path
     subclip_manifest_path: Path
@@ -218,6 +261,12 @@ def infer_input_scenario(*, model_id: str, input_path: Path) -> InputScenario:
         
         return "hand-object-single-image"
     
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        if input_path.is_dir():
+            return "hand-interaction-video-directory"
+
+        return "hand-interaction-single-video"
+
     if model_id == ADL_RECOGNITION_MODEL_ID:
         if input_path.is_dir():
             return "adl-video-directory"
@@ -244,6 +293,12 @@ def infer_input_scenario_from_names(
         
         return "hand-object-image-directory"
     
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        if len(input_names) == 1:
+            return "hand-interaction-single-video"
+
+        return "hand-interaction-video-directory"
+
     if model_id == ADL_RECOGNITION_MODEL_ID:
         if len(input_names) == 1 and input_names[0] == COMBINED_PREDS_FILENAME:
             return "adl-combined-predictions"
@@ -307,14 +362,16 @@ def create_output_scaffold(
     layout.logs_dir.mkdir(parents = True, exist_ok = True)
     layout.technical_dir.mkdir(parents = True, exist_ok = True)
     
-    if model_id == ADL_RECOGNITION_MODEL_ID:
+    if model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}:
         layout.results_dir.mkdir(parents = True, exist_ok = True)
         layout.model_outputs_dir.mkdir(parents = True, exist_ok = True)
         layout.post_processing_dir.mkdir(parents = True, exist_ok = True)
         layout.intermediate_files_dir.mkdir(parents = True, exist_ok = True)
-        layout.adl_extracted_frames_dir.mkdir(parents = True, exist_ok = True)
-        layout.adl_detic_outputs_dir.mkdir(parents = True, exist_ok = True)
-        layout.adl_shan_outputs_dir.mkdir(parents = True, exist_ok = True)
+        layout.extracted_frames_dir.mkdir(parents = True, exist_ok = True)
+        layout.shan_outputs_dir.mkdir(parents = True, exist_ok = True)
+
+        if model_id == ADL_RECOGNITION_MODEL_ID:
+            layout.detic_outputs_dir.mkdir(parents = True, exist_ok = True)
     elif model_id == HAND_OBJECT_CONTACT_MODEL_ID:
         (layout.visual_outputs_dir / HAND_OBJECT_VISUAL_OUTPUT_DIRNAME).mkdir(
             parents = True,
@@ -337,7 +394,7 @@ def create_output_scaffold(
         encoding = "utf-8",
     )
     
-    if model_id == ADL_RECOGNITION_MODEL_ID:
+    if model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}:
         write_stub_video_level_metric_files(
             layout = layout,
             context = preview_context,
@@ -375,7 +432,7 @@ def create_output_scaffold(
                         video_processing_config.dominant_hand
                     ),
                 }
-                if model_id == ADL_RECOGNITION_MODEL_ID
+                if model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}
                 else {}
             ),
             "notes": (
@@ -438,6 +495,64 @@ def output_folder_tree(context: OutputPreviewContext) -> str:
             "    technical/",
             "      model_outputs/",
             *model_lines,
+            "    logs/",
+            "      progress.jsonl",
+            "      runtime.log",
+        ]
+    elif context.scenario == "hand-interaction-single-video":
+        lines = [
+            f"{context.output_name}/",
+            f"  {context.run_id}/",
+            "    README.txt",
+            "    run_summary.json",
+            "    run_manifest.json",
+            "    results/",
+            "      video_level_metrics.csv",
+            "      session_level_metrics.csv",
+            "      video_level_metrics_summary.csv",
+            "    technical/",
+            "      model_outputs/",
+            "        hand_interaction_input_manifest.csv",
+            "      post_processing/",
+            "        hand_interaction_subclip_manifest.csv",
+            "        frame_level_predictions.csv",
+            "        interaction_segments.csv",
+            "        metrics_config.json",
+            "      intermediate_files/",
+            "        extracted_frames/",
+            "        shan_outputs/",
+            "    logs/",
+            "      progress.jsonl",
+            "      runtime.log",
+        ]
+    elif context.scenario == "hand-interaction-video-directory":
+        video_stems = [_stem(name) for name in context.input_names]
+        session_lines = [
+            "          ..." if stem == "..." else f"          {stem}/"
+            for stem in _preview_items(video_stems)
+        ]
+        lines = [
+            f"{context.output_name}/",
+            f"  {context.run_id}/",
+            "    README.txt",
+            "    run_summary.json",
+            "    run_manifest.json",
+            "    results/",
+            "      video_level_metrics.csv",
+            "      session_level_metrics.csv",
+            "      video_level_metrics_summary.csv",
+            "    technical/",
+            "      model_outputs/",
+            "        hand_interaction_input_manifest.csv",
+            "      post_processing/",
+            "        hand_interaction_subclip_manifest.csv",
+            "        frame_level_predictions.csv",
+            "        interaction_segments.csv",
+            "        metrics_config.json",
+            "      intermediate_files/",
+            "        extracted_frames/",
+            *session_lines,
+            "        shan_outputs/",
             "    logs/",
             "      progress.jsonl",
             "      runtime.log",
@@ -612,6 +727,80 @@ def output_file_descriptions(context: OutputPreviewContext) -> list[OutputFileDe
             *logs,
         ]
     
+    if context.scenario in {
+        "hand-interaction-single-video",
+        "hand-interaction-video-directory",
+    }:
+        return [
+            *common,
+            OutputFileDescription(
+                "video_level_metrics.csv",
+                (
+                    "One row per original video with Bandini Perc, Dur, and Num "
+                    "for dominant, non-dominant, and bilateral hand use."
+                ),
+            ),
+            OutputFileDescription(
+                "session_level_metrics.csv",
+                (
+                    "Combined metrics across the multi-video session. A pooled "
+                    "interaction that remains continuously active across adjacent "
+                    "input videos is counted as one session-level segment, while "
+                    "per-video metrics remain separate."
+                ),
+            ),
+            OutputFileDescription(
+                "video_level_metrics_summary.csv",
+                "Compact summary of computed video and session metrics.",
+            ),
+            OutputFileDescription(
+                "hand_interaction_input_manifest.csv",
+                (
+                    "Original filename, session order, staged name, source duration, "
+                    "source FPS, and source frame-count metadata for each video."
+                ),
+            ),
+            OutputFileDescription(
+                "hand_interaction_subclip_manifest.csv",
+                (
+                    "Source-time validity metadata for internal processing subclips; "
+                    "these boundaries do not reset interactions within one video."
+                ),
+            ),
+            OutputFileDescription(
+                "frame_level_predictions.csv",
+                (
+                    "Frame-level left/right contact states plus raw and Statepool "
+                    "interaction profiles for dominant and non-dominant hands."
+                ),
+            ),
+            OutputFileDescription(
+                "interaction_segments.csv",
+                (
+                    "Continuous pooled interaction segments used for session metrics. "
+                    "A segment that remains active across adjacent input videos may "
+                    "have different start and end input names; per-video metrics "
+                    "remain separate."
+                ),
+            ),
+            OutputFileDescription(
+                "metrics_config.json",
+                (
+                    "Recorded processing configuration, including 30 FPS, 720 x 405 "
+                    "resize, one-second Statepool, contact threshold, and hand mapping."
+                ),
+            ),
+            OutputFileDescription(
+                "extracted_frames/",
+                "Analyzed 30 FPS, 720 x 405 frames grouped by internal subclip.",
+            ),
+            OutputFileDescription(
+                "shan_outputs/",
+                "Technical HOC visualizations, JSON predictions, and pickle outputs.",
+            ),
+            *logs,
+        ]
+
     return [
         *common,
         OutputFileDescription(
@@ -626,8 +815,9 @@ def output_file_descriptions(context: OutputPreviewContext) -> list[OutputFileDe
             (
                 "Session-level Bandini hand-use metrics grouped by session, "
                 "including dominant-hand, non-dominant-hand, and bilateral "
-                "Perc/Dur/Num values. For ADL multi-file input, selected videos "
-                "are treated as one session and summarized together."
+                "Perc/Dur/Num values. Selected videos are treated as one logical "
+                "session, and interactions that remain continuous across adjacent "
+                "videos are merged into one session-level segment."
             ),
         ),
         OutputFileDescription(
@@ -730,6 +920,12 @@ def run_readme_text(*, model_id: str, context: OutputPreviewContext) -> str:
         f"- {description.name}: {description.description}"
         for description in output_file_descriptions(context)
     )
+    session_guidance = (
+        "Also review for the combined multi-video session: "
+        "results/session_level_metrics.csv\n\n"
+        if context.scenario == "hand-interaction-video-directory"
+        else ""
+    )
     
     return (
         f"EgoModelKit Run Output\n"
@@ -738,6 +934,7 @@ def run_readme_text(*, model_id: str, context: OutputPreviewContext) -> str:
         "\n"
         f"Recommended file or folder to review first: {main_files}\n"
         "\n"
+        f"{session_guidance}"
         "File descriptions:\n"
         f"{descriptions}\n"
         "\n"
@@ -750,88 +947,122 @@ def finalize_runtime_outputs(
     model_id: str,
     input_path: Path,
     scenario: InputScenario,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
-    """ Move runtime outputs into the stable wireframe-aligned output contract. """
+    """Move runtime outputs into the stable public output contract."""
+    del input_path, scenario
+    report = progress or (lambda _message: None)
+
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
+        report("Organizing hand-object-contact outputs.")
         _organize_hand_object_runtime_outputs(layout)
-        
+        return
+
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        metric_inputs = _resolve_hand_interaction_metric_input_paths(layout)
+        _validate_hand_interaction_prediction_counts(metric_inputs)
+        _finalize_bandini_metric_outputs(
+            layout=layout,
+            metric_inputs=metric_inputs,
+            pipeline_label="Hand-interaction inference",
+            progress=report,
+            emit_progress=True,
+        )
+        _organize_hand_interaction_runtime_outputs(layout)
         return
 
     if model_id == ADL_RECOGNITION_MODEL_ID:
         metric_inputs = _resolve_adl_metric_input_paths(layout)
-        
-        expected_prediction_count = _count_shan_prediction_files(
-            metric_inputs.shan_outputs_dir
+        _finalize_bandini_metric_outputs(
+            layout=layout,
+            metric_inputs=metric_inputs,
+            pipeline_label="ADL inference",
+            progress=report,
+            emit_progress=False,
         )
-        
-        manifest_has_subclips = _csv_has_data_rows(
-            metric_inputs.subclip_manifest_path
-        )
-
-        _write_adl_metric_input_diagnostics(
-            layout = layout,
-            metric_inputs = metric_inputs,
-            expected_prediction_count = expected_prediction_count,
-            manifest_has_subclips = manifest_has_subclips,
-        )
-
-        if manifest_has_subclips and expected_prediction_count == 0:
-            raise RuntimeError(
-                "ADL inference produced a subclip manifest but no Shan JSON "
-                "frame predictions were found for Bandini metric computation. "
-                f"Resolved Shan directory: {metric_inputs.shan_outputs_dir}"
-            )
-
-        config = read_video_processing_config(
-            metric_inputs.metrics_config_path
-        )
-
-        write_bandini_metric_files(
-            shan_outputs_dir = metric_inputs.shan_outputs_dir,
-            input_manifest_path = metric_inputs.input_manifest_path,
-            subclip_manifest_path = metric_inputs.subclip_manifest_path,
-            frame_level_predictions_path = layout.frame_level_predictions_path,
-            interaction_segments_path = layout.interaction_segments_path,
-            video_level_metrics_path = layout.video_level_metrics_path,
-            session_level_metrics_path = layout.session_level_metrics_path,
-            video_level_metrics_summary_path = layout.video_level_metrics_summary_path,
-            metrics_config_path = layout.metrics_config_path,
-            config = config,
-            diagnostic_log = lambda message: write_runtime_log_line(
-                layout.runtime_log_path,
-                f"Bandini diagnostics: {message}",
-            ),
-        )
-
-        actual_prediction_count = _count_csv_data_rows(
-            layout.frame_level_predictions_path
-        )
-
-        write_runtime_log_line(
-            layout.runtime_log_path,
-            (
-                "Bandini diagnostics: generated Shan JSON count="
-                f"{expected_prediction_count}; frame-level rows written="
-                f"{actual_prediction_count}."
-            ),
-        )
-
-        if actual_prediction_count != expected_prediction_count:
-            raise RuntimeError(
-                "Bandini metric computation did not consume every Shan JSON "
-                "prediction: expected "
-                f"{expected_prediction_count}, wrote {actual_prediction_count}. "
-                f"See {layout.runtime_log_path} for path and matching details."
-            )
-
-        # Preserve the enriched config written by write_bandini_metric_files().
-        _remove_path(layout.run_dir / METRICS_CONFIG_FILENAME)
-
         _organize_adl_runtime_outputs(layout)
-
         return
 
     raise ValueError(f"Unsupported model id: {model_id}")
+
+
+def _finalize_bandini_metric_outputs(
+    *,
+    layout: RunOutputLayout,
+    metric_inputs: _AdlMetricInputPaths | _HandInteractionMetricInputPaths,
+    pipeline_label: str,
+    progress: Callable[[str], None],
+    emit_progress: bool,
+) -> None:
+    """Calculate shared Bandini outputs from one pipeline's HOC predictions."""
+    expected_prediction_count = _count_shan_prediction_files(
+        metric_inputs.shan_outputs_dir
+    )
+    manifest_has_subclips = _csv_has_data_rows(metric_inputs.subclip_manifest_path)
+    _write_bandini_metric_input_diagnostics(
+        layout=layout,
+        metric_inputs=metric_inputs,
+        expected_prediction_count=expected_prediction_count,
+        manifest_has_subclips=manifest_has_subclips,
+    )
+
+    if manifest_has_subclips and expected_prediction_count == 0:
+        raise RuntimeError(
+            f"{pipeline_label} produced a subclip manifest but no Shan JSON "
+            "frame predictions were found for Bandini metric computation. "
+            f"Resolved Shan directory: {metric_inputs.shan_outputs_dir}"
+        )
+
+    if emit_progress:
+        progress(external_progress_line("hand_interaction_profiles_calculating"))
+    config = read_video_processing_config(metric_inputs.metrics_config_path)
+    if emit_progress:
+        progress(external_progress_line("hand_interaction_metrics_calculating"))
+    write_bandini_metric_files(
+        shan_outputs_dir=metric_inputs.shan_outputs_dir,
+        input_manifest_path=metric_inputs.input_manifest_path,
+        subclip_manifest_path=metric_inputs.subclip_manifest_path,
+        frame_level_predictions_path=layout.frame_level_predictions_path,
+        interaction_segments_path=layout.interaction_segments_path,
+        video_level_metrics_path=layout.video_level_metrics_path,
+        session_level_metrics_path=layout.session_level_metrics_path,
+        video_level_metrics_summary_path=layout.video_level_metrics_summary_path,
+        metrics_config_path=layout.metrics_config_path,
+        config=config,
+        diagnostic_log=lambda message: write_runtime_log_line(
+            layout.runtime_log_path,
+            f"Bandini diagnostics: {message}",
+        ),
+    )
+    actual_prediction_count = _count_csv_data_rows(layout.frame_level_predictions_path)
+    write_runtime_log_line(
+        layout.runtime_log_path,
+        (
+            "Bandini diagnostics: generated Shan JSON count="
+            f"{expected_prediction_count}; frame-level rows written="
+            f"{actual_prediction_count}."
+        ),
+    )
+
+    if actual_prediction_count != expected_prediction_count:
+        raise RuntimeError(
+            "Bandini metric computation did not consume every Shan JSON "
+            "prediction: expected "
+            f"{expected_prediction_count}, wrote {actual_prediction_count}. "
+            f"See {layout.runtime_log_path} for path and matching details."
+        )
+
+    if emit_progress:
+        progress(
+            external_progress_line(
+                "hand_interaction_metrics_calculated",
+                current=1,
+                total=1,
+            )
+        )
+    _remove_path(layout.run_dir / METRICS_CONFIG_FILENAME)
+    if emit_progress:
+        progress(external_progress_line("hand_interaction_outputs_organizing"))
 
 def write_stub_video_level_metric_files(
     *,
@@ -840,7 +1071,7 @@ def write_stub_video_level_metric_files(
     status: str,
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
 ) -> None:
-    """ Write placeholder ADL video-level metrics until Bandini metrics are implemented. """
+    """Write placeholder video metrics until runtime finalization completes."""
     layout.results_dir.mkdir(parents = True, exist_ok = True)
     layout.post_processing_dir.mkdir(parents = True, exist_ok = True)
 
@@ -867,7 +1098,7 @@ def write_stub_video_level_metric_files(
             "dur_bilateral_seconds": 0,
             "num_bilateral_per_hour": 0,
             "notes": (
-                "Pending ADL hand-use metrics. Completed runs replace this "
+                "Pending hand-interaction metrics. Completed runs replace this "
                 "scaffold with real video-level metrics."
             ),
         }
@@ -907,8 +1138,8 @@ def write_stub_video_level_metric_files(
                 "metric": "video_level_hand_function_metrics",
                 "metric_status": status,
                 "notes": (
-                    "Placeholder summary only; final Bandini-style metric "
-                    "definitions will be implemented separately."
+                    "Placeholder summary only; runtime finalization replaces this "
+                    "row with calculated Bandini-style metrics."
                 ),
             }
         ],
@@ -991,7 +1222,7 @@ def write_stub_video_level_metric_files(
                 "dur_bilateral_seconds": 0,
                 "num_bilateral_per_hour": 0,
                 "notes": (
-                    "Pending ADL hand-use metrics. Completed runs replace this "
+                    "Pending hand-interaction metrics. Completed runs replace this "
                     "scaffold with real session-level metrics."
                 ),
             }
@@ -1020,10 +1251,46 @@ def _organize_hand_object_runtime_outputs(layout: RunOutputLayout) -> None:
 
     _remove_non_contract_root_outputs(layout)
 
+def _resolve_hand_interaction_metric_input_paths(
+    layout: RunOutputLayout,
+) -> _HandInteractionMetricInputPaths:
+    """Resolve authoritative hand-interaction metric inputs before moving them."""
+    runtime_work_dir = layout.run_dir / "hand_interaction_work"
+    shan_outputs_dir = runtime_work_dir / "shan_outputs"
+
+    if not shan_outputs_dir.is_dir():
+        shan_outputs_dir = layout.shan_outputs_dir
+
+    extracted_frames_dir = runtime_work_dir / "extracted_frames"
+
+    if not extracted_frames_dir.is_dir():
+        extracted_frames_dir = layout.extracted_frames_dir
+
+    return _HandInteractionMetricInputPaths(
+        extracted_frames_dir=extracted_frames_dir,
+        shan_outputs_dir=shan_outputs_dir,
+        input_manifest_path=_first_existing_file_path(
+            [
+                layout.run_dir / HAND_INTERACTION_INPUT_MANIFEST_FILENAME,
+                layout.hand_interaction_input_manifest_path,
+            ]
+        ),
+        subclip_manifest_path=_first_existing_file_path(
+            [
+                layout.run_dir / HAND_INTERACTION_SUBCLIP_MANIFEST_FILENAME,
+                layout.hand_interaction_subclip_manifest_path,
+            ]
+        ),
+        metrics_config_path=_first_existing_file_path(
+            [layout.run_dir / METRICS_CONFIG_FILENAME, layout.metrics_config_path]
+        ),
+    )
+
+
 def _resolve_adl_metric_input_paths(
     layout: RunOutputLayout,
 ) -> _AdlMetricInputPaths:
-    """ Resolve authoritative ADL metric inputs before moving runtime files. """
+    """Resolve authoritative ADL metric inputs before moving runtime files."""
     runtime_work_dir = layout.run_dir / "adl_recognition_work"
     staged_adl_dirs = _adl_runtime_staging_dirs(runtime_work_dir)
 
@@ -1083,6 +1350,44 @@ def _first_existing_child_dir_path(
 
     return None
 
+def _validate_hand_interaction_prediction_counts(
+    metric_inputs: _HandInteractionMetricInputPaths,
+) -> None:
+    """Reject partially completed HOC inference before metrics are calculated."""
+    if not metric_inputs.extracted_frames_dir.is_dir():
+        raise RuntimeError(
+            "Hand-interaction inference did not produce the extracted-frame "
+            f"directory: {metric_inputs.extracted_frames_dir}"
+        )
+
+    extracted_counts = {
+        subclip_dir.name: sum(1 for _ in subclip_dir.glob("*.jpg"))
+        for subclip_dir in metric_inputs.extracted_frames_dir.iterdir()
+        if subclip_dir.is_dir()
+    }
+    shan_counts = {
+        subclip_name: sum(1 for _ in subclip_dir.glob("*_shan.json"))
+        for subclip_name, subclip_dir in (
+            (name, metric_inputs.shan_outputs_dir / name)
+            for name in extracted_counts
+        )
+        if subclip_dir.is_dir()
+    }
+
+    if sum(shan_counts.values()) == 0:
+        return
+
+    for subclip_name, extracted_count in extracted_counts.items():
+        prediction_count = shan_counts.get(subclip_name, 0)
+
+        if prediction_count != extracted_count:
+            raise RuntimeError(
+                "Hand-interaction inference produced incomplete Shan JSON "
+                f"predictions for {subclip_name}: expected {extracted_count}, "
+                f"found {prediction_count}."
+            )
+
+
 def _count_shan_prediction_files(shan_outputs_dir: Path) -> int:
     """ Count Shan JSON frame predictions under one output tree. """
     if not shan_outputs_dir.is_dir():
@@ -1117,10 +1422,10 @@ def _count_csv_data_rows(path: Path) -> int:
     ) as csv_file:
         return sum(1 for _ in csv.DictReader(csv_file))
 
-def _write_adl_metric_input_diagnostics(
+def _write_bandini_metric_input_diagnostics(
     *,
     layout: RunOutputLayout,
-    metric_inputs: _AdlMetricInputPaths,
+    metric_inputs: _AdlMetricInputPaths | _HandInteractionMetricInputPaths,
     expected_prediction_count: int,
     manifest_has_subclips: bool,
 ) -> None:
@@ -1162,6 +1467,40 @@ def _write_adl_metric_input_diagnostics(
             layout.runtime_log_path,
             f"Bandini diagnostics: {message}",
         )
+
+def _organize_hand_interaction_runtime_outputs(layout: RunOutputLayout) -> None:
+    """Move standalone hand-interaction files into stable public locations."""
+    layout.results_dir.mkdir(parents=True, exist_ok=True)
+    layout.model_outputs_dir.mkdir(parents=True, exist_ok=True)
+    layout.post_processing_dir.mkdir(parents=True, exist_ok=True)
+    layout.intermediate_files_dir.mkdir(parents=True, exist_ok=True)
+    runtime_work_dir = layout.run_dir / "hand_interaction_work"
+
+    _move_first_existing_file(
+        sources=[layout.run_dir / HAND_INTERACTION_INPUT_MANIFEST_FILENAME],
+        destination=layout.hand_interaction_input_manifest_path,
+    )
+    _move_first_existing_file(
+        sources=[layout.run_dir / HAND_INTERACTION_SUBCLIP_MANIFEST_FILENAME],
+        destination=layout.hand_interaction_subclip_manifest_path,
+    )
+    _move_first_existing_file(
+        sources=[layout.run_dir / METRICS_CONFIG_FILENAME],
+        destination=layout.metrics_config_path,
+    )
+    _move_first_existing_child_dir(
+        search_roots=[runtime_work_dir],
+        dirnames=["extracted_frames"],
+        destination=layout.extracted_frames_dir,
+    )
+    _move_first_existing_child_dir(
+        search_roots=[runtime_work_dir],
+        dirnames=["shan_outputs"],
+        destination=layout.shan_outputs_dir,
+    )
+    _remove_path(runtime_work_dir)
+    _remove_non_contract_root_outputs(layout)
+
 
 def _organize_adl_runtime_outputs(layout: RunOutputLayout) -> None:
     layout.results_dir.mkdir(parents = True, exist_ok = True)
@@ -1319,6 +1658,8 @@ def _input_names_for_preview(*, model_id: str, input_path: Path) -> list[str]:
     
     if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
         suffixes = HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES
+    elif model_id == HAND_INTERACTION_MODEL_ID:
+        suffixes = HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES
     elif model_id == ADL_RECOGNITION_MODEL_ID:
         suffixes = ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES
     else:
