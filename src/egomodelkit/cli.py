@@ -26,13 +26,6 @@ from egomodelkit.models.hand_interaction import (
     HandInteractionRequest,
     validate_hand_interaction_request,
 )
-from egomodelkit.models.hand_object_contact import (
-    HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE,
-    HAND_OBJECT_CONTACT_MODEL_ID,
-    HandObjectContactInputError,
-    HandObjectContactRequest,
-    validate_hand_object_contact_request,
-)
 from egomodelkit.output_contract import (
     build_run_id,
     build_run_output_layout,
@@ -58,10 +51,6 @@ from egomodelkit.runtime.commands import (
 from egomodelkit.runtime.hand_interaction import (
     HandInteractionRuntimeError,
     run_hand_interaction,
-)
-from egomodelkit.runtime.hand_object_contact import (
-    HandObjectContactRuntimeError,
-    run_hand_object_contact,
 )
 from egomodelkit.runtime.preflight import (
     HostPrerequisiteError,
@@ -144,17 +133,10 @@ def _cli_progress_reporter(layout) -> Callable[[str], None]:
 def _run_model_with_output_contract(
     *,
     model_id: str,
-    request: HandObjectContactRequest | HandInteractionRequest | AdlRecognitionRequest,
+    request: HandInteractionRequest | AdlRecognitionRequest,
 ) -> Path:
     """ Run one validated CLI model with the same output contract used by the GUI. """
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        if not isinstance(request, HandObjectContactRequest):
-            raise TypeError(
-                "Hand-object contact requires a HandObjectContactRequest."
-            )
-
-        validate_hand_object_contact_request(request)
-    elif model_id == HAND_INTERACTION_MODEL_ID:
+    if model_id == HAND_INTERACTION_MODEL_ID:
         if not isinstance(request, HandInteractionRequest):
             raise TypeError("Hand interaction requires a HandInteractionRequest.")
 
@@ -172,9 +154,9 @@ def _run_model_with_output_contract(
     layout = build_run_output_layout(output_root, run_id = run_id)
     scenario = infer_input_scenario(model_id = model_id, input_path = request.input_path)
     video_processing_config = VideoProcessingConfig(
-        dominant_hand = (
+        dominant_hand=(
             request.dominant_hand
-            if isinstance(request, (HandInteractionRequest, AdlRecognitionRequest))
+            if isinstance(request, HandInteractionRequest)
             else DEFAULT_DOMINANT_HAND
         ),
     )
@@ -191,17 +173,7 @@ def _run_model_with_output_contract(
     progress = _cli_progress_reporter(layout)
 
     try:
-        if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-            run_hand_object_contact(
-                HandObjectContactRequest(
-                    input_path=request.input_path,
-                    output_dir=layout.run_dir,
-                ),
-                command_runner=subprocess_runner,
-                streaming_command_runner=streaming_subprocess_runner,
-                progress=progress,
-            )
-        elif model_id == HAND_INTERACTION_MODEL_ID:
+        if model_id == HAND_INTERACTION_MODEL_ID:
             hand_interaction_request = request
             assert isinstance(hand_interaction_request, HandInteractionRequest)
             run_hand_interaction(
@@ -221,7 +193,6 @@ def _run_model_with_output_contract(
                 AdlRecognitionRequest(
                     input_path=adl_request.input_path,
                     output_dir=layout.run_dir,
-                    dominant_hand=adl_request.dominant_hand,
                 ),
                 command_runner=subprocess_runner,
                 streaming_command_runner=streaming_subprocess_runner,
@@ -255,16 +226,6 @@ def _run_model_with_output_contract(
         raise
 
     return layout.run_dir
-
-
-def _run_hand_object_contact_with_output_contract(
-    request: HandObjectContactRequest,
-) -> Path:
-    """ Run hand-object contact through the shared CLI output contract. """
-    return _run_model_with_output_contract(
-        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
-        request = request,
-    )
 
 
 def _run_hand_interaction_with_output_contract(
@@ -343,8 +304,7 @@ def run(
     model_id: str = typer.Argument(
         ...,
         help = (
-            "Public model id. Supported: hand-object-contact, "
-            "hand-interaction, adl-recognition."
+            "Public model id. Supported: hand-interaction, adl-recognition."
         ),
     ),
     dry_run: bool = typer.Option(
@@ -353,16 +313,15 @@ def run(
         help = "Validate the request without executing the model.",
     ),
     dominant_hand: Annotated[
-        str,
+        str | None,
         typer.Option(
             "--dominant-hand",
-            help = "Dominant hand used for hand-interaction metrics: left or right.",
+            help="Dominant hand for hand-interaction only: left or right.",
         ),
-    ] = DEFAULT_DOMINANT_HAND,
+    ] = None,
 ) -> None:
     """ Run one packaged model adapter. """
     if model_id not in {
-        HAND_OBJECT_CONTACT_MODEL_ID,
         HAND_INTERACTION_MODEL_ID,
         ADL_RECOGNITION_MODEL_ID,
     }:
@@ -370,28 +329,11 @@ def run(
         raise typer.Exit(code=CLI_UNSUPPORTED_MODEL_EXIT_CODE)
         
     try:
-        if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-            request = HandObjectContactRequest(
-                input_path = input_path,
-                output_dir = output_dir,
-            )
-
-            if dry_run:
-                validate_hand_object_contact_request(request)
-                typer.echo(HAND_OBJECT_CONTACT_DRY_RUN_VALIDATION_MESSAGE)
-                typer.echo(f"Input: {input_path}")
-                typer.echo(f"Output: {output_dir}")
-                
-                return
-
-            completed_output_dir = _run_hand_object_contact_with_output_contract(request)
-
-            typer.echo("Completed: hand-object-contact")
-        elif model_id == HAND_INTERACTION_MODEL_ID:
+        if model_id == HAND_INTERACTION_MODEL_ID:
             request = HandInteractionRequest(
                 input_path=input_path,
                 output_dir=output_dir,
-                dominant_hand=cast(HandLabel, dominant_hand),
+                dominant_hand=cast(HandLabel, dominant_hand or DEFAULT_DOMINANT_HAND),
             )
 
             if dry_run:
@@ -405,10 +347,14 @@ def run(
             completed_output_dir = _run_hand_interaction_with_output_contract(request)
             typer.echo("Completed: hand-interaction")
         else:
+            if dominant_hand is not None:
+                raise AdlRecognitionInputError(
+                    "--dominant-hand is only supported for hand-interaction."
+                )
+
             request = AdlRecognitionRequest(
                 input_path=input_path,
                 output_dir=output_dir,
-                dominant_hand=cast(HandLabel, dominant_hand),
             )
 
             if dry_run:
@@ -416,17 +362,14 @@ def run(
                 typer.echo(ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE)
                 typer.echo(f"Input: {input_path}")
                 typer.echo(f"Output: {output_dir}")
-                typer.echo(f"Dominant hand: {request.dominant_hand}")
                 return
 
             completed_output_dir = _run_adl_recognition_with_output_contract(request)
             typer.echo("Completed: adl-recognition")
     except (
-        HandObjectContactInputError,
         HandInteractionInputError,
         AdlRecognitionInputError,
         HostPrerequisiteError,
-        HandObjectContactRuntimeError,
         HandInteractionRuntimeError,
         AdlRecognitionRuntimeError,
         RuntimeError,

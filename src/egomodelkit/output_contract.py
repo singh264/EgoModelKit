@@ -21,8 +21,12 @@ from egomodelkit.bandini_metrics import (
     write_video_processing_config,
 )
 from egomodelkit.models.adl_recognition import (
+    ADL_ACTIVE_OBJECT_IOU_THRESHOLD,
+    ADL_INFERENCE_FRAME_FPS,
     ADL_RECOGNITION_MODEL_ID,
     ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
+    ADL_SEGMENT_LENGTH_SECONDS,
+    ADL_SUBCLIP_ENCODING_FPS,
     COMBINED_PREDS_FILENAME,
 )
 from egomodelkit.models.hand_interaction import (
@@ -66,7 +70,11 @@ HAND_OBJECT_DETECTION_VISUAL_SUFFIX: Final[str] = ".png"
 
 SESSION_LEVEL_METRICS_FILENAME: Final[str] = "session_level_metrics.csv"
 ADL_INPUT_MANIFEST_FILENAME: Final[str] = "adl_input_manifest.csv"
-ADL_SUBCLIP_MANIFEST_FILENAME: Final[str] = "adl_subclip_manifest.csv"
+ADL_SEGMENT_MANIFEST_FILENAME: Final[str] = "adl_segment_manifest.csv"
+ADL_PROCESSING_CONFIG_FILENAME: Final[str] = "adl_processing_config.json"
+ADL_SEGMENT_PREDICTIONS_FILENAME: Final[str] = "adl_segment_predictions.csv"
+ADL_VIDEO_SUMMARY_FILENAME: Final[str] = "adl_video_summary.csv"
+ADL_SESSION_SUMMARY_FILENAME: Final[str] = "adl_session_summary.csv"
 HAND_INTERACTION_INPUT_MANIFEST_FILENAME: Final[str] = (
     "hand_interaction_input_manifest.csv"
 )
@@ -202,8 +210,24 @@ class RunOutputLayout:
         return self.model_outputs_dir / ADL_INPUT_MANIFEST_FILENAME
 
     @property
-    def adl_subclip_manifest_path(self) -> Path:
-        return self.post_processing_dir / ADL_SUBCLIP_MANIFEST_FILENAME
+    def adl_segment_manifest_path(self) -> Path:
+        return self.post_processing_dir / ADL_SEGMENT_MANIFEST_FILENAME
+
+    @property
+    def adl_processing_config_path(self) -> Path:
+        return self.post_processing_dir / ADL_PROCESSING_CONFIG_FILENAME
+
+    @property
+    def adl_segment_predictions_path(self) -> Path:
+        return self.results_dir / ADL_SEGMENT_PREDICTIONS_FILENAME
+
+    @property
+    def adl_video_summary_path(self) -> Path:
+        return self.results_dir / ADL_VIDEO_SUMMARY_FILENAME
+
+    @property
+    def adl_session_summary_path(self) -> Path:
+        return self.results_dir / ADL_SESSION_SUMMARY_FILENAME
 
     @property
     def hand_interaction_input_manifest_path(self) -> Path:
@@ -217,14 +241,6 @@ class RunOutputLayout:
     def metrics_config_path(self) -> Path:
         return self.post_processing_dir / METRICS_CONFIG_FILENAME
     
-@dataclass(frozen = True, slots = True)
-class _AdlMetricInputPaths:
-    """ Runtime paths used before ADL outputs are reorganized. """
-    shan_outputs_dir: Path
-    input_manifest_path: Path
-    subclip_manifest_path: Path
-    metrics_config_path: Path
-
 @dataclass(frozen=True, slots=True)
 class _HandInteractionMetricInputPaths:
     """Runtime paths used before hand-interaction outputs are reorganized."""
@@ -394,18 +410,24 @@ def create_output_scaffold(
         encoding = "utf-8",
     )
     
-    if model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}:
+    if model_id == HAND_INTERACTION_MODEL_ID:
         write_stub_video_level_metric_files(
-            layout = layout,
-            context = preview_context,
-            status = "pending",
-            config = video_processing_config,
+            layout=layout,
+            context=preview_context,
+            status="pending",
+            config=video_processing_config,
         )
-        
         write_video_processing_config(
             layout.metrics_config_path,
             video_processing_config,
         )
+    elif model_id == ADL_RECOGNITION_MODEL_ID:
+        write_stub_adl_output_files(
+            layout=layout,
+            context=preview_context,
+            status="pending",
+        )
+        write_adl_processing_config(layout.adl_processing_config_path)
     
     _write_json(
         layout.run_summary_path,
@@ -432,8 +454,12 @@ def create_output_scaffold(
                         video_processing_config.dominant_hand
                     ),
                 }
-                if model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}
-                else {}
+                if model_id == HAND_INTERACTION_MODEL_ID
+                else (
+                    _adl_processing_configuration()
+                    if model_id == ADL_RECOGNITION_MODEL_ID
+                    else {}
+                )
             ),
             "notes": (
                 "Runtime image IDs and exact code/model pins may be populated "
@@ -565,22 +591,20 @@ def output_folder_tree(context: OutputPreviewContext) -> str:
             "    run_summary.json",
             "    run_manifest.json",
             "    results/",
-            "      video_level_metrics.csv",
-            "      session_level_metrics.csv",
-            "      video_level_metrics_summary.csv",
+            "      adl_segment_predictions.csv",
+            "      adl_video_summary.csv",
+            "      adl_session_summary.csv",
             "    technical/",
             "      model_outputs/",
-            "        predictions.csv",
-            "        predictions_summary.csv",
             "        adl_input_manifest.csv",
             "        all_preds.pkl",
             "      post_processing/",
-            "        adl_subclip_manifest.csv",
-            "        frame_level_predictions.csv",
-            "        interaction_segments.csv",
-            "        metrics_config.json",
+            "        adl_segment_manifest.csv",
+            "        adl_processing_config.json",
             "      intermediate_files/",
             "        extracted_frames/",
+            "          video001--1/",
+            "          ...",
             "        detic_outputs/",
             "        shan_outputs/",
             "    logs/",
@@ -588,13 +612,14 @@ def output_folder_tree(context: OutputPreviewContext) -> str:
             "      runtime.log",
         ]
     elif context.scenario == "adl-video-directory":
-        video_stems = [_stem(name) for name in context.input_names]
-        
-        session_lines = [
-            "          ..." if stem == "..." else f"          {stem}/" 
-            for stem in _preview_items(video_stems)
+        staged_segment_names = [
+            f"video{index:03d}--1"
+            for index, _input_name in enumerate(context.input_names, start=1)
         ]
-        
+        session_lines = [
+            "          ..." if name == "..." else f"          {name}/"
+            for name in _preview_items(staged_segment_names)
+        ]
         lines = [
             f"{context.output_name}/",
             f"  {context.run_id}/",
@@ -602,20 +627,16 @@ def output_folder_tree(context: OutputPreviewContext) -> str:
             "    run_summary.json",
             "    run_manifest.json",
             "    results/",
-            "      video_level_metrics.csv",
-            "      session_level_metrics.csv",
-            "      video_level_metrics_summary.csv",
+            "      adl_segment_predictions.csv",
+            "      adl_video_summary.csv",
+            "      adl_session_summary.csv",
             "    technical/",
             "      model_outputs/",
-            "        predictions.csv",
-            "        predictions_summary.csv",
             "        adl_input_manifest.csv",
             "        all_preds.pkl",
             "      post_processing/",
-            "        adl_subclip_manifest.csv",
-            "        frame_level_predictions.csv",
-            "        interaction_segments.csv",
-            "        metrics_config.json",
+            "        adl_segment_manifest.csv",
+            "        adl_processing_config.json",
             "      intermediate_files/",
             "        extracted_frames/",
             *session_lines,
@@ -633,22 +654,17 @@ def output_folder_tree(context: OutputPreviewContext) -> str:
             "    run_summary.json",
             "    run_manifest.json",
             "    results/",
-            "      video_level_metrics.csv",
-            "      session_level_metrics.csv",
-            "      video_level_metrics_summary.csv",
+            "      adl_segment_predictions.csv",
+            "      adl_video_summary.csv",
+            "      adl_session_summary.csv",
             "    technical/",
             "      model_outputs/",
-            "        predictions.csv",
-            "        predictions_summary.csv",
-            "        adl_input_manifest.csv",
             f"        {context.input_names[0]}",
             "      post_processing/",
-            "        frame_level_predictions.csv",
-            "        interaction_segments.csv",
-            "        metrics_config.json",
+            "        adl_processing_config.json",
             "    logs/",
             "      progress.jsonl",
-            "      runtime.log"
+            "      runtime.log",
         ]
     else:
         raise ValueError(f"Unsupported output scenario: {context.scenario}")  
@@ -804,89 +820,77 @@ def output_file_descriptions(context: OutputPreviewContext) -> list[OutputFileDe
     return [
         *common,
         OutputFileDescription(
-            "video_level_metrics.csv",
+            "adl_segment_predictions.csv",
             (
-                "Per-video Bandini hand-use metrics: Perc, Dur, and Num " +
-                "for dominant hand, non-dominant hand, and bilateral summaries."
+                "One ADL prediction per original-video segment, with source video, "
+                "segment index, source start/end time, valid duration, predicted "
+                "label, confidence, and class probabilities."
             ),
         ),
         OutputFileDescription(
-            "session_level_metrics.csv",
+            "adl_video_summary.csv",
             (
-                "Session-level Bandini hand-use metrics grouped by session, "
-                "including dominant-hand, non-dominant-hand, and bilateral "
-                "Perc/Dur/Num values. Selected videos are treated as one logical "
-                "session, and interactions that remain continuous across adjacent "
-                "videos are merged into one session-level segment."
+                "Descriptive per-video counts and valid-duration totals grouped by "
+                "predicted ADL. These are summaries, not clinical hand-use metrics."
             ),
         ),
         OutputFileDescription(
-            "video_level_metrics_summary.csv",
-            "Compact summary of the video-level metrics for quick review."
-        ),
-        OutputFileDescription(
-            "predictions.csv",
-            "Technical activity recognition prediction output before final post-processing.",
-        ),
-        OutputFileDescription(
-            "predictions_summary.csv",
-            "Technical summary of activity recognition predictions before final post-processing.",
+            "adl_session_summary.csv",
+            (
+                "Descriptive session totals across the selected videos, including "
+                "video/segment counts and predicted-ADL counts and valid durations."
+            ),
         ),
         OutputFileDescription(
             "adl_input_manifest.csv",
             (
                 "Mapping from original input filenames to EgoVizML staged names, "
-                "including session ordering and source video duration, FPS, and "
-                "frame-count metadata."
+                "including session order and source duration, FPS, and frame count."
             ),
         ),
         OutputFileDescription(
             "all_preds.pkl",
             (
-                "Combined raw prediction file used internally "
-                "by the Activity recognition (ADL) pipeline."
+                "Binary Python pickle containing combined Detic and hand-object-contact "
+                "active-object predictions used internally to generate ADL features."
             ),
         ),
         OutputFileDescription(
-            "adl_subclip_manifest.csv",
+            "adl_segment_manifest.csv",
             (
-                "Source-time validity metadata for each EgoVizML processing "
-                "subclip, including the valid duration used to exclude padded "
-                "tail frames from hand-use metrics."
+                "Original-video segment metadata. Segments are at most 60 seconds, "
+                "never cross input-video boundaries, and retain the valid duration "
+                "of the final partial segment."
             ),
         ),
         OutputFileDescription(
-            "frame_level_predictions.csv",
+            "adl_processing_config.json",
             (
-                "Technical intermediate table with one row per analyzed frame or "
-                "frame-level observations. Used to calculate video-level metrics."
-            ),
-        ),
-        OutputFileDescription(
-            "interaction_segments.csv",
-            (
-                "Hand-specific continuous interaction segments with hand label, " +
-                "hand role, start time, end time, and duration."
-            )
-        ),
-        OutputFileDescription(
-            "metrics_config.json",
-            (
-                "Traceability file recording preprocessing and hand-use metric "
-                "parameters used for this run, including derived pooling_window_frames."
+                "Traceability record for 60-second segmentation, 1 FPS inference "
+                "sampling, the 10 FPS EgoVizML encoding detail, active-object IoU "
+                "threshold, and binary-presence/min-max feature processing."
             ),
         ),
         OutputFileDescription(
             "extracted_frames/",
-            "Technical intermediate frames extracted from input video(s).",
+            (
+                "Original-resolution inference frames sampled at 1 FPS and grouped "
+                "by original-video segment."
+            ),
         ),
         OutputFileDescription(
             "detic_outputs/",
-            "Technical object detection outputs used by the Activity recognition (ADL) pipeline.",
+            (
+                "Technical Detic object detections stored as binary pickle files for "
+                "active-object feature generation."
+            ),
         ),
         OutputFileDescription(
             "shan_outputs/",
-            "Technical hand-object contact outputs generated on extracted frames.",
+            (
+                "Technical hand-object-contact visualizations, readable JSON, and "
+                "binary pickle predictions used to determine active Detic objects."
+            ),
         ),
         *logs,
     ]
@@ -903,18 +907,30 @@ def output_preview_note(scenario: InputScenario) -> str:
             "known timestamps or FPS."
         )
     
+    if scenario in {
+        "hand-interaction-single-video",
+        "hand-interaction-video-directory",
+    }:
+        return (
+            "Most users should review video_level_metrics.csv first. Frame-level "
+            "outputs and raw model files are stored separately as technical files."
+        )
+
     return (
-        "Most users should review video_level_metrics.csv first. Frame-level outputs "
-        "and raw model files are stored separately as technical intermediate files."
+        "Review adl_segment_predictions.csv first. The video and session files are "
+        "descriptive ADL summaries; they do not contain hand-use metrics. "
+        "Files under technical/ include binary model artifacts that are not intended "
+        "to be opened as text."
     )
 
 def run_readme_text(*, model_id: str, context: OutputPreviewContext) -> str:
     """ Return a plain-language README for a run output folder. """
-    main_files = (
-        "visual_outputs/hand_object_contact/"
-        if model_id == HAND_OBJECT_CONTACT_MODEL_ID
-        else "results/video_level_metrics.csv"
-    )
+    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
+        main_files = "visual_outputs/hand_object_contact/"
+    elif model_id == HAND_INTERACTION_MODEL_ID:
+        main_files = "results/video_level_metrics.csv"
+    else:
+        main_files = "results/adl_segment_predictions.csv"
     
     descriptions = "\n".join(
         f"- {description.name}: {description.description}"
@@ -972,14 +988,6 @@ def finalize_runtime_outputs(
         return
 
     if model_id == ADL_RECOGNITION_MODEL_ID:
-        metric_inputs = _resolve_adl_metric_input_paths(layout)
-        _finalize_bandini_metric_outputs(
-            layout=layout,
-            metric_inputs=metric_inputs,
-            pipeline_label="ADL inference",
-            progress=report,
-            emit_progress=False,
-        )
         _organize_adl_runtime_outputs(layout)
         return
 
@@ -989,7 +997,7 @@ def finalize_runtime_outputs(
 def _finalize_bandini_metric_outputs(
     *,
     layout: RunOutputLayout,
-    metric_inputs: _AdlMetricInputPaths | _HandInteractionMetricInputPaths,
+    metric_inputs: _HandInteractionMetricInputPaths,
     pipeline_label: str,
     progress: Callable[[str], None],
     emit_progress: bool,
@@ -1229,6 +1237,130 @@ def write_stub_video_level_metric_files(
         ],
     )
 
+def _adl_processing_configuration() -> dict[str, object]:
+    """Return the paper-faithful ADL preprocessing and feature settings."""
+    return {
+        "segment_length_seconds": ADL_SEGMENT_LENGTH_SECONDS,
+        "inference_frame_fps": ADL_INFERENCE_FRAME_FPS,
+        "subclip_encoding_fps": ADL_SUBCLIP_ENCODING_FPS,
+        "subclip_encoding_note": (
+            "EgoVizML encodes each temporary segment at 10 FPS; ADL inference "
+            "still samples frames at 1 FPS."
+        ),
+        "active_object_iou_threshold": ADL_ACTIVE_OBJECT_IOU_THRESHOLD,
+        "active_object_rule": "Detic/100DOH bounding-box IoU > threshold",
+        "feature_representation": "binary_presence_with_active_objects",
+        "feature_aggregation": "sum_across_segment_frames",
+        "feature_scaling": "row_wise_min_max",
+        "frame_resize": None,
+    }
+
+
+def write_adl_processing_config(path: Path) -> None:
+    """Write the ADL-specific processing traceability file."""
+    _write_json(path, _adl_processing_configuration())
+
+
+def write_stub_adl_output_files(
+    *,
+    layout: RunOutputLayout,
+    context: OutputPreviewContext,
+    status: str,
+) -> None:
+    """Write pending ADL segment and descriptive summary outputs."""
+    layout.results_dir.mkdir(parents=True, exist_ok=True)
+    layout.post_processing_dir.mkdir(parents=True, exist_ok=True)
+
+    segment_rows = [
+        {
+            "session_id": "session001",
+            "source_video": input_name,
+            "segment_name": "",
+            "segment_index": "",
+            "start_time_seconds": "",
+            "end_time_seconds": "",
+            "valid_duration_seconds": "",
+            "prediction_status": status,
+            "predicted_adl": "",
+            "predicted_probability": "",
+            "predicted_class": "",
+        }
+        for input_name in context.input_names
+    ]
+    _write_csv(
+        layout.adl_segment_predictions_path,
+        fieldnames=[
+            "session_id",
+            "source_video",
+            "segment_name",
+            "segment_index",
+            "start_time_seconds",
+            "end_time_seconds",
+            "valid_duration_seconds",
+            "prediction_status",
+            "predicted_adl",
+            "predicted_probability",
+            "predicted_class",
+        ],
+        rows=segment_rows,
+    )
+
+    _write_csv(
+        layout.adl_video_summary_path,
+        fieldnames=[
+            "session_id",
+            "source_video",
+            "source_duration_seconds",
+            "segment_count",
+            "predicted_segment_count",
+            "total_valid_duration_seconds",
+            "predicted_adl_counts",
+            "predicted_adl_valid_duration_seconds",
+            "summary_status",
+        ],
+        rows=[
+            {
+                "session_id": "session001",
+                "source_video": input_name,
+                "source_duration_seconds": "",
+                "segment_count": 0,
+                "predicted_segment_count": 0,
+                "total_valid_duration_seconds": 0,
+                "predicted_adl_counts": "{}",
+                "predicted_adl_valid_duration_seconds": "{}",
+                "summary_status": status,
+            }
+            for input_name in context.input_names
+        ],
+    )
+
+    _write_csv(
+        layout.adl_session_summary_path,
+        fieldnames=[
+            "session_id",
+            "input_video_count",
+            "segment_count",
+            "predicted_segment_count",
+            "total_valid_duration_seconds",
+            "predicted_adl_counts",
+            "predicted_adl_valid_duration_seconds",
+            "summary_status",
+        ],
+        rows=[
+            {
+                "session_id": "session001",
+                "input_video_count": len(context.input_names),
+                "segment_count": 0,
+                "predicted_segment_count": 0,
+                "total_valid_duration_seconds": 0,
+                "predicted_adl_counts": "{}",
+                "predicted_adl_valid_duration_seconds": "{}",
+                "summary_status": status,
+            }
+        ],
+    )
+
+
 def _non_dominant_hand(dominant_hand: str) -> str:
     if dominant_hand == LEFT_HAND_LABEL:
         return RIGHT_HAND_LABEL
@@ -1286,43 +1418,6 @@ def _resolve_hand_interaction_metric_input_paths(
         ),
     )
 
-
-def _resolve_adl_metric_input_paths(
-    layout: RunOutputLayout,
-) -> _AdlMetricInputPaths:
-    """Resolve authoritative ADL metric inputs before moving runtime files."""
-    runtime_work_dir = layout.run_dir / "adl_recognition_work"
-    staged_adl_dirs = _adl_runtime_staging_dirs(runtime_work_dir)
-
-    shan_outputs_dir = _first_existing_child_dir_path(
-        search_roots = staged_adl_dirs,
-        dirnames = ["subclips_shan", "shan"],
-    )
-
-    if shan_outputs_dir is None:
-        shan_outputs_dir = layout.adl_shan_outputs_dir
-
-    return _AdlMetricInputPaths(
-        shan_outputs_dir = shan_outputs_dir,
-        input_manifest_path = _first_existing_file_path(
-            [
-                layout.run_dir / ADL_INPUT_MANIFEST_FILENAME,
-                layout.adl_input_manifest_path,
-            ]
-        ),
-        subclip_manifest_path = _first_existing_file_path(
-            [
-                layout.run_dir / ADL_SUBCLIP_MANIFEST_FILENAME,
-                layout.adl_subclip_manifest_path,
-            ]
-        ),
-        metrics_config_path = _first_existing_file_path(
-            [
-                layout.run_dir / METRICS_CONFIG_FILENAME,
-                layout.metrics_config_path,
-            ]
-        ),
-    )
 
 def _first_existing_file_path(paths: list[Path]) -> Path:
     """ Return the first existing file, or the final candidate for errors. """
@@ -1425,7 +1520,7 @@ def _count_csv_data_rows(path: Path) -> int:
 def _write_bandini_metric_input_diagnostics(
     *,
     layout: RunOutputLayout,
-    metric_inputs: _AdlMetricInputPaths | _HandInteractionMetricInputPaths,
+    metric_inputs: _HandInteractionMetricInputPaths,
     expected_prediction_count: int,
     manifest_has_subclips: bool,
 ) -> None:
@@ -1503,66 +1598,68 @@ def _organize_hand_interaction_runtime_outputs(layout: RunOutputLayout) -> None:
 
 
 def _organize_adl_runtime_outputs(layout: RunOutputLayout) -> None:
-    layout.results_dir.mkdir(parents = True, exist_ok = True)
-    layout.model_outputs_dir.mkdir(parents = True, exist_ok = True)
-    layout.post_processing_dir.mkdir(parents = True, exist_ok = True)
-    layout.intermediate_files_dir.mkdir(parents = True, exist_ok = True)
+    """Move ADL-specific predictions, summaries, metadata, and intermediates."""
+    layout.results_dir.mkdir(parents=True, exist_ok=True)
+    layout.model_outputs_dir.mkdir(parents=True, exist_ok=True)
+    layout.post_processing_dir.mkdir(parents=True, exist_ok=True)
+    layout.intermediate_files_dir.mkdir(parents=True, exist_ok=True)
 
     runtime_work_dir = layout.run_dir / "adl_recognition_work"
     egoviz_data_dir = runtime_work_dir / "egoviz_data"
 
-    _move_first_existing_file(
-        sources = [layout.run_dir / "adl_predictions.csv"],
-        destination = layout.model_outputs_dir / "predictions.csv",
+    _move_required_file(
+        source=layout.run_dir / ADL_SEGMENT_PREDICTIONS_FILENAME,
+        destination=layout.adl_segment_predictions_path,
+        label="ADL segment predictions",
+    )
+    _move_required_file(
+        source=layout.run_dir / ADL_VIDEO_SUMMARY_FILENAME,
+        destination=layout.adl_video_summary_path,
+        label="ADL video summary",
+    )
+    _move_required_file(
+        source=layout.run_dir / ADL_SESSION_SUMMARY_FILENAME,
+        destination=layout.adl_session_summary_path,
+        label="ADL session summary",
     )
 
-    _move_first_existing_file(
-        sources = [layout.run_dir / "adl_predictions_summary.csv"],
-        destination = layout.model_outputs_dir / "predictions_summary.csv",
-    )
-    
     _move_first_existing_file(
         sources=[layout.run_dir / ADL_INPUT_MANIFEST_FILENAME],
-        destination = layout.adl_input_manifest_path,
+        destination=layout.adl_input_manifest_path,
     )
-    
     _move_first_existing_file(
-        sources = [layout.run_dir / ADL_SUBCLIP_MANIFEST_FILENAME],
-        destination = layout.adl_subclip_manifest_path,
+        sources=[layout.run_dir / ADL_SEGMENT_MANIFEST_FILENAME],
+        destination=layout.adl_segment_manifest_path,
     )
-
     _move_first_existing_file(
-        sources=[layout.run_dir / METRICS_CONFIG_FILENAME,],
-        destination=layout.metrics_config_path,
+        sources=[layout.run_dir / ADL_PROCESSING_CONFIG_FILENAME],
+        destination=layout.adl_processing_config_path,
     )
-
     _move_first_existing_file(
-        sources = [layout.run_dir / "all_preds.pkl", egoviz_data_dir / "all_preds.pkl"],
-        destination = layout.model_outputs_dir / "all_preds.pkl",
+        sources=[layout.run_dir / "all_preds.pkl", egoviz_data_dir / "all_preds.pkl"],
+        destination=layout.model_outputs_dir / "all_preds.pkl",
     )
 
     staged_adl_dirs = _adl_runtime_staging_dirs(runtime_work_dir)
-
     _move_first_existing_child_dir(
-        search_roots = staged_adl_dirs,
-        dirnames = ["subclips"],
-        destination = layout.adl_extracted_frames_dir,
+        search_roots=staged_adl_dirs,
+        dirnames=["subclips"],
+        destination=layout.adl_extracted_frames_dir,
     )
-
     _move_first_existing_child_dir(
-        search_roots = staged_adl_dirs,
-        dirnames = ["detic", "detic_raw"],
-        destination = layout.adl_detic_outputs_dir,
+        search_roots=staged_adl_dirs,
+        dirnames=["detic", "detic_raw"],
+        destination=layout.adl_detic_outputs_dir,
     )
-
     _move_first_existing_child_dir(
-        search_roots = staged_adl_dirs,
-        dirnames = ["subclips_shan", "shan"],
-        destination = layout.adl_shan_outputs_dir,
+        search_roots=staged_adl_dirs,
+        dirnames=["subclips_shan", "shan"],
+        destination=layout.adl_shan_outputs_dir,
     )
 
     _remove_path(runtime_work_dir)
     _remove_non_contract_root_outputs(layout)
+
 
 def _adl_runtime_staging_dirs(runtime_work_dir: Path) -> list[Path]:
     egoviz_data_dir = runtime_work_dir / "egoviz_data"
@@ -1600,6 +1697,13 @@ def _move_first_existing_child_dir(
             if candidate.is_dir():
                 _replace_dir(candidate, destination)
                 return
+
+def _move_required_file(*, source: Path, destination: Path, label: str) -> None:
+    if not source.is_file():
+        raise RuntimeError(f"ADL runtime did not produce {label}: {source}")
+
+    _move_path(source, destination)
+
 
 def _move_first_existing_file(*, sources: list[Path], destination: Path) -> None:
     for source in sources:

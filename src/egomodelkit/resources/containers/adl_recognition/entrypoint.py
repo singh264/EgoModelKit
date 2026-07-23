@@ -14,6 +14,7 @@ It does not reimplement EgoVizML's ADL processing, instead it:
 import argparse
 import csv
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -27,8 +28,11 @@ EGOVIZML_STAGED_VIDEO_SUFFIX: Final[str] = ".MP4"
 
 DEFAULT_SESSION_ID: Final[str] = "session001"
 ADL_INPUT_MANIFEST_FILENAME: Final[str] = "adl_input_manifest.csv"
-ADL_SUBCLIP_MANIFEST_FILENAME: Final[str] = "adl_subclip_manifest.csv"
-METRICS_CONFIG_FILENAME: Final[str] = "metrics_config.json"
+ADL_SEGMENT_MANIFEST_FILENAME: Final[str] = "adl_segment_manifest.csv"
+ADL_PROCESSING_CONFIG_FILENAME: Final[str] = "adl_processing_config.json"
+ADL_SEGMENT_PREDICTIONS_FILENAME: Final[str] = "adl_segment_predictions.csv"
+ADL_VIDEO_SUMMARY_FILENAME: Final[str] = "adl_video_summary.csv"
+ADL_SESSION_SUMMARY_FILENAME: Final[str] = "adl_session_summary.csv"
 
 EGOVIZML_HOME: Final[Path] = Path("/opt/EgoVizML")
 
@@ -52,66 +56,61 @@ EGOVIZML_ADL_DIRS: Final[tuple[str, ...]] = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", choices = ["extract", "predict", "finalize"], required = True)
-    parser.add_argument("--input-path", required = True)
-    parser.add_argument("--output-dir", required = True)
-    parser.add_argument("--work-dir-name", required = True)
-    parser.add_argument("--egoviz-data-dir-name", required = True)
-    parser.add_argument("--adl-dir-name", required = True)
-    parser.add_argument("--subclip-length", type = int, required = True)
-    parser.add_argument("--fps", type = int, required = True)
-    parser.add_argument("--frame-fps", type = int, required = True)
-    parser.add_argument("--resize-width", type = int, required = True)
-    parser.add_argument("--resize-height", type = int, required = True)
-    parser.add_argument("--pooling-window-seconds", type = float, required = True)
-    parser.add_argument("--interaction-contact-state-threshold", type = int, required = True)
-    parser.add_argument("--dominant-hand", choices = ["left", "right"], required = True)   
-    parser.add_argument("--active-iou", type = float, required = True)
-    
+    parser.add_argument(
+        "--stage",
+        choices=["extract", "predict", "finalize"],
+        required=True,
+    )
+    parser.add_argument("--input-path", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--work-dir-name", required=True)
+    parser.add_argument("--egoviz-data-dir-name", required=True)
+    parser.add_argument("--adl-dir-name", required=True)
+    parser.add_argument("--segment-length", type=int, required=True)
+    parser.add_argument("--subclip-encoding-fps", type=int, required=True)
+    parser.add_argument("--inference-frame-fps", type=int, required=True)
+    parser.add_argument("--active-iou", type=float, required=True)
+
     return parser.parse_args()
+
 
 def main() -> None:
     args = parse_args()
-    
+
     input_path = Path(args.input_path)
     output_dir = Path(args.output_dir)
-    
-    output_dir.mkdir(parents = True, exist_ok = True)
-    
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     if args.stage == "extract":
         extract_frames(
-            input_path = input_path,
-            output_dir = output_dir,
-            work_dir_name = args.work_dir_name,
-            egoviz_data_dir_name = args.egoviz_data_dir_name,
-            adl_dir_name = args.adl_dir_name,
-            subclip_length = args.subclip_length,
-            fps = args.fps,
-            frame_fps = args.frame_fps,
-            resize_width=args.resize_width,
-            resize_height=args.resize_height,
-            pooling_window_seconds=args.pooling_window_seconds,
-            interaction_contact_state_threshold=args.interaction_contact_state_threshold,
-            dominant_hand = args.dominant_hand,
+            input_path=input_path,
+            output_dir=output_dir,
+            work_dir_name=args.work_dir_name,
+            egoviz_data_dir_name=args.egoviz_data_dir_name,
+            adl_dir_name=args.adl_dir_name,
+            segment_length_seconds=args.segment_length,
+            subclip_encoding_fps=args.subclip_encoding_fps,
+            inference_frame_fps=args.inference_frame_fps,
+            active_iou=args.active_iou,
         )
-        
         return
-    
+
     if args.stage == "predict":
         predict_from_all_preds(
-            all_preds_path = input_path,
-            output_dir = output_dir,
+            all_preds_path=input_path,
+            output_dir=output_dir,
         )
-        
         return
 
     finalize_predictions(
-        output_dir = output_dir,
-        work_dir_name = args.work_dir_name,
-        egoviz_data_dir_name = args.egoviz_data_dir_name,
-        adl_dir_name = args.adl_dir_name,
-        active_iou = args.active_iou,
+        output_dir=output_dir,
+        work_dir_name=args.work_dir_name,
+        egoviz_data_dir_name=args.egoviz_data_dir_name,
+        adl_dir_name=args.adl_dir_name,
+        active_iou=args.active_iou,
     )
+
 
 def extract_frames(
     *,
@@ -120,84 +119,69 @@ def extract_frames(
     work_dir_name: str,
     egoviz_data_dir_name: str,
     adl_dir_name: str,
-    subclip_length: int,
-    fps: int,
-    frame_fps: int,
-    resize_width: int,
-    resize_height: int,
-    pooling_window_seconds: float,
-    interaction_contact_state_threshold: int,
-    dominant_hand: str,
+    segment_length_seconds: int,
+    subclip_encoding_fps: int,
+    inference_frame_fps: int,
+    active_iou: float,
 ) -> None:
-    print("EgoModelKit runtime: preparing EgoVizML video workspace.", flush = True)
-    
-    data_root = _egoviz_data_root( 
-        output_dir = output_dir,
-        work_dir_name = work_dir_name,
-        egoviz_data_dir_name = egoviz_data_dir_name,
+    print("EgoModelKit runtime: preparing EgoVizML video workspace.", flush=True)
+
+    data_root = _egoviz_data_root(
+        output_dir=output_dir,
+        work_dir_name=work_dir_name,
+        egoviz_data_dir_name=egoviz_data_dir_name,
     )
-    
     adl_dir = data_root / adl_dir_name
-    
+
     if adl_dir.exists():
         shutil.rmtree(adl_dir)
-        
-    adl_dir.mkdir(parents = True, exist_ok = True)
-    
+
+    adl_dir.mkdir(parents=True, exist_ok=True)
+
     staged_rows = _stage_input_videos(
-        input_path = input_path,
-        adl_dir = adl_dir,
-        manifest_path = output_dir / ADL_INPUT_MANIFEST_FILENAME,
+        input_path=input_path,
+        adl_dir=adl_dir,
+        manifest_path=output_dir / ADL_INPUT_MANIFEST_FILENAME,
     )
 
     if not staged_rows:
         raise RuntimeError("No supported video files were staged for ADL recognition.")
-    
-    _write_metrics_config(
-        output_dir / METRICS_CONFIG_FILENAME,
-        subclip_length_seconds = subclip_length,
-        subclip_fps = fps,
-        frame_fps = frame_fps,
-        resize_width = resize_width,
-        resize_height = resize_height,
-        pooling_window_seconds = pooling_window_seconds,
-        interaction_contact_state_threshold = interaction_contact_state_threshold,
-        dominant_hand = dominant_hand,
+
+    _write_adl_processing_config(
+        output_dir / ADL_PROCESSING_CONFIG_FILENAME,
+        segment_length_seconds=segment_length_seconds,
+        subclip_encoding_fps=subclip_encoding_fps,
+        inference_frame_fps=inference_frame_fps,
+        active_iou=active_iou,
     )
-    
-    print("EgoModelKit runtime: calling EgoVizML frame extraction.", flush = True)
-    
+
+    print("EgoModelKit runtime: calling EgoVizML frame extraction.", flush=True)
+
     _run(
         [
             sys.executable,
             str(VIDEO_TO_SUBCLIPS_SCRIPT),
             str(adl_dir),
             "--subclip_length",
-            str(subclip_length),
+            str(segment_length_seconds),
             "--fps",
-            str(fps),
+            str(subclip_encoding_fps),
             "--frame_fps",
-            str(frame_fps),
+            str(inference_frame_fps),
         ]
     )
-    
-    _write_subclip_manifest(
-        manifest_path = output_dir / ADL_SUBCLIP_MANIFEST_FILENAME,
-        staged_rows = staged_rows,
-        subclips_dir = adl_dir / "subclips",
-        subclip_length_seconds = subclip_length,
-        processing_fps = frame_fps,
-    )
-    
-    print("EgoModelKit runtime: resizing extracted ADL frames.", flush = True)
 
-    _resize_extracted_frames(
-        adl_dir / "subclips",
-        resize_width = resize_width,
-        resize_height = resize_height,
+    _write_segment_manifest(
+        manifest_path=output_dir / ADL_SEGMENT_MANIFEST_FILENAME,
+        staged_rows=staged_rows,
+        segments_dir=adl_dir / "subclips",
+        segment_length_seconds=segment_length_seconds,
+        subclip_encoding_fps=subclip_encoding_fps,
+        inference_frame_fps=inference_frame_fps,
     )
-    
-    print("EgoModelKit runtime: EgoVizML frame extraction finished.", flush = True)
+
+    print("EgoModelKit runtime: EgoVizML frame extraction finished.", flush=True)
+
 
 def finalize_predictions(
     *,
@@ -228,7 +212,7 @@ def finalize_predictions(
             str(PROCESS_ALL_PREDS_SCRIPT),
             str(data_root),
             "--active_iou",
-            str(active_iou),
+            str(math.nextafter(active_iou, math.inf)),
         ]
     )
     
@@ -250,22 +234,40 @@ def predict_from_all_preds(
     all_preds_path: Path,
     output_dir: Path,
 ) -> None:
-    print("EgoModelKit runtime: calling EgoVizML classifier wrapper.", flush = True)
-    
-    _run(
-        [
-            sys.executable,
-            str(PREDICT_ADL_SCRIPT),
-            "--all-preds-input",
-            str(all_preds_path),
-            "--output",
-            str(output_dir / "adl_predictions.csv"),
-            "--summary-output",
-            str(output_dir / "adl_predictions_summary.csv"),
-        ]
-    )
-    
-    print("EgoModelKit runtime: ADL prediction outputs are ready.", flush = True)
+    print("EgoModelKit runtime: calling EgoVizML classifier wrapper.", flush=True)
+
+    final_all_preds_path = output_dir / "all_preds.pkl"
+
+    if all_preds_path.resolve() != final_all_preds_path.resolve():
+        shutil.copy2(all_preds_path, final_all_preds_path)
+        all_preds_path = final_all_preds_path
+
+    command = [
+        sys.executable,
+        str(PREDICT_ADL_SCRIPT),
+        "--all-preds-input",
+        str(all_preds_path),
+        "--segment-output",
+        str(output_dir / ADL_SEGMENT_PREDICTIONS_FILENAME),
+        "--video-summary-output",
+        str(output_dir / ADL_VIDEO_SUMMARY_FILENAME),
+        "--session-summary-output",
+        str(output_dir / ADL_SESSION_SUMMARY_FILENAME),
+    ]
+
+    segment_manifest_path = output_dir / ADL_SEGMENT_MANIFEST_FILENAME
+    input_manifest_path = output_dir / ADL_INPUT_MANIFEST_FILENAME
+
+    if segment_manifest_path.is_file():
+        command.extend(["--segment-manifest", str(segment_manifest_path)])
+
+    if input_manifest_path.is_file():
+        command.extend(["--input-manifest", str(input_manifest_path)])
+
+    _run(command)
+
+    print("EgoModelKit runtime: ADL prediction outputs are ready.", flush=True)
+
 
 def _stage_input_videos(
     *,
@@ -553,13 +555,14 @@ def _parse_ffprobe_frame_rate(value: object) -> float:
 
     return max(0.0, numerator / denominator)
 
-def _write_subclip_manifest(
+def _write_segment_manifest(
     *,
     manifest_path: Path,
     staged_rows: list[dict[str, object]],
-    subclips_dir: Path,
-    subclip_length_seconds: int,
-    processing_fps: int,
+    segments_dir: Path,
+    segment_length_seconds: int,
+    subclip_encoding_fps: int,
+    inference_frame_fps: int,
 ) -> None:
     rows: list[dict[str, object]] = []
 
@@ -567,155 +570,112 @@ def _write_subclip_manifest(
         staged_video_stem = str(staged_row["staged_video_stem"])
         source_duration_seconds = float(staged_row["source_duration_seconds"])
 
-        matching_subclips = (
+        matching_segments = (
             sorted(
                 [
                     path
-                    for path in subclips_dir.iterdir()
-                    if path.is_dir()
-                    and path.name.startswith(
-                        f"{staged_video_stem}--"
-                    )
+                    for path in segments_dir.iterdir()
+                    if path.is_dir() and path.name.startswith(f"{staged_video_stem}--")
                 ],
-                key = lambda path: _subclip_index_from_name(
-                    path.name
-                ),
+                key=lambda path: _segment_index_from_name(path.name),
             )
-            if subclips_dir.is_dir()
+            if segments_dir.is_dir()
             else []
         )
 
-        for subclip_path in matching_subclips:
-            subclip_index = _subclip_index_from_name(subclip_path.name)
-            source_start_seconds = (subclip_index - 1) * subclip_length_seconds
-
+        for segment_path in matching_segments:
+            segment_index = _segment_index_from_name(segment_path.name)
+            start_time_seconds = (segment_index - 1) * segment_length_seconds
             valid_duration_seconds = max(
                 0.0,
                 min(
-                    float(subclip_length_seconds),
-                    source_duration_seconds - source_start_seconds,
+                    float(segment_length_seconds),
+                    source_duration_seconds - start_time_seconds,
                 ),
             )
-
-            source_end_seconds = source_start_seconds + valid_duration_seconds
+            end_time_seconds = start_time_seconds + valid_duration_seconds
 
             rows.append(
                 {
                     "session_id": staged_row["session_id"],
-                    "input_name": staged_row["input_name"],
+                    "source_video": staged_row["input_name"],
                     "staged_video_stem": staged_video_stem,
-                    "subclip_name": subclip_path.name,
-                    "subclip_index": subclip_index,
-                    "source_start_seconds": source_start_seconds,
-                    "source_end_seconds": source_end_seconds,
+                    "segment_name": segment_path.name,
+                    "segment_index": segment_index,
+                    "start_time_seconds": start_time_seconds,
+                    "end_time_seconds": end_time_seconds,
                     "valid_duration_seconds": valid_duration_seconds,
-                    "processing_fps": processing_fps,
-                    "processing_subclip_duration_seconds": subclip_length_seconds,
+                    "segment_length_seconds": segment_length_seconds,
+                    "inference_frame_fps": inference_frame_fps,
+                    "subclip_encoding_fps": subclip_encoding_fps,
                 }
             )
 
-    manifest_path.parent.mkdir(
-        parents = True,
-        exist_ok = True,
-    )
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with manifest_path.open(
-        "w",
-        encoding = "utf-8",
-        newline = "",
-    ) as csv_file:
+    with manifest_path.open("w", encoding="utf-8", newline="") as csv_file:
         writer = csv.DictWriter(
             csv_file,
-            fieldnames = [
+            fieldnames=[
                 "session_id",
-                "input_name",
+                "source_video",
                 "staged_video_stem",
-                "subclip_name",
-                "subclip_index",
-                "source_start_seconds",
-                "source_end_seconds",
+                "segment_name",
+                "segment_index",
+                "start_time_seconds",
+                "end_time_seconds",
                 "valid_duration_seconds",
-                "processing_fps",
-                "processing_subclip_duration_seconds",
+                "segment_length_seconds",
+                "inference_frame_fps",
+                "subclip_encoding_fps",
             ],
         )
-
         writer.writeheader()
         writer.writerows(rows)
 
-def _subclip_index_from_name(
-    subclip_name: str,
-) -> int:
-    match = re.search(
-        r"--(\d+)$",
-        subclip_name,
-    )
+
+def _segment_index_from_name(segment_name: str) -> int:
+    match = re.search(r"--(\d+)$", segment_name)
 
     if match is None:
-        raise RuntimeError(
-            "Unexpected EgoVizML subclip name: "
-            f"{subclip_name}"
-        )
+        raise RuntimeError(f"Unexpected EgoVizML segment name: {segment_name}")
 
     return int(match.group(1))
 
-def _write_metrics_config(
-    metrics_config_path: Path,
+
+def _write_adl_processing_config(
+    config_path: Path,
     *,
-    subclip_length_seconds: int,
-    subclip_fps: int,
-    frame_fps: int,
-    resize_width: int,
-    resize_height: int,
-    pooling_window_seconds: float,
-    interaction_contact_state_threshold: int,
-    dominant_hand: str,
+    segment_length_seconds: int,
+    subclip_encoding_fps: int,
+    inference_frame_fps: int,
+    active_iou: float,
 ) -> None:
-    metrics_config_path.parent.mkdir(parents = True, exist_ok = True)
-    pooling_window_frames = max(1, round(frame_fps * pooling_window_seconds))
-    
-    metrics_config_path.write_text(
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
         json.dumps(
             {
-                "subclip_length_seconds": subclip_length_seconds,
-                "subclip_fps": subclip_fps,
-                "frame_fps": frame_fps,
-                "resize_width": resize_width,
-                "resize_height": resize_height,
-                "pooling_window_seconds": pooling_window_seconds,
-                "pooling_window_frames": pooling_window_frames,
-                "interaction_contact_state_threshold": interaction_contact_state_threshold,
-                "dominant_hand": dominant_hand,
+                "segment_length_seconds": segment_length_seconds,
+                "inference_frame_fps": inference_frame_fps,
+                "subclip_encoding_fps": subclip_encoding_fps,
+                "subclip_encoding_note": (
+                    "EgoVizML encodes each temporary segment at 10 FPS; ADL "
+                    "inference still samples frames at 1 FPS."
+                ),
+                "active_object_iou_threshold": active_iou,
+                "active_object_rule": "Detic/100DOH bounding-box IoU > threshold",
+                "feature_representation": "binary_presence_with_active_objects",
+                "feature_aggregation": "sum_across_segment_frames",
+                "feature_scaling": "row_wise_min_max",
+                "frame_resize": None,
             },
-            indent = 2,
-            sort_keys = True,
-        ) + "\n",
-        encoding = "utf-8",
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
     )
 
-def _resize_extracted_frames(
-    subclips_dir: Path,
-    *,
-    resize_width: int,
-    resize_height: int,
-) -> None:
-    if not subclips_dir.is_dir():
-        return
-
-    import cv2  # noqa: PLC0415
-
-    for image_path in sorted(subclips_dir.rglob("*")):
-        if image_path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
-            continue
-
-        image = cv2.imread(str(image_path))
-
-        if image is None:
-            continue
-
-        resized = cv2.resize(image, (resize_width, resize_height))
-        
-        cv2.imwrite(str(image_path), resized)
 
 if __name__ == "__main__":
     main()

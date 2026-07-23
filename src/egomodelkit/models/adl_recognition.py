@@ -2,15 +2,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
 
-from egomodelkit.bandini_metrics import (
-    DEFAULT_DOMINANT_HAND,
-    LEFT_HAND_LABEL,
-    RIGHT_HAND_LABEL,
-    HandLabel,
-)
-
 ADL_RECOGNITION_MODEL_ID: Final[str] = "adl-recognition"
 COMBINED_PREDS_FILENAME: Final[str] = "all_preds.pkl"
+
+ADL_SEGMENT_LENGTH_SECONDS: Final[int] = 60
+ADL_SUBCLIP_ENCODING_FPS: Final[int] = 10
+ADL_INFERENCE_FRAME_FPS: Final[int] = 1
+ADL_ACTIVE_OBJECT_IOU_THRESHOLD: Final[float] = 0.8
 
 ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
 
@@ -18,23 +16,23 @@ ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE: Final[str] = (
     f"Dry run: {ADL_RECOGNITION_MODEL_ID} request is valid."
 )
 
-class AdlRecognitionInputError(ValueError):
-    """ Raised when an ADL recognition request in invalid. """
 
-@dataclass(frozen = True, slots = True)
+class AdlRecognitionInputError(ValueError):
+    """Raised when an ADL recognition request is invalid."""
+
+
+@dataclass(frozen=True, slots=True)
 class AdlRecognitionRequest:
-    """ One video-based ADL recognition request. """
+    """One video-based ADL recognition request."""
+
     input_path: Path
     output_dir: Path
-    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND
+
 
 def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
-    """ Validate an ADL recognition request. """
+    """Validate an ADL recognition request."""
     input_path = request.input_path
-    
-    if request.dominant_hand not in {LEFT_HAND_LABEL, RIGHT_HAND_LABEL}:
-        raise AdlRecognitionInputError("Dominant hand must be 'left' or 'right'.")
-    
+
     if not input_path.exists():
         raise AdlRecognitionInputError(f"Input path does not exist: {input_path}")
 
@@ -54,17 +52,17 @@ def validate_adl_recognition_request(request: AdlRecognitionRequest) -> None:
                 "Input directory does not contain any MP4 video files."
             )
     else:
-        raise AdlRecognitionInputError(
-            "Input path must be a file or directory."
-        )
-    
+        raise AdlRecognitionInputError("Input path must be a file or directory.")
+
     if request.output_dir.exists() and not request.output_dir.is_dir():
         raise AdlRecognitionInputError(
             f"Output path exists but is not a directory: {request.output_dir}"
         )
 
+
 def _is_combined_predictions_file(input_path: Path) -> bool:
     return input_path.is_file() and input_path.name == COMBINED_PREDS_FILENAME
+
 
 def _directory_contains_supported_videos(input_dir: Path) -> bool:
     return any(

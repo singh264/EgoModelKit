@@ -177,20 +177,10 @@ def test_validate_adl_recognition_rejects_directory_named_like_video(
     ):
         validate_adl_recognition_request(request)
 
-def test_validate_adl_recognition_rejects_invalid_dominant_hand(
-    tmp_path: Path,
-) -> None:
-    input_path = tmp_path / "clip.mp4"
-    input_path.write_bytes(b"fake-video")
-
+def test_adl_request_has_no_dominant_hand_setting(tmp_path: Path) -> None:
     request = AdlRecognitionRequest(
-        input_path = input_path,
-        output_dir = tmp_path / "results",
-        dominant_hand = "ambidextrous",  # type: ignore[arg-type]
+        input_path=tmp_path / "clip.mp4",
+        output_dir=tmp_path / "results",
     )
 
-    with pytest.raises(
-        AdlRecognitionInputError,
-        match = "Dominant hand must be 'left' or 'right'",
-    ):
-        validate_adl_recognition_request(request)
+    assert not hasattr(request, "dominant_hand")

@@ -43,7 +43,6 @@ from egomodelkit.models.hand_interaction import (
 )
 from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
-    HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
     HandObjectContactInputError,
     HandObjectContactRequest,
     validate_hand_object_contact_request,
@@ -227,16 +226,6 @@ def create_app(
         return {
             "models": [
                 {
-                    "id": HAND_OBJECT_CONTACT_MODEL_ID,
-                    "name": "Hand-object contact",
-                    "description": "Detects hands, objects, and hand-object contact in images.",
-                    "acceptedInputLabel": "single image or multiple images",
-                    "supportedInputExtensions": sorted(
-                        HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
-                    ),
-                    "outputLabel": "detection visualizations and structured results",
-                },
-                {
                     "id": HAND_INTERACTION_MODEL_ID,
                     "name": "Hand interaction",
                     "description": (
@@ -260,7 +249,7 @@ def create_app(
                         ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
                     ),
                     "acceptedInputLabel": "single MP4 video or multiple MP4 videos",
-                    "outputLabel": "predictions and processed frame-level files"
+                    "outputLabel": "segment predictions and video/session summaries"
                 },
             ]
         }
@@ -618,7 +607,6 @@ def _execute_run(
                     state.layout.run_dir,
                     progress,
                     state.cancellation,
-                    dominant_hand=state.dominant_hand,
                 )
             else:
                 adl_runner(state.input_path, state.layout.run_dir, progress)
@@ -753,15 +741,12 @@ def _run_adl_recognition_for_gui(
     output_dir: Path,
     progress: Callable[[str], None],
     cancellation: ProcessCancellation,
-    *,
-    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
 ) -> None:
-    """ Run the existing ADL-recognition runtime. """
+    """Run the ADL-recognition runtime."""
     run_adl_recognition(
         AdlRecognitionRequest(
-            input_path = input_path,
-            output_dir = output_dir,
-            dominant_hand = dominant_hand,
+            input_path=input_path,
+            output_dir=output_dir,
         ),
         command_runner = (
             lambda command: cancellable_subprocess_runner(command, cancellation)
@@ -825,7 +810,7 @@ def _operation_id_from_text(operation_id_text: str | None) -> str:
 
 def _model_uses_dominant_hand(model_id: str) -> bool:
     """Return whether the selected model exposes hand-role mapping."""
-    return model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}
+    return model_id == HAND_INTERACTION_MODEL_ID
 
 
 def _dominant_hand_from_text(
@@ -992,10 +977,9 @@ def _validate_gui_request(
 
     if model_id == ADL_RECOGNITION_MODEL_ID:
         validate_adl_recognition_request(
-           AdlRecognitionRequest(
-                input_path = input_path,
-                output_dir = output_root,
-                dominant_hand = dominant_hand,
+            AdlRecognitionRequest(
+                input_path=input_path,
+                output_dir=output_root,
             ),
         )
 
@@ -1142,7 +1126,7 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 message = "Combining predictions: waiting"),
             ProgressEvent(
                 stage = "calculate_metrics",
-                message = "Calculating video-level summary metrics: waiting",
+                message = "Building ADL video and session summaries: waiting",
             ),
             ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
         ]
@@ -1168,7 +1152,7 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 message = "Combining predictions: waiting"),
             ProgressEvent(
                 stage = "calculate_metrics",
-                message = "Calculating video-level summary metrics: waiting",
+                message = "Building ADL video and session summaries: waiting",
             ),
             ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
         ]
@@ -1183,7 +1167,7 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 message = "Combining predictions: waiting"),
             ProgressEvent(
                 stage = "calculate_metrics",
-                message = "Calculating video-level summary metrics: waiting",
+                message = "Building ADL video and session summaries: waiting",
             ),
             ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
         ]

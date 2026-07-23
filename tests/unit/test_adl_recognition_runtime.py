@@ -6,8 +6,11 @@ from pathlib import Path
 import pytest
 
 import egomodelkit.runtime.adl_recognition as adl_runtime
-from egomodelkit.bandini_metrics import DEFAULT_SESSION_ID, VideoProcessingConfig
 from egomodelkit.models.adl_recognition import (
+    ADL_ACTIVE_OBJECT_IOU_THRESHOLD,
+    ADL_INFERENCE_FRAME_FPS,
+    ADL_SEGMENT_LENGTH_SECONDS,
+    ADL_SUBCLIP_ENCODING_FPS,
     AdlRecognitionRequest,
 )
 from egomodelkit.runtime.adl_recognition import (
@@ -864,64 +867,65 @@ def test_adl_payload_int_covers_float_string_and_missing_values() -> None:
     assert adl_runtime._payload_int(payload, "letters") == 0
     assert adl_runtime._payload_int(payload, "missing") == 0
 
-def test_build_core_run_command_passes_video_processing_config(tmp_path: Path) -> None:
+def test_build_core_run_command_passes_adl_processing_config(tmp_path: Path) -> None:
     input_path = tmp_path / "video.mp4"
     input_path.write_bytes(b"fake-video")
     output_dir = tmp_path / "results"
-    
     output_dir.mkdir()
 
-    request = AdlRecognitionRequest(input_path = input_path, output_dir = output_dir)
-    
+    request = AdlRecognitionRequest(input_path=input_path, output_dir=output_dir)
     runtime_spec = replace(
         _test_runtime_spec(),
-        video_processing_config = VideoProcessingConfig(
-            subclip_length_seconds = 12,
-            subclip_fps = 24,
-            frame_fps = 12,
-            resize_width = 640,
-            resize_height = 360,
-            pooling_window_seconds = 0.5,
-            interaction_contact_state_threshold = 4,
-            dominant_hand = "left",
-        ),
+        segment_length_seconds=75,
+        subclip_encoding_fps=10,
+        inference_frame_fps=1,
+        active_iou=0.8,
     )
 
     command = build_core_run_command(
         request,
-        stage = "extract",
-        runtime_spec = runtime_spec,
+        stage="extract",
+        runtime_spec=runtime_spec,
     )
 
-    assert command[command.index("--subclip-length") + 1] == "12"
-    assert command[command.index("--fps") + 1] == "24"
-    assert command[command.index("--frame-fps") + 1] == "12"
-    assert command[command.index("--resize-width") + 1] == "640"
-    assert command[command.index("--resize-height") + 1] == "360"
-    assert command[command.index("--pooling-window-seconds") + 1] == "0.5"
-    assert command[command.index("--interaction-contact-state-threshold") + 1] == "4"
-    assert command[command.index("--dominant-hand") + 1] == "left"
+    assert command[command.index("--segment-length") + 1] == "75"
+    assert command[command.index("--subclip-encoding-fps") + 1] == "10"
+    assert command[command.index("--inference-frame-fps") + 1] == "1"
+    assert command[command.index("--active-iou") + 1] == "0.8"
 
-def test_build_core_run_command_does_not_pass_resize_to_egovizml_directly(
+
+def test_default_adl_processing_is_paper_faithful() -> None:
+    runtime_spec = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC
+
+    assert runtime_spec.segment_length_seconds == ADL_SEGMENT_LENGTH_SECONDS == 60
+    assert runtime_spec.inference_frame_fps == ADL_INFERENCE_FRAME_FPS == 1
+    assert runtime_spec.subclip_encoding_fps == ADL_SUBCLIP_ENCODING_FPS == 10
+    assert runtime_spec.active_iou == ADL_ACTIVE_OBJECT_IOU_THRESHOLD == 0.8
+
+
+def test_build_core_run_command_excludes_hand_interaction_options(
     tmp_path: Path,
 ) -> None:
     input_path = tmp_path / "video.mp4"
     input_path.write_bytes(b"fake-video")
     output_dir = tmp_path / "results"
-    
     output_dir.mkdir()
 
-    request = AdlRecognitionRequest(input_path = input_path, output_dir = output_dir)
-
     command = build_core_run_command(
-        request,
-        stage = "extract",
-        runtime_spec = _test_runtime_spec(),
+        AdlRecognitionRequest(input_path=input_path, output_dir=output_dir),
+        stage="extract",
+        runtime_spec=_test_runtime_spec(),
     )
 
-    assert "--resize-width" in command
-    assert "--resize-height" in command
-    assert "--resize" not in command
+    for option in [
+        "--resize-width",
+        "--resize-height",
+        "--pooling-window-seconds",
+        "--interaction-contact-state-threshold",
+        "--dominant-hand",
+    ]:
+        assert option not in command
+
 
 def _load_adl_entrypoint_module():
     import importlib.util
@@ -949,7 +953,7 @@ def _load_adl_entrypoint_module():
 
     return module
 
-def test_entrypoint_extract_writes_manifest_config_and_resizes_frames(
+def test_entrypoint_extract_writes_paper_faithful_segment_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -962,11 +966,8 @@ def test_entrypoint_extract_writes_manifest_config_and_resizes_frames(
 
     output_dir = tmp_path / "output"
     calls: list[list[str]] = []
-    resized_roots: list[Path] = []
 
-    def fake_probe(
-        path: Path,
-    ) -> dict[str, float | int]:
+    def fake_probe(path: Path) -> dict[str, float | int]:
         if path.name == "video2.mp4":
             return {
                 "source_duration_seconds": 8.0,
@@ -975,137 +976,122 @@ def test_entrypoint_extract_writes_manifest_config_and_resizes_frames(
             }
 
         return {
-            "source_duration_seconds": 12.5,
+            "source_duration_seconds": 125.5,
             "source_fps": 25.0,
-            "source_total_frames": 313,
+            "source_total_frames": 3138,
         }
 
     def fake_run(command: list[str]) -> None:
         calls.append(command)
-
-        subclips_root = (
+        segments_root = (
             output_dir / "work" / "egoviz" / "meal-preparation-cleanup" / "subclips"
         )
 
-        for subclip_name in [
+        for segment_name in [
             "video001--1",
             "video002--1",
             "video002--2",
+            "video002--3",
         ]:
-            (subclips_root / subclip_name).mkdir(parents = True)
-
-    def fake_resize(subclips_dir: Path, *, resize_width: int, resize_height: int) -> None:
-        resized_roots.append(subclips_dir)
-        
-        assert resize_width == 720
-        assert resize_height == 405
+            (segments_root / segment_name).mkdir(parents=True)
 
     monkeypatch.setattr(module, "_run", fake_run)
-    monkeypatch.setattr(module, "_resize_extracted_frames", fake_resize)
     monkeypatch.setattr(module, "_probe_source_video_metadata", fake_probe)
 
     module.extract_frames(
-        input_path = input_dir,
-        output_dir = output_dir,
-        work_dir_name = "work",
-        egoviz_data_dir_name = "egoviz",
-        adl_dir_name = "meal-preparation-cleanup",
-        subclip_length = 10,
-        fps = 30,
-        frame_fps = 30,
-        resize_width = 720,
-        resize_height = 405,
-        pooling_window_seconds = 1.0,
-        interaction_contact_state_threshold = 3,
-        dominant_hand = "right",
+        input_path=input_dir,
+        output_dir=output_dir,
+        work_dir_name="work",
+        egoviz_data_dir_name="egoviz",
+        adl_dir_name="meal-preparation-cleanup",
+        segment_length_seconds=60,
+        subclip_encoding_fps=10,
+        inference_frame_fps=1,
+        active_iou=0.8,
     )
 
-    manifest = (output_dir / "adl_input_manifest.csv").read_text(encoding = "utf-8")
-    config = json.loads((output_dir / "metrics_config.json").read_text(encoding = "utf-8"))
+    manifest = (output_dir / "adl_input_manifest.csv").read_text(encoding="utf-8")
+    config = json.loads(
+        (output_dir / "adl_processing_config.json").read_text(encoding="utf-8")
+    )
 
-    assert DEFAULT_SESSION_ID in manifest
-    assert "video2.mp4" in manifest
-    assert "video10.mp4" in manifest
+    assert "session001" in manifest
     assert manifest.index("video2.mp4") < manifest.index("video10.mp4")
-    assert "input_modified_time" in manifest
-    assert "source_duration_seconds" in manifest
-    assert "source_fps" in manifest
-    assert "source_total_frames" in manifest
-    assert config["frame_fps"] == 30
-    assert config["pooling_window_frames"] == 30
-    assert config["dominant_hand"] == "right"
+    assert config["segment_length_seconds"] == 60
+    assert config["inference_frame_fps"] == 1
+    assert config["subclip_encoding_fps"] == 10
+    assert config["active_object_iou_threshold"] == 0.8
+    assert config["feature_representation"] == "binary_presence_with_active_objects"
+    assert config["feature_scaling"] == "row_wise_min_max"
+    assert config["frame_resize"] is None
 
     egoviz_command = calls[0]
-    
-    assert "--subclip_length" in egoviz_command
-    assert "--fps" in egoviz_command
-    assert "--frame_fps" in egoviz_command
+    assert egoviz_command[egoviz_command.index("--subclip_length") + 1] == "60"
+    assert egoviz_command[egoviz_command.index("--fps") + 1] == "10"
+    assert egoviz_command[egoviz_command.index("--frame_fps") + 1] == "1"
     assert "--resize" not in egoviz_command
-    
-    assert resized_roots == [
-        output_dir / "work" / "egoviz" / "meal-preparation-cleanup" / "subclips"
-    ]
-        
-    with (
-        output_dir / "adl_subclip_manifest.csv"
-    ).open(
+
+    with (output_dir / "adl_segment_manifest.csv").open(
         "r",
-        encoding = "utf-8",
-        newline = "",
+        encoding="utf-8",
+        newline="",
     ) as csv_file:
-        subclip_rows = list(
-            csv.DictReader(csv_file)
-        )
-    
-    assert [row["subclip_name"] for row in subclip_rows] == [
+        segment_rows = list(csv.DictReader(csv_file))
+
+    assert [row["segment_name"] for row in segment_rows] == [
         "video001--1",
         "video002--1",
         "video002--2",
+        "video002--3",
     ]
-
-    assert [row["valid_duration_seconds"] for row in subclip_rows] == [
+    assert [row["source_video"] for row in segment_rows] == [
+        "video2.mp4",
+        "video10.mp4",
+        "video10.mp4",
+        "video10.mp4",
+    ]
+    assert [row["valid_duration_seconds"] for row in segment_rows] == [
         "8.0",
-        "10.0",
-        "2.5",
+        "60.0",
+        "60.0",
+        "5.5",
     ]
+    assert segment_rows[-1]["start_time_seconds"] == "120"
+    assert segment_rows[-1]["end_time_seconds"] == "125.5"
+    assert segment_rows[-1]["inference_frame_fps"] == "1"
+    assert segment_rows[-1]["subclip_encoding_fps"] == "10"
 
-    assert subclip_rows[-1]["source_start_seconds"] == "10"
-    assert subclip_rows[-1]["source_end_seconds"] == "12.5"
-    assert subclip_rows[-1]["processing_fps"] == "30"
 
-def test_entrypoint_resize_extracted_frames_uses_configured_dimensions(
+def test_entrypoint_uses_strict_paper_iou_rule(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import sys
-    from types import SimpleNamespace
-
     module = _load_adl_entrypoint_module()
-    
-    frame_dir = tmp_path / "subclips" / "video001_001"
-    frame_dir.mkdir(parents=True)
-    image_path = frame_dir / "frame_001.jpg"
-    image_path.write_bytes(b"jpg")
-    calls: list[tuple[str, object]] = []
+    output_dir = tmp_path / "output"
+    data_root = output_dir / "work" / "egoviz"
+    commands: list[list[str]] = []
 
-    fake_cv2 = SimpleNamespace(
-        imread = lambda path: "image",
-        resize = lambda image, size: calls.append(("resize", size)) or "resized",
-        imwrite = lambda path, image: calls.append(("write", path)) or True,
+    monkeypatch.setattr(module, "_flatten_nested_model_outputs", lambda _path: None)
+    monkeypatch.setattr(module, "predict_from_all_preds", lambda **_kwargs: None)
+
+    def fake_run(command: list[str]) -> None:
+        commands.append(command)
+        data_root.mkdir(parents=True, exist_ok=True)
+        (data_root / "all_preds.pkl").write_bytes(b"preds")
+
+    monkeypatch.setattr(module, "_run", fake_run)
+
+    module.finalize_predictions(
+        output_dir=output_dir,
+        work_dir_name="work",
+        egoviz_data_dir_name="egoviz",
+        adl_dir_name="meal-preparation-cleanup",
+        active_iou=0.8,
     )
-    
-    monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
 
-    module._resize_extracted_frames(
-        tmp_path / "subclips",
-        resize_width=720,
-        resize_height=405,
-    )
+    applied_threshold = float(commands[0][commands[0].index("--active_iou") + 1])
+    assert applied_threshold > 0.8
 
-    assert calls == [
-        ("resize", (720, 405)),
-        ("write", str(image_path)),
-    ]
 
 def test_entrypoint_probe_source_video_metadata_uses_duration_not_frame_count(
     monkeypatch: pytest.MonkeyPatch,

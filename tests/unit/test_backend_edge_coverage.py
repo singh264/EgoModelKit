@@ -5,8 +5,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import typer
 from fastapi.testclient import TestClient
 
+import egomodelkit.bandini_metrics as bandini_metrics
 import egomodelkit.cli as cli
 import egomodelkit.gui_backend as gui_backend
 import egomodelkit.output_contract as output_contract
@@ -23,6 +25,17 @@ from egomodelkit.models.hand_object_contact import (
 )
 from egomodelkit.output_contract import build_run_output_layout
 from egomodelkit.runtime.commands import CommandResult
+
+
+def test_cli_progress_reporter_uses_typer_echo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(cli.typer, "echo", messages.append)
+
+    cli._report_progress("Preparing video")
+
+    assert messages == ["EgoModelKit: Preparing video"]
 
 
 def test_cli_unique_run_id_covers_collision_and_exhaustion(
@@ -81,6 +94,7 @@ def test_cli_progress_reporter_writes_structured_progress(
             }
         )
     )
+    reporter("plain runtime message")
 
     lines = layout.progress_log_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
@@ -89,7 +103,8 @@ def test_cli_progress_reporter_writes_structured_progress(
     assert json.loads(lines[0])["unit"] == "frames"
     assert json.loads(lines[1])["current"] is None
     assert json.loads(lines[1])["unit"] is None
-    assert len(echoed) == 2
+    assert len(echoed) == 3
+    assert "plain runtime message" in layout.runtime_log_path.read_text(encoding="utf-8")
 
 @pytest.mark.parametrize(
     ("model_id", "request_type", "message"),
@@ -97,7 +112,7 @@ def test_cli_progress_reporter_writes_structured_progress(
         (
             HAND_OBJECT_CONTACT_MODEL_ID,
             AdlRecognitionRequest,
-            "Hand-object contact requires",
+            "Unsupported model id",
         ),
         (
             ADL_RECOGNITION_MODEL_ID,
@@ -347,9 +362,9 @@ def test_output_contract_private_fallback_helpers(tmp_path: Path) -> None:
     layout = build_run_output_layout(tmp_path, run_id="run-output")
     assert layout.output_folder_path == layout.run_dir
 
-    metric_inputs = output_contract._resolve_adl_metric_input_paths(layout)
-    assert metric_inputs.shan_outputs_dir == layout.adl_shan_outputs_dir
-    assert metric_inputs.input_manifest_path == layout.adl_input_manifest_path
+    metric_inputs = output_contract._resolve_hand_interaction_metric_input_paths(layout)
+    assert metric_inputs.shan_outputs_dir == layout.shan_outputs_dir
+    assert metric_inputs.input_manifest_path == layout.hand_interaction_input_manifest_path
 
     assert output_contract._first_existing_file_path(
         [tmp_path / "one", tmp_path / "two"]
@@ -431,6 +446,15 @@ def test_preflight_windows_executable_and_candidate_helpers(
     assert preflight._resolve_windows_executable(("/exists/tool.exe",)) == "/exists/tool.exe"
     assert preflight._resolve_windows_executable(("missing.exe", "tool.exe")) == "/path/tool.exe"
     assert preflight._resolve_windows_executable(("missing.exe",)) is None
+
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+    assert preflight._windows_docker_cli_candidates() == (
+        "/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe",
+    )
+    assert preflight._windows_docker_desktop_candidates() == (
+        "/mnt/c/Program Files/Docker/Docker/Docker Desktop.exe",
+        "/mnt/c/Program Files/Docker/Docker/frontend/Docker Desktop.exe",
+    )
 
     monkeypatch.setattr(Path, "is_dir", lambda self: str(self) == "/mnt/c/Users")
 
@@ -689,3 +713,109 @@ def test_remaining_preflight_windows_fallback_branches(
         progress=messages.append,
     ) is True
     assert any("Windows Command Prompt could not launch" in message for message in messages)
+
+
+def test_remaining_simple_backend_branches(tmp_path: Path) -> None:
+    assert bandini_metrics._as_hand_label(None, "right") == "right"
+    assert bandini_metrics._as_hand_label(" LEFT ", "right") == "left"
+    assert gui_backend._dominant_hand_from_text("right", model_id="hand-interaction") == "right"
+
+    input_path = tmp_path / "clip.mp4"
+    input_path.write_bytes(b"video")
+
+    with pytest.raises(typer.Exit) as error:
+        cli.run(
+            input_path=input_path,
+            output_dir=tmp_path / "output",
+            model_id=ADL_RECOGNITION_MODEL_ID,
+            dry_run=True,
+            dominant_hand="left",
+        )
+
+    assert error.value.exit_code == cli.CLI_RUNTIME_ERROR_EXIT_CODE
+
+
+def test_output_contract_child_directory_helpers_cover_all_paths(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    first_root.mkdir()
+    second_root = tmp_path / "second"
+    source_dir = second_root / "wanted"
+    source_dir.mkdir(parents=True)
+
+    assert output_contract._first_existing_child_dir_path(
+        search_roots=[tmp_path / "missing", first_root, second_root],
+        dirnames=["absent", "wanted"],
+    ) == source_dir
+    assert output_contract._first_existing_child_dir_path(
+        search_roots=[first_root],
+        dirnames=["absent"],
+    ) is None
+
+    destination = tmp_path / "moved"
+    output_contract._move_first_existing_child_dir(
+        search_roots=[tmp_path / "missing", first_root, second_root],
+        dirnames=["absent", "wanted"],
+        destination=destination,
+    )
+    assert destination.is_dir()
+    assert not source_dir.exists()
+
+    output_contract._move_first_existing_child_dir(
+        search_roots=[first_root],
+        dirnames=["still-absent"],
+        destination=tmp_path / "not-created",
+    )
+    assert not (tmp_path / "not-created").exists()
+
+
+def test_finalize_bandini_metrics_covers_quiet_and_mismatch_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = build_run_output_layout(tmp_path, run_id="run-bandini")
+    metric_inputs = output_contract._HandInteractionMetricInputPaths(
+        extracted_frames_dir=tmp_path / "frames",
+        shan_outputs_dir=tmp_path / "shan",
+        input_manifest_path=tmp_path / "input.csv",
+        subclip_manifest_path=tmp_path / "subclips.csv",
+        metrics_config_path=tmp_path / "config.json",
+    )
+    removed_paths: list[Path] = []
+
+    monkeypatch.setattr(output_contract, "_count_shan_prediction_files", lambda _path: 1)
+    monkeypatch.setattr(output_contract, "_csv_has_data_rows", lambda _path: True)
+    monkeypatch.setattr(
+        output_contract,
+        "_write_bandini_metric_input_diagnostics",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        output_contract,
+        "read_video_processing_config",
+        lambda _path: bandini_metrics.DEFAULT_VIDEO_PROCESSING_CONFIG,
+    )
+    monkeypatch.setattr(output_contract, "write_bandini_metric_files", lambda **_kwargs: None)
+    monkeypatch.setattr(output_contract, "write_runtime_log_line", lambda *_args: None)
+    monkeypatch.setattr(output_contract, "_remove_path", removed_paths.append)
+    monkeypatch.setattr(output_contract, "_count_csv_data_rows", lambda _path: 1)
+
+    output_contract._finalize_bandini_metric_outputs(
+        layout=layout,
+        metric_inputs=metric_inputs,
+        pipeline_label="test pipeline",
+        progress=lambda _message: None,
+        emit_progress=False,
+    )
+
+    assert removed_paths == [layout.run_dir / output_contract.METRICS_CONFIG_FILENAME]
+
+    monkeypatch.setattr(output_contract, "_count_csv_data_rows", lambda _path: 0)
+
+    with pytest.raises(RuntimeError, match="did not consume every Shan JSON prediction"):
+        output_contract._finalize_bandini_metric_outputs(
+            layout=layout,
+            metric_inputs=metric_inputs,
+            pipeline_label="test pipeline",
+            progress=lambda _message: None,
+            emit_progress=False,
+        )

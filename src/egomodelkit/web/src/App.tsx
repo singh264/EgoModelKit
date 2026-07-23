@@ -781,7 +781,6 @@ export function App() {
                             ) : step === "choose-input" && selectedModel !== null ? (
                                 <ChooseInputScreen 
                                     selectedModel={selectedModel}
-                                    isAdlModel={selectedModel.id === ADL_MODEL_ID}
                                     files={files}
                                     ignoredInputNames={ignoredInputNames}
                                     fileInputRef={fileInputRef}
@@ -1169,33 +1168,6 @@ function InteractionSettingsPanel({
     );
 }
 
-function AdlMultiFileSessionNote() {
-    return (
-        <div
-            className="
-                mt-6 flex items-start gap-3 rounded-xl border border-egm-blue-border
-                bg-egm-blue-soft px-4 py-3 text-sm leading-6 text-egm-blue-icon
-            "
-            role="note"
-        >
-            <Info
-                aria-hidden="true"
-                className="mt-0.5 shrink-0 text-egm-blue-icon"
-                size={18}
-                strokeWidth={2.0}
-            />
-
-            <div>
-                <p className="font-semibold">Session note</p>
-                <p>
-                    Multiple selected ADL videos are grouped as one session. Run the
-                    pipeline separately for each session.
-                </p>
-            </div>
-        </div>
-    );
-}
-
 function Stepper({ currentStep }: { currentStep: StepperStep }) {
     const currentIndex = STEPS.findIndex((step) => step.id === currentStep);
 
@@ -1504,7 +1476,7 @@ function isDominantHand(value: unknown): value is DominantHand {
 }
 
 function modelUsesDominantHand(modelId: string): boolean {
-    return modelId === HAND_INTERACTION_MODEL_ID || modelId === ADL_MODEL_ID;
+    return modelId === HAND_INTERACTION_MODEL_ID;
 }
 
 function dominantHandLabel(value: DominantHand): string {
@@ -1612,7 +1584,6 @@ async function postMultipart<T>(
 
 function ChooseInputScreen({
     selectedModel,
-    isAdlModel,
     files,
     ignoredInputNames,
     fileInputRef,
@@ -1623,7 +1594,6 @@ function ChooseInputScreen({
     onContinue,
 } : {
     selectedModel: ModelInfo;
-    isAdlModel: boolean;
     files: File[];
     ignoredInputNames: string[];
     fileInputRef: RefObject<HTMLInputElement | null>;
@@ -1638,8 +1608,6 @@ function ChooseInputScreen({
     return (
         <>
             <PageHeading title="Choose input" subtitle={subtitle} />
-
-            {isAdlModel ? <AdlMultiFileSessionNote /> : null}
 
             <div 
                 className="

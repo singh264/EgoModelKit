@@ -2,16 +2,16 @@
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path, PurePosixPath
 from typing import Final, Literal
 
-from egomodelkit.bandini_metrics import (
-    DEFAULT_VIDEO_PROCESSING_CONFIG,
-    VideoProcessingConfig,
-)
 from egomodelkit.models.adl_recognition import (
+    ADL_ACTIVE_OBJECT_IOU_THRESHOLD,
+    ADL_INFERENCE_FRAME_FPS,
+    ADL_SEGMENT_LENGTH_SECONDS,
+    ADL_SUBCLIP_ENCODING_FPS,
     COMBINED_PREDS_FILENAME,
     AdlRecognitionRequest,
     validate_adl_recognition_request,
@@ -94,7 +94,9 @@ class AdlRecognitionRuntimeSpec:
     
     detic_confidence_threshold: float
     detic_num_workers: int
-    video_processing_config: VideoProcessingConfig
+    segment_length_seconds: int
+    subclip_encoding_fps: int
+    inference_frame_fps: int
     active_iou: float
     
     hand_object_contact_runtime_spec: HandObjectContactRuntimeSpec
@@ -139,8 +141,10 @@ DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC: Final[AdlRecognitionRuntimeSpec] = (
         torch_cuda_arch_list = "7.5;8.0;8.6;8.9;9.0;12.0+PTX",
         detic_confidence_threshold = 0.3,
         detic_num_workers = 1,
-        video_processing_config = DEFAULT_VIDEO_PROCESSING_CONFIG,
-        active_iou = 0.75,
+        segment_length_seconds = ADL_SEGMENT_LENGTH_SECONDS,
+        subclip_encoding_fps = ADL_SUBCLIP_ENCODING_FPS,
+        inference_frame_fps = ADL_INFERENCE_FRAME_FPS,
+        active_iou = ADL_ACTIVE_OBJECT_IOU_THRESHOLD,
         hand_object_contact_runtime_spec = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
         host_uid = os.getuid(),
         host_gid = os.getgid(),
@@ -365,22 +369,12 @@ def build_core_run_command(
         runtime_spec.egoviz_data_dir_name,
         "--adl-dir-name",
         runtime_spec.staged_adl_dir_name,
-        "--subclip-length",
-        str(runtime_spec.video_processing_config.subclip_length_seconds),
-        "--fps",
-        str(runtime_spec.video_processing_config.subclip_fps),
-        "--frame-fps",
-        str(runtime_spec.video_processing_config.frame_fps),
-        "--resize-width",
-        str(runtime_spec.video_processing_config.resize_width),
-        "--resize-height",
-        str(runtime_spec.video_processing_config.resize_height),
-        "--pooling-window-seconds",
-        str(runtime_spec.video_processing_config.pooling_window_seconds),
-        "--interaction-contact-state-threshold",
-        str(runtime_spec.video_processing_config.interaction_contact_state_threshold),
-        "--dominant-hand",
-        runtime_spec.video_processing_config.dominant_hand,
+        "--segment-length",
+        str(runtime_spec.segment_length_seconds),
+        "--subclip-encoding-fps",
+        str(runtime_spec.subclip_encoding_fps),
+        "--inference-frame-fps",
+        str(runtime_spec.inference_frame_fps),
         "--active-iou",
         str(runtime_spec.active_iou),
     ]
@@ -457,20 +451,6 @@ def _repair_output_ownership(
     
     return command
 
-def _runtime_spec_for_request(
-    request: AdlRecognitionRequest,
-    *,
-    runtime_spec: AdlRecognitionRuntimeSpec,
-) -> AdlRecognitionRuntimeSpec:
-    """ Return runtime spec with request-specific ADL metric settings applied. """
-    return replace(
-        runtime_spec,
-        video_processing_config = replace(
-            runtime_spec.video_processing_config,
-            dominant_hand = request.dominant_hand,
-        ),
-    )
-
 def run_adl_recognition(
     request: AdlRecognitionRequest,
     *,
@@ -485,11 +465,6 @@ def run_adl_recognition(
     """ Run ADL recognition behind EgoModelKit's run command. """
     progress("Validating adl-recognition request.")
     validate_adl_recognition_request(request)
-    
-    runtime_spec = _runtime_spec_for_request(
-        request,
-        runtime_spec=runtime_spec,
-    )
     
     runtime_check_kwargs = _runtime_check_overrides(
         executable_locator = executable_locator,

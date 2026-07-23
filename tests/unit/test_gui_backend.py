@@ -44,12 +44,12 @@ from egomodelkit.gui_backend import (
 )
 from egomodelkit.models.adl_recognition import (
     ADL_RECOGNITION_MODEL_ID,
-    ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
 )
-from egomodelkit.models.hand_object_contact import (
-    HAND_OBJECT_CONTACT_MODEL_ID,
-    HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
+from egomodelkit.models.hand_interaction import (
+    HAND_INTERACTION_MODEL_ID,
+    HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
 )
+from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_MODEL_ID
 from egomodelkit.output_contract import build_run_output_layout, create_output_scaffold
 from egomodelkit.progress import ExternalProgressUpdate, ProgressEvent
 from egomodelkit.runtime.commands import CommandCancelledError, ProcessCancellation
@@ -106,13 +106,35 @@ def _write_adl_input_manifest(
         encoding = "utf-8",
     )
     
-    (output_dir / "adl_subclip_manifest.csv").write_text(
-        "session_id,input_name,staged_video_stem,"
-        "subclip_name,subclip_index,"
-        "source_start_seconds,source_end_seconds,"
-        "valid_duration_seconds,"
-        "processing_fps,"
-        "processing_subclip_duration_seconds\n",
+    (output_dir / "adl_segment_manifest.csv").write_text(
+        "session_id,source_video,staged_video_stem,segment_name,segment_index,"
+        "start_time_seconds,end_time_seconds,valid_duration_seconds,"
+        "segment_length_seconds,inference_frame_fps,subclip_encoding_fps\n"
+        "session001,clip.mp4,video001,video001_001,1,0.0,60.0,60.0,60,1,10\n",
+        encoding = "utf-8",
+    )
+
+
+def _write_adl_result_files(output_dir: Path) -> None:
+    (output_dir / "adl_segment_predictions.csv").write_text(
+        "session_id,source_video,segment_name,segment_index,start_time_seconds,"
+        "end_time_seconds,valid_duration_seconds,predicted_adl\n"
+        "session001,clip.mp4,video001_001,1,0.0,60.0,60.0,"
+        "Meal Preparation and Cleanup\n",
+        encoding = "utf-8",
+    )
+    (output_dir / "adl_video_summary.csv").write_text(
+        "session_id,source_video,segment_count,total_valid_duration_seconds,"
+        "predicted_adl_segment_counts\n"
+        "session001,clip.mp4,1,60.0,"
+        "{\"Meal Preparation and Cleanup\": 1}\n",
+        encoding = "utf-8",
+    )
+    (output_dir / "adl_session_summary.csv").write_text(
+        "session_id,source_video_count,segment_count,total_valid_duration_seconds,"
+        "predicted_adl_segment_counts\n"
+        "session001,1,1,60.0,"
+        "{\"Meal Preparation and Cleanup\": 1}\n",
         encoding = "utf-8",
     )
 
@@ -143,37 +165,19 @@ def _test_run_state(
         output_preview={},
     )
 
-def test_models_endpoint_return_supported_models() -> None:
+def test_models_endpoint_returns_only_public_video_models() -> None:
     client = TestClient(create_app())
-    
+
     response = client.get("/api/models")
-    
+
     assert response.status_code == 200
-    
+
     body = response.json()
-    model_ids = {model["id"] for model in body["models"]}
-    
-    hand_object_model = next(
-        model
-        for model in body["models"]
-        if model["id"] == HAND_OBJECT_CONTACT_MODEL_ID
-    )
-    
-    adl_model = next(
-        model
-        for model in body["models"]
-        if model["id"] == ADL_RECOGNITION_MODEL_ID
-    )
-    
-    assert HAND_OBJECT_CONTACT_MODEL_ID in model_ids
-    
-    assert hand_object_model["supportedInputExtensions"] == sorted(
-        HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
-    )
-        
-    assert adl_model["supportedInputExtensions"] == sorted(
-        ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
-    )
+    assert [model["id"] for model in body["models"]] == [
+        HAND_INTERACTION_MODEL_ID,
+        ADL_RECOGNITION_MODEL_ID,
+    ]
+    assert all(model["supportedInputExtensions"] == [".mp4"] for model in body["models"])
 
 def test_output_preview_endpoint_returns_dynamic_tree(tmp_path: Path) -> None:
     client = TestClient(create_app())
@@ -370,7 +374,7 @@ def test_run_endpoint_organizes_hand_object_runtime_outputs(tmp_path: Path) -> N
     assert not (run_dir / "frame_shan.pkl").exists()
     assert not (run_dir / "frame_extra.json").exists()
 
-def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
+def test_run_endpoint_writes_adl_predictions_and_normalized_outputs(
     tmp_path: Path,
 ) -> None:
     def fake_runner(
@@ -382,16 +386,8 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
         
         progress("Fake ADL model step")
         
-        (output_dir / "adl_predictions.csv").write_text(
-            "input,prediction\nclip.mp4,meal\n",
-            encoding = "utf-8",
-        )
-        
-        (output_dir / "adl_predictions_summary.csv").write_text(
-            "input,summary\nclip.mp4,summary\n",
-            encoding = "utf-8",
-        )
-        
+        _write_adl_result_files(output_dir)
+
         (output_dir / "all_preds.pkl").write_bytes(b"pickle")
         
         runtime_adl_dir = (
@@ -424,7 +420,6 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
         data = {
             "modelId": ADL_RECOGNITION_MODEL_ID,
             "outputRoot": str(_existing_output_root(tmp_path)),
-            "dominantHand": "left",
         },
         files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
     )
@@ -438,24 +433,32 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
 
     run_dir = Path(progress_body["outputFolder"])
 
-    metrics_config = json.loads(
+    adl_config = json.loads(
         (
             run_dir
             / "technical"
             / "post_processing"
-            / "metrics_config.json"
+            / "adl_processing_config.json"
         ).read_text(encoding = "utf-8")
     )
-    
     run_manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding = "utf-8"))
 
-    assert metrics_config["dominant_hand"] == "left"
-    assert run_manifest["model_configuration"]["dominant_hand"] == "left"
-    assert run_manifest["model_configuration"]["non_dominant_hand"] == "right"
+    assert adl_config["segment_length_seconds"] == 60
+    assert adl_config["inference_frame_fps"] == 1
+    assert adl_config["subclip_encoding_fps"] == 10
+    assert adl_config["frame_resize"] is None
+    assert "dominant_hand" not in run_manifest["model_configuration"]
 
-    assert (run_dir / "technical" / "model_outputs" / "predictions.csv").exists()
-    assert (run_dir / "technical" / "model_outputs" / "predictions_summary.csv").exists()
+    assert (run_dir / "results" / "adl_segment_predictions.csv").exists()
+    assert (run_dir / "results" / "adl_video_summary.csv").exists()
+    assert (run_dir / "results" / "adl_session_summary.csv").exists()
     assert (run_dir / "technical" / "model_outputs" / "all_preds.pkl").exists()
+    assert (
+        run_dir / "technical" / "model_outputs" / "adl_input_manifest.csv"
+    ).exists()
+    assert (
+        run_dir / "technical" / "post_processing" / "adl_segment_manifest.csv"
+    ).exists()
 
     assert (
         run_dir
@@ -482,15 +485,19 @@ def test_run_endpoint_writes_adl_stub_metrics_and_normalized_outputs(
         / "clip_001_frame_001_shan.pkl"
     ).exists()
 
-    assert (
-        run_dir
-        / "technical"
-        / "post_processing"
-        / "frame_level_predictions.csv"
+    assert not (
+        run_dir / "technical" / "post_processing" / "frame_level_predictions.csv"
     ).exists()
+    assert not (
+        run_dir / "technical" / "post_processing" / "interaction_segments.csv"
+    ).exists()
+    assert not (run_dir / "results" / "video_level_metrics.csv").exists()
+    assert not (run_dir / "results" / "session_level_metrics.csv").exists()
+    assert not (run_dir / "technical" / "post_processing" / "metrics_config.json").exists()
 
-    assert not (run_dir / "adl_predictions.csv").exists()
-    assert not (run_dir / "adl_predictions_summary.csv").exists()
+    assert not (run_dir / "adl_segment_predictions.csv").exists()
+    assert not (run_dir / "adl_video_summary.csv").exists()
+    assert not (run_dir / "adl_session_summary.csv").exists()
     assert not (run_dir / "all_preds.pkl").exists()
     assert not (run_dir / "adl_recognition_work").exists()
 
@@ -869,7 +876,8 @@ def test_run_endpoint_uses_injected_adl_runner(tmp_path: Path) -> None:
         assert output_dir.exists()
         
         progress("ADL step")
-        
+
+        _write_adl_result_files(output_dir)
         _write_adl_input_manifest(output_dir)
     
     client = TestClient(
@@ -1057,13 +1065,12 @@ def test_runtime_wrappers_delegate_to_existing_runners(
         tmp_path / "out",
         messages.append,
         ProcessCancellation(),
-        dominant_hand = "left",
     )
     
     assert captured["hand_request"].input_path == tmp_path / "frame.jpg"
     assert captured["adl_request"].input_path == tmp_path / "clip.mp4"
     assert messages == ["hand progress", "adl progress"]
-    assert captured["adl_request"].dominant_hand == "left"
+    assert not hasattr(captured["adl_request"], "dominant_hand")
 
 def test_validate_gui_request_accepts_adl(tmp_path: Path) -> None:
     video_path = tmp_path / "clip.mp4"
@@ -1441,11 +1448,7 @@ def test_run_endpoint_reports_wireframe_adl_single_video_progress(
         progress(_progress_line("adl_prediction_frame_processed", current = 1200, total = 1200))
         progress(_progress_line("adl_predictions_combined"))
         
-        (output_dir / "adl_predictions.csv").write_text(
-            "input,prediction\nclip.mp4,meal\n",
-            encoding = "utf-8",
-        )
-        
+        _write_adl_result_files(output_dir)
         _write_adl_input_manifest(output_dir, ("participant-session-01.mp4",))
 
     client = TestClient(
@@ -1473,7 +1476,7 @@ def test_run_endpoint_reports_wireframe_adl_single_video_progress(
         "Running object detection model on extracted frames: 1,200 / 1,200 frames",
         "Running hand-object contact on extracted frames: 1,200 / 1,200 frames",
         "Combining predictions: 1,200 / 1,200 frames",
-        "Calculating video-level summary metrics: waiting",
+        "Building ADL video and session summaries: waiting",
         "Saving outputs: waiting",
     ]
 
@@ -1496,11 +1499,7 @@ def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
         progress(_progress_line("adl_frame_extracted", current = 3600, total = 6000))
         progress(_progress_line("detic_frame_processed", current = 3050, total = 6000))
         
-        (output_dir / "adl_predictions.csv").write_text(
-            "input,prediction\nparticipant-sessions,meal\n",
-            encoding = "utf-8",
-        )
-        
+        _write_adl_result_files(output_dir)
         _write_adl_input_manifest(
             output_dir,
             tuple(f"participant-session-{index:02d}.mp4" for index in range(1, 6)),
@@ -1535,7 +1534,7 @@ def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
         "Running object detection model: 3,050 / 6,000 frames",
         "Running hand-object contact on extracted frames: waiting",
         "Combining predictions: waiting",
-        "Calculating video-level summary metrics: waiting",
+        "Building ADL video and session summaries: waiting",
         "Saving outputs: waiting",
     ]
 
@@ -1632,7 +1631,7 @@ def test_internal_progress(tmp_path: Path) -> None:
     assert [event.display_text for event in gui_backend._initial_wireframe_events(state)] == [
         "Preparing combined predictions input...",
         "Combining predictions: waiting",
-        "Calculating video-level summary metrics: waiting",
+        "Building ADL video and session summaries: waiting",
         "Saving outputs: waiting",
     ]
 
@@ -2058,7 +2057,6 @@ def test_execute_run_uses_default_adl_gui_runner(
     state = _test_run_state(tmp_path)
     state.model_id = ADL_RECOGNITION_MODEL_ID
     state.scenario = "adl-single-video"
-    state.dominant_hand = "left"
 
     calls: list[tuple[Path, Path, ProcessCancellation]] = []
 
@@ -2067,10 +2065,8 @@ def test_execute_run_uses_default_adl_gui_runner(
         output_dir: Path,
         progress: ProgressCallback,
         cancellation: ProcessCancellation,
-        *,
-        dominant_hand: str,
     ) -> None:
-        calls.append((input_path, output_dir, cancellation, dominant_hand))
+        calls.append((input_path, output_dir, cancellation))
         progress("ADL runtime output")
 
     monkeypatch.setattr(
@@ -2107,14 +2103,13 @@ def test_execute_run_uses_default_adl_gui_runner(
             state.input_path,
             state.layout.run_dir,
             state.cancellation,
-            "left",
         )
     ]
 
     assert state.status == "completed"
     assert operations == {}
 
-def test_dry_run_rejects_invalid_adl_dominant_hand(tmp_path: Path) -> None:
+def test_dry_run_ignores_legacy_adl_dominant_hand_field(tmp_path: Path) -> None:
     client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
 
     response = client.post(
@@ -2127,8 +2122,8 @@ def test_dry_run_rejects_invalid_adl_dominant_hand(tmp_path: Path) -> None:
         files = [("files", ("clip.mp4", b"fake-video", "video/mp4"))],
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Dominant hand must be 'left' or 'right'."
+    assert response.status_code == 200
+    assert response.json()["summary"]["modelId"] == ADL_RECOGNITION_MODEL_ID
 
 def test_run_endpoint_returns_same_preflight_error_as_dry_run(
     tmp_path: Path,
@@ -2343,18 +2338,8 @@ def test_open_output_folder_returns_success_after_file_manager_spawn(
 
 
 def test_models_endpoint_includes_hand_interaction_in_preferred_order() -> None:
-    from egomodelkit.models.hand_interaction import (
-        HAND_INTERACTION_MODEL_ID,
-        HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
-    )
-
     body = TestClient(create_app()).get("/api/models").json()
-    assert [model["id"] for model in body["models"]] == [
-        HAND_OBJECT_CONTACT_MODEL_ID,
-        HAND_INTERACTION_MODEL_ID,
-        ADL_RECOGNITION_MODEL_ID,
-    ]
-    model = body["models"][1]
+    model = body["models"][0]
     assert model["name"] == "Hand interaction"
     assert model["supportedInputExtensions"] == sorted(
         HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES
