@@ -38,6 +38,7 @@ from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
 )
 from egomodelkit.progress import external_progress_line, write_runtime_log_line
+from egomodelkit.run_manifest import build_run_manifest
 
 InputScenario = Literal[
     "hand-object-single-image",
@@ -372,6 +373,8 @@ def create_output_scaffold(
     scenario: InputScenario,
     status: str = "created",
     video_processing_config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
+    invocation_interface: str = "unknown",
+    invocation_arguments: tuple[str, ...] = (),
 ) -> None:
     """ Create run-folder metadata files and stable top-level directories. """
     layout.run_dir.mkdir(parents = True, exist_ok = True)
@@ -442,30 +445,22 @@ def create_output_scaffold(
     
     _write_json(
         layout.run_manifest_path,
-        {
-            "model_id": model_id,
-            "input_names": list(preview_context.input_names),
-            "scenario": scenario,
-            "output_contract_version": 1,
-            "model_configuration": (
-                {
-                    "dominant_hand": video_processing_config.dominant_hand,
-                    "non_dominant_hand": _non_dominant_hand(
-                        video_processing_config.dominant_hand
-                    ),
-                }
-                if model_id == HAND_INTERACTION_MODEL_ID
-                else (
-                    _adl_processing_configuration()
-                    if model_id == ADL_RECOGNITION_MODEL_ID
-                    else {}
-                )
+        build_run_manifest(
+            run_id=layout.run_dir.name,
+            model_id=model_id,
+            input_path=input_path,
+            input_names=preview_context.input_names,
+            scenario=scenario,
+            status=status,
+            output_folder=layout.display_output_folder,
+            output_contract_version=1,
+            model_configuration=_run_model_configuration(
+                model_id=model_id,
+                video_processing_config=video_processing_config,
             ),
-            "notes": (
-                "Runtime image IDs and exact code/model pins may be populated "
-                "by runtime execution."
-            ),
-        },
+            invocation_interface=invocation_interface,
+            invocation_arguments=invocation_arguments,
+        ),
     )
     
     layout.progress_log_path.touch(exist_ok = True)
@@ -691,8 +686,9 @@ def output_file_descriptions(context: OutputPreviewContext) -> list[OutputFileDe
         OutputFileDescription(
             "run_manifest.json",
             (
-                "Reproducibility record, including model ID, runtime details, "
-                "container/image information, code/model version pins, and run settings."
+                "Reproducibility record, including input SHA-256 hashes, EgoModelKit "
+                "Git provenance, host/runtime details, external code and model-asset "
+                "pins, Docker image fingerprints and IDs, and run settings."
             )
         ),
     ]
@@ -1805,6 +1801,36 @@ def _write_csv(
         writer.writeheader()
         writer.writerows(rows)
 
+def _run_model_configuration(
+    *,
+    model_id: str,
+    video_processing_config: VideoProcessingConfig,
+) -> dict[str, object]:
+    if model_id == HAND_INTERACTION_MODEL_ID:
+        return video_processing_config.to_dict()
+    if model_id == ADL_RECOGNITION_MODEL_ID:
+        return _adl_processing_configuration()
+    return {}
+
+
+def _read_json_mapping(path: Path) -> dict[str, object]:
+    if not path.is_file():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _mapping_value(
+    payload: dict[str, object],
+    key: str,
+) -> dict[str, object]:
+    value = payload.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _write_json(path: Path, value: dict[str, object]) -> None:
     path.write_text(
         json.dumps(value, indent = 2, sort_keys = True) + "\n", 
@@ -1835,6 +1861,7 @@ def write_run_summary(
     input_path: Path,
     scenario: InputScenario,
     status: str,
+    error_message: str | None = None,
 ) -> None:
     """ Write the current run summary without recreating the scaffold. """
     input_names = tuple(
@@ -1852,5 +1879,28 @@ def write_run_summary(
             input_names = input_names,
             scenario = scenario,
             status = status,
+        ),
+    )
+
+    if not layout.run_manifest_path.is_file():
+        return
+
+    previous_manifest = _read_json_mapping(layout.run_manifest_path)
+    model_configuration = _mapping_value(previous_manifest, "model_configuration")
+    _write_json(
+        layout.run_manifest_path,
+        build_run_manifest(
+            run_id=layout.run_dir.name,
+            model_id=model_id,
+            input_path=input_path,
+            input_names=input_names,
+            scenario=scenario,
+            status=status,
+            output_folder=layout.display_output_folder,
+            output_contract_version=1,
+            model_configuration=model_configuration,
+            previous_manifest=previous_manifest,
+            error_message=error_message,
+            collect_runtime_state=status in {"completed", "failed", "cancelled"},
         ),
     )

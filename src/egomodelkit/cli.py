@@ -1,6 +1,7 @@
 """ EgoModelKit command-line interface. """
 
 import platform
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Final, cast
@@ -168,6 +169,8 @@ def _run_model_with_output_contract(
         scenario = scenario,
         status = "running",
         video_processing_config = video_processing_config,
+        invocation_interface = "cli",
+        invocation_arguments = tuple(sys.argv),
     )
 
     progress = _cli_progress_reporter(layout)
@@ -222,6 +225,7 @@ def _run_model_with_output_contract(
             input_path = request.input_path,
             scenario = scenario,
             status = "failed",
+            error_message = str(exc),
         )
         raise
 

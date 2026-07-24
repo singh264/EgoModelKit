@@ -14,7 +14,9 @@ from egomodelkit.output_contract import (
     InputScenario,
     OutputPreviewContext,
     _input_names_for_preview,
+    _mapping_value,
     _preview_items,
+    _read_json_mapping,
     build_output_preview_context,
     build_output_preview_context_from_names,
     build_run_id,
@@ -499,3 +501,24 @@ def test_finalize_runtime_outputs_requires_adl_prediction_files(tmp_path: Path) 
             layout=layout, model_id=ADL_RECOGNITION_MODEL_ID, input_path=video,
             scenario="adl-single-video",
         )
+
+
+def test_run_manifest_json_helpers_tolerate_missing_invalid_and_non_mapping_files(
+    tmp_path: Path,
+) -> None:
+    missing = tmp_path / "missing.json"
+    assert _read_json_mapping(missing) == {}
+
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{", encoding="utf-8")
+    assert _read_json_mapping(invalid) == {}
+
+    non_mapping = tmp_path / "list.json"
+    non_mapping.write_text("[]", encoding="utf-8")
+    assert _read_json_mapping(non_mapping) == {}
+
+    mapping = tmp_path / "mapping.json"
+    mapping.write_text('{"model_configuration": {"value": 1}}', encoding="utf-8")
+    payload = _read_json_mapping(mapping)
+    assert _mapping_value(payload, "model_configuration") == {"value": 1}
+    assert _mapping_value(payload, "missing") == {}

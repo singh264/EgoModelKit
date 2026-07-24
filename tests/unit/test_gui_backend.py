@@ -899,15 +899,11 @@ def test_run_endpoint_uses_injected_adl_runner(tmp_path: Path) -> None:
     assert start_response.status_code == 200
     
     run_id = start_response.json()["runId"]
-    
-    for _ in range(100):
-        body = client.get(f"/api/runs/{run_id}/progress").json()
-        
-        if body["status"] == "completed":
-            break
-    else:
-        raise AssertionError("ADL run did not complete")
-    
+
+    body = _wait_for_run_completion(client, run_id)
+
+    assert body["status"] == "completed"
+
     visible_lines = [event["displayText"] for event in body["events"]]
     
     assert "ADL step" not in visible_lines
@@ -2435,6 +2431,15 @@ def test_hand_interaction_run_endpoint_persists_dominant_hand(
     manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
     assert config["dominant_hand"] == "left"
     assert manifest["model_configuration"] == {
+        "subclip_length_seconds": 10,
+        "subclip_fps": 30,
+        "frame_fps": 30,
+        "processing_fps": 30,
+        "resize_width": 720,
+        "resize_height": 405,
+        "pooling_window_seconds": 1.0,
+        "pooling_window_frames": 30,
+        "interaction_contact_state_threshold": 3,
         "dominant_hand": "left",
         "non_dominant_hand": "right",
     }

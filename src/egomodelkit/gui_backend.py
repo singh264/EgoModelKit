@@ -413,6 +413,7 @@ def create_app(
                 video_processing_config = VideoProcessingConfig(
                     dominant_hand = dominant_hand,
                 ),
+                invocation_interface = "gui",
             )
             
             state = GuiRunState(
@@ -654,6 +655,7 @@ def _execute_run(
             input_path = state.input_path,
             scenario = state.scenario,
             status = "cancelled",
+            error_message = "Run was cancelled.",
         )
 
         with state.lock:
@@ -667,6 +669,7 @@ def _execute_run(
             input_path = state.input_path,
             scenario = state.scenario,
             status = "failed",
+            error_message = str(exc),
         )
         
         _record_progress(

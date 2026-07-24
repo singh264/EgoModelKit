@@ -165,6 +165,15 @@ def test_hand_interaction_layout_scaffold_tree_descriptions_and_readme(tmp_path:
     assert layout.session_level_metrics_path.exists()
     manifest = json.loads(layout.run_manifest_path.read_text(encoding="utf-8"))
     assert manifest["model_configuration"] == {
+        "subclip_length_seconds": 10,
+        "subclip_fps": 30,
+        "frame_fps": 30,
+        "processing_fps": 30,
+        "resize_width": 720,
+        "resize_height": 405,
+        "pooling_window_seconds": 1.0,
+        "pooling_window_frames": 30,
+        "interaction_contact_state_threshold": 3,
         "dominant_hand": "right",
         "non_dominant_hand": "left",
     }
