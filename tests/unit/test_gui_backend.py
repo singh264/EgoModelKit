@@ -1990,6 +1990,54 @@ def test_cancel_run_endpoint_returns_404_when_operation_is_missing() -> None:
     assert response.status_code == 404
     assert response.json()["detail"] == "No active run or operation was found to cancel."
 
+def test_execute_run_records_command_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(tmp_path)
+    state.runtime_status = gui_backend.RuntimeStatus(model_name = "Hand-object contact")
+    state.staged_root.mkdir(parents = True)
+
+    def cancelled_runner(
+        _input_path: Path,
+        _output_dir: Path,
+        _progress: ProgressCallback,
+    ) -> None:
+        raise CommandCancelledError("Run was cancelled.")
+
+    monkeypatch.setattr(
+        gui_backend,
+        "write_runtime_log_line",
+        lambda _path, _message: None,
+    )
+    monkeypatch.setattr(
+        gui_backend,
+        "write_run_summary",
+        lambda **_kwargs: None,
+    )
+
+    operations = {
+        state.operation_id: CancelableGuiOperation(
+            operation_id = state.operation_id,
+            cancellation = state.cancellation,
+        )
+    }
+
+    _execute_run(
+        state = state,
+        hand_object_runner = cancelled_runner,
+        hand_interaction_runner = None,
+        adl_runner = None,
+        operations = operations,
+    )
+
+    assert state.runtime_status is None
+    assert state.status == "cancelled"
+    assert state.error_message == "Run was cancelled."
+    assert operations == {}
+    assert not state.staged_root.exists()
+
+
 def test_execute_run_uses_default_hand_object_gui_runner(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

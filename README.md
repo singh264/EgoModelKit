@@ -451,6 +451,40 @@ npm run build
 npm run dev
 ```
 
+## Manual End-to-End Tests
+
+The E2E suite runs 10 public Linux GPU or Windows-WSL GUI-backend/CLI workflows plus one isolated internal hand-object-contact check. It compares hand-use Statepool profiles and full-video ADL labels/probabilities with approved local fixtures. GitHub Actions excludes the suite. Place fixtures under `tests/e2e/fixtures` or set `EGOMODELKIT_E2E_FIXTURES`, then run:
+
+```bash
+EGOMODELKIT_RUN_E2E=1 pytest -m e2e tests/e2e -vv
+```
+
+<details>
+<summary><strong>View fixture structure</strong></summary>
+
+```text
+tests/e2e/fixtures/
+├── inputs/
+│   ├── fridge_17s.mp4
+│   ├── fridge_split/
+│   │   ├── fridge_part1_10s.mp4
+│   │   └── fridge_part2_7s.mp4
+│   └── hand_object_contact/
+│       ├── hand_holding_ball.jpg
+│       └── hand_holding_cup.jpg
+└── expected/
+    ├── adl/
+    │   └── fridge_single_predictions.csv
+    ├── hand_use/
+    │   ├── fridge_single_statepool.csv
+    │   └── fridge_multi_statepool.csv
+    └── hand_object_contact/
+        ├── hand_holding_ball_shan.json
+        └── hand_holding_cup_shan.json
+```
+
+</details>
+
 ## References
 
 <details>

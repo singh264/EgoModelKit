@@ -222,3 +222,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Manual GPU end-to-end fixtures
+/tests/e2e/fixtures/

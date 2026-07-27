@@ -68,8 +68,11 @@ egomodelkit = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 3
 markers = [
-    "gpu: requires Linux NVIDIA GPU, Docker GPU runtime, approved weights, and a demo input"
+    "gpu: requires Linux NVIDIA GPU, Docker GPU runtime, approved weights, and a demo input",
+    "e2e: manual Linux GPU or Windows-WSL end-to-end workflow test",
 ]
 
 [tool.coverage.run]

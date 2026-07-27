@@ -33,6 +33,7 @@ jobs:
       - name: Test with coverage
         run: |
           pytest \
+            -m "not e2e" \
             --cov=egomodelkit \
             --cov-report=term-missing \
             --cov-report=xml \
