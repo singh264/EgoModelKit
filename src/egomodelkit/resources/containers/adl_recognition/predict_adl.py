@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from collections import Counter
 from pathlib import Path
 from typing import Final
 
@@ -14,6 +15,7 @@ from egoviz.models import inference, processing
 
 DEFAULT_MODEL_PATH: Final[str] = "models/binary_active_logreg.joblib"
 DEFAULT_SESSION_ID: Final[str] = "session001"
+PROGRESS_PREFIX: Final[str] = "EGOMODELKIT_PROGRESS "
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,9 +35,25 @@ def main() -> None:
     args = parse_args()
 
     preds = processing.load_pickle(args.all_preds_input)
+    frame_total = len(preds)
+    if frame_total == 0:
+        raise RuntimeError("Combined ADL predictions contain no frames.")
 
-    frame_df = processing.generate_df_from_preds(preds)
-    features = processing.generate_binary_presence_df(frame_df)
+    summary_work_total = frame_total * 2
+    _emit_progress(
+        "adl_summary_frames_discovered",
+        current=0,
+        total=summary_work_total,
+    )
+    frame_df = _generate_frame_dataframe(
+        preds,
+        progress_total=summary_work_total,
+    )
+    features = _generate_binary_presence_features(
+        frame_df,
+        progress_offset=frame_total,
+        progress_total=summary_work_total,
+    )
     scaled = processing.row_wise_min_max_scaling(features)
     scaled = scaled.fillna(0.0)
 
@@ -70,6 +88,87 @@ def main() -> None:
     print(f"Saved video summary to: {args.video_summary_output}", flush=True)
     print(f"Saved session summary to: {args.session_summary_output}", flush=True)
 
+
+def _generate_frame_dataframe(
+    preds: dict[str, dict[str, object]],
+    *,
+    progress_total: int,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    for current, (index, detections) in enumerate(preds.items(), start=1):
+        parts = index.split("_")
+        if len(parts) < 3:
+            raise RuntimeError(f"Unexpected combined ADL prediction key: {index}")
+        if "remapped_metadata" not in detections:
+            raise RuntimeError(f"remapped_metadata is missing for: {index}")
+        if "active_objects" not in detections:
+            raise RuntimeError(f"active_objects is missing for: {index}")
+
+        rows.append(
+            {
+                "video": parts[1],
+                "frame": parts[2],
+                "classes": detections["remapped_metadata"],
+                "active": detections["active_objects"],
+                "adl": index.split("_", 1)[0],
+            }
+        )
+        _emit_progress(
+            "adl_summary_frame_processed",
+            current=current,
+            total=progress_total,
+        )
+
+    return pd.DataFrame(rows, columns=["video", "frame", "classes", "active", "adl"])
+
+
+def _generate_binary_presence_features(
+    frame_df: pd.DataFrame,
+    *,
+    progress_offset: int,
+    progress_total: int,
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+
+    for processed, row in enumerate(frame_df.itertuples(index=False), start=1):
+        classes, active = processing.binary_presence(row.classes, row.active)
+        class_counts = Counter(classes)
+        active_counts = Counter(
+            {
+                class_name: sum(
+                    is_active and class_name == candidate
+                    for is_active, candidate in zip(active, classes, strict=True)
+                )
+                for class_name in set(classes)
+            }
+        )
+        rows.append(
+            {
+                "adl": row.adl,
+                "video": row.video,
+                **{f"count_{key}": value for key, value in class_counts.items()},
+                **{f"active_{key}": value for key, value in active_counts.items()},
+            }
+        )
+        _emit_progress(
+            "adl_summary_frame_processed",
+            current=progress_offset + processed,
+            total=progress_total,
+        )
+
+    counts_df = pd.DataFrame(rows)
+    grouped_counts_df = counts_df.groupby("video").agg(
+        {
+            "adl": "first",
+            **{
+                column: "sum"
+                for column in counts_df.columns
+                if column not in {"adl", "video"}
+            },
+        }
+    )
+    return grouped_counts_df.reset_index()
 
 def build_segment_predictions(
     results: pd.DataFrame,
@@ -324,6 +423,13 @@ def _normalized_text(value: object) -> str:
 
 def _optional_path(value: str | None) -> Path | None:
     return Path(value) if value else None
+
+
+def _emit_progress(kind: str, **payload: object) -> None:
+    print(
+        PROGRESS_PREFIX + json.dumps({"kind": kind, **payload}, sort_keys=True),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

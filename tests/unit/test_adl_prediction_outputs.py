@@ -112,7 +112,55 @@ def test_adl_prediction_labels_fall_back_safely_without_probability_columns() ->
 
 
 def test_adl_classifier_wrapper_keeps_paper_feature_processing() -> None:
-    script_path = (
+    pytest.importorskip(
+        "pandas",
+        reason="pandas is provided by the ADL runtime image and development extras",
+    )
+    module = _load_predict_module()
+    module.processing.binary_presence = lambda classes, active: (
+        list(dict.fromkeys(classes)),
+        [
+            any(
+                is_active and candidate == class_name
+                for candidate, is_active in zip(classes, active, strict=True)
+            )
+            for class_name in dict.fromkeys(classes)
+        ],
+    )
+    progress: list[tuple[str, int, int]] = []
+    module._emit_progress = lambda kind, **payload: progress.append(
+        (kind, payload["current"], payload["total"])
+    )
+
+    preds = {
+        "meal-preparation-cleanup_video001--1_frame0": {
+            "remapped_metadata": ["food", "food", "tableware"],
+            "active_objects": [False, True, False],
+        },
+        "meal-preparation-cleanup_video001--1_frame1": {
+            "remapped_metadata": ["food"],
+            "active_objects": [False],
+        },
+    }
+    frame_df = module._generate_frame_dataframe(preds, progress_total=4)
+    features = module._generate_binary_presence_features(
+        frame_df,
+        progress_offset=2,
+        progress_total=4,
+    )
+
+    assert list(frame_df["video"]) == ["video001--1", "video001--1"]
+    assert features.loc[0, "count_food"] == 2
+    assert features.loc[0, "active_food"] == 1
+    assert features.loc[0, "count_tableware"] == 1
+    assert list(progress) == [
+        ("adl_summary_frame_processed", 1, 4),
+        ("adl_summary_frame_processed", 2, 4),
+        ("adl_summary_frame_processed", 3, 4),
+        ("adl_summary_frame_processed", 4, 4),
+    ]
+
+    source = (
         Path(__file__).parents[2]
         / "src"
         / "egomodelkit"
@@ -120,8 +168,5 @@ def test_adl_classifier_wrapper_keeps_paper_feature_processing() -> None:
         / "containers"
         / "adl_recognition"
         / "predict_adl.py"
-    )
-    source = script_path.read_text(encoding="utf-8")
-
-    assert "processing.generate_binary_presence_df(frame_df)" in source
+    ).read_text(encoding="utf-8")
     assert "processing.row_wise_min_max_scaling(features)" in source

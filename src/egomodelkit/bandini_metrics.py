@@ -338,6 +338,9 @@ def write_bandini_metric_files(
     metrics_config_path: Path,
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
     diagnostic_log: Callable[[str], None] | None = None,
+    profile_progress: Callable[[int, int], None] | None = None,
+    metric_progress: Callable[[int, int], None] | None = None,
+    frame_prediction_progress: Callable[[int, int], None] | None = None,
 ) -> None:
     """ Write frame, segment, video, session, summary, and config files. """
     mappings = load_input_video_mappings(input_manifest_path = input_manifest_path)
@@ -352,6 +355,8 @@ def write_bandini_metric_files(
         subclip_mappings = subclip_mappings,
         config = config,
         diagnostic_log = diagnostic_log,
+        profile_progress = profile_progress,
+        pooling_progress = metric_progress,
     )
     
     segments = build_interaction_segments(frame_predictions, config = config)
@@ -369,7 +374,11 @@ def write_bandini_metric_files(
         config = config,
     )
 
-    _write_frame_level_predictions(frame_level_predictions_path, frame_predictions)
+    _write_frame_level_predictions(
+        frame_level_predictions_path,
+        frame_predictions,
+        progress=frame_prediction_progress,
+    )
     _write_interaction_segments(interaction_segments_path, segments)
     _write_video_level_metrics(video_level_metrics_path, video_metrics)
     _write_session_level_metrics(session_level_metrics_path, session_metrics)
@@ -493,6 +502,8 @@ def load_frame_interaction_predictions(
     subclip_mappings: list[SubclipTimingMapping] | None = None,
     config: VideoProcessingConfig = DEFAULT_VIDEO_PROCESSING_CONFIG,
     diagnostic_log: Callable[[str], None] | None = None,
+    profile_progress: Callable[[int, int], None] | None = None,
+    pooling_progress: Callable[[int, int], None] | None = None,
 ) -> list[FrameInteractionPrediction]:
     """ Convert Shan contact states into raw and pooled interaction predictions. """
     if not shan_outputs_dir.is_dir():
@@ -507,6 +518,7 @@ def load_frame_interaction_predictions(
     video_frame_offsets: dict[str, int] = {}
     session_frame_offsets: dict[str, int] = {}
     paths_by_clip = _prediction_paths_by_clip(shan_outputs_dir)
+    profile_total = sum(len(paths) for paths in paths_by_clip.values())
     require_subclip_mapping = subclip_mappings is not None
 
     clip_counts = {
@@ -689,10 +701,13 @@ def load_frame_interaction_predictions(
                         any_interaction = raw_any_interaction,
                     )
                 )
+                if profile_progress is not None:
+                    profile_progress(len(raw_predictions), profile_total)
 
     pooled_predictions = apply_statepool(
         raw_predictions,
         config = config,
+        progress = pooling_progress,
     )
 
     _write_diagnostic(
@@ -706,6 +721,7 @@ def apply_statepool(
     frame_predictions: list[FrameInteractionPrediction],
     *,
     config: VideoProcessingConfig,
+    progress: Callable[[int, int], None] | None = None,
 ) -> list[FrameInteractionPrediction]:
     """Apply Statepool within each original video using source-valid frames."""
     pooled_by_key: dict[tuple[str, str], FrameInteractionPrediction] = {}
@@ -762,30 +778,33 @@ def apply_statepool(
                 )
 
     pooled_frames: list[FrameInteractionPrediction] = []
+    total = len(frame_predictions)
 
-    for frame in frame_predictions:
-        key = (frame.session_id, frame.frame_path,)
+    for current, frame in enumerate(frame_predictions, start=1):
+        key = (frame.session_id, frame.frame_path)
 
         if key in pooled_by_key:
             pooled_frames.append(pooled_by_key[key])
-
-            continue
-
-        pooled_frames.append(
-            replace(
-                frame,
-                left_interaction = 0,
-                right_interaction = 0,
-                dominant_interaction = 0,
-                non_dominant_interaction = 0,
-                any_interaction = 0,
+        else:
+            pooled_frames.append(
+                replace(
+                    frame,
+                    left_interaction = 0,
+                    right_interaction = 0,
+                    dominant_interaction = 0,
+                    non_dominant_interaction = 0,
+                    any_interaction = 0,
+                )
             )
-        )
+
+        if progress is not None:
+            progress(current, total)
 
     return sorted(
         pooled_frames,
         key = lambda frame: (frame.session_id, frame.session_frame_index),
     )
+
 
 def build_interaction_segments(
     frame_predictions: list[FrameInteractionPrediction],
@@ -1615,77 +1634,96 @@ def _write_csv(
 def _write_frame_level_predictions(
     path: Path,
     rows: list[FrameInteractionPrediction],
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> None:
-    _write_csv(
-        path,
-        fieldnames=[
-            "session_id",
-            "input_name",
-            "staged_video_stem",
-            "subclip_name",
-            "frame_path",
-            "subclip_timestamp_seconds",
-            "source_timestamp_seconds",
-            "valid_source_duration_seconds",
-            "is_valid_source_frame",
-            "video_frame_index",
-            "session_frame_index",
-            "video_timestamp_seconds",
-            "session_timestamp_seconds",
-            "detected_hand_count",
-            "left_detected_hand_count",
-            "right_detected_hand_count",
-            "max_contact_state",
-            "max_left_contact_state",
-            "max_right_contact_state",
-            "raw_left_interaction",
-            "raw_right_interaction",
-            "raw_dominant_interaction",
-            "raw_non_dominant_interaction",
-            "raw_any_interaction",
-            "left_interaction",
-            "right_interaction",
-            "dominant_interaction",
-            "non_dominant_interaction",
-            "any_interaction",
-        ],
-        rows=[
-            {
-                "session_id": row.session_id,
-                "input_name": row.input_name,
-                "staged_video_stem": row.staged_video_stem,
-                "subclip_name": row.subclip_name,
-                "frame_path": row.frame_path,
-                "subclip_timestamp_seconds": _format_number(row.subclip_timestamp_seconds),
-                "source_timestamp_seconds": _format_number(row.source_timestamp_seconds),
-                "valid_source_duration_seconds": _format_number(
-                    row.valid_source_duration_seconds
-                ),
-                "is_valid_source_frame": "true" if row.is_valid_source_frame else "false",
-                "video_frame_index": row.video_frame_index,
-                "session_frame_index": row.session_frame_index,
-                "video_timestamp_seconds": _format_number(row.video_timestamp_seconds),
-                "session_timestamp_seconds": _format_number(row.session_timestamp_seconds),
-                "detected_hand_count": row.detected_hand_count,
-                "left_detected_hand_count": row.left_detected_hand_count,
-                "right_detected_hand_count": row.right_detected_hand_count,
-                "max_contact_state": row.max_contact_state,
-                "max_left_contact_state": row.max_left_contact_state,
-                "max_right_contact_state": row.max_right_contact_state,
-                "raw_left_interaction": row.raw_left_interaction,
-                "raw_right_interaction": row.raw_right_interaction,
-                "raw_dominant_interaction": row.raw_dominant_interaction,
-                "raw_non_dominant_interaction": row.raw_non_dominant_interaction,
-                "raw_any_interaction": row.raw_any_interaction,
-                "left_interaction": row.left_interaction,
-                "right_interaction": row.right_interaction,
-                "dominant_interaction": row.dominant_interaction,
-                "non_dominant_interaction": row.non_dominant_interaction,
-                "any_interaction": row.any_interaction,
-            }
-            for row in rows
-        ],
-    )
+    fieldnames = [
+        "session_id",
+        "input_name",
+        "staged_video_stem",
+        "subclip_name",
+        "frame_path",
+        "subclip_timestamp_seconds",
+        "source_timestamp_seconds",
+        "valid_source_duration_seconds",
+        "is_valid_source_frame",
+        "video_frame_index",
+        "session_frame_index",
+        "video_timestamp_seconds",
+        "session_timestamp_seconds",
+        "detected_hand_count",
+        "left_detected_hand_count",
+        "right_detected_hand_count",
+        "max_contact_state",
+        "max_left_contact_state",
+        "max_right_contact_state",
+        "raw_left_interaction",
+        "raw_right_interaction",
+        "raw_dominant_interaction",
+        "raw_non_dominant_interaction",
+        "raw_any_interaction",
+        "left_interaction",
+        "right_interaction",
+        "dominant_interaction",
+        "non_dominant_interaction",
+        "any_interaction",
+    ]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    total = len(rows)
+
+    with path.open("w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for current, row in enumerate(rows, start=1):
+            writer.writerow(
+                {
+                    "session_id": row.session_id,
+                    "input_name": row.input_name,
+                    "staged_video_stem": row.staged_video_stem,
+                    "subclip_name": row.subclip_name,
+                    "frame_path": row.frame_path,
+                    "subclip_timestamp_seconds": _format_number(
+                        row.subclip_timestamp_seconds
+                    ),
+                    "source_timestamp_seconds": _format_number(
+                        row.source_timestamp_seconds
+                    ),
+                    "valid_source_duration_seconds": _format_number(
+                        row.valid_source_duration_seconds
+                    ),
+                    "is_valid_source_frame": (
+                        "true" if row.is_valid_source_frame else "false"
+                    ),
+                    "video_frame_index": row.video_frame_index,
+                    "session_frame_index": row.session_frame_index,
+                    "video_timestamp_seconds": _format_number(
+                        row.video_timestamp_seconds
+                    ),
+                    "session_timestamp_seconds": _format_number(
+                        row.session_timestamp_seconds
+                    ),
+                    "detected_hand_count": row.detected_hand_count,
+                    "left_detected_hand_count": row.left_detected_hand_count,
+                    "right_detected_hand_count": row.right_detected_hand_count,
+                    "max_contact_state": row.max_contact_state,
+                    "max_left_contact_state": row.max_left_contact_state,
+                    "max_right_contact_state": row.max_right_contact_state,
+                    "raw_left_interaction": row.raw_left_interaction,
+                    "raw_right_interaction": row.raw_right_interaction,
+                    "raw_dominant_interaction": row.raw_dominant_interaction,
+                    "raw_non_dominant_interaction": row.raw_non_dominant_interaction,
+                    "raw_any_interaction": row.raw_any_interaction,
+                    "left_interaction": row.left_interaction,
+                    "right_interaction": row.right_interaction,
+                    "dominant_interaction": row.dominant_interaction,
+                    "non_dominant_interaction": row.non_dominant_interaction,
+                    "any_interaction": row.any_interaction,
+                }
+            )
+            if progress is not None:
+                progress(current, total)
+
 
 def _write_interaction_segments(path: Path, rows: list[InteractionSegment]) -> None:
     _write_csv(

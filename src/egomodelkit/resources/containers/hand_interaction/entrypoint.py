@@ -9,6 +9,7 @@ import math
 import re
 import shutil
 import subprocess
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
@@ -55,29 +56,49 @@ def main() -> None:
     if not videos:
         raise RuntimeError("No supported MP4 video files were found for hand interaction.")
 
+    video_metadata = [
+        (video_path, _probe_source_video_metadata(video_path))
+        for video_path in videos
+    ]
+    expected_frame_total = _expected_output_frame_total(
+        [metadata for _video_path, metadata in video_metadata],
+        args.processing_fps,
+    )
+    _emit_progress(
+        "hand_interaction_frames_discovered",
+        current=0,
+        total=expected_frame_total,
+    )
+
     input_rows: list[dict[str, object]] = []
     subclip_rows: list[dict[str, object]] = []
+    pending_video_frames: list[tuple[Path, str, list[Path], float]] = []
     total_extracted_frames = 0
 
-    for video_index, video_path in enumerate(videos, start=1):
+    for video_index, (video_path, metadata) in enumerate(video_metadata, start=1):
         staged_video_name = f"video{video_index:03d}.MP4"
         staged_video_stem = Path(staged_video_name).stem
-        metadata = _probe_source_video_metadata(video_path)
-
-        _emit_progress(
-            "hand_interaction_video_checked",
-            current=video_index,
-            total=len(videos),
-        )
-
         video_frames_dir = temporary_frames_dir / staged_video_stem
         video_frames_dir.mkdir(parents=True, exist_ok=True)
+
+        def report_video_frame(
+            local_current: int,
+            *,
+            extracted_before_video: int = total_extracted_frames,
+        ) -> None:
+            _emit_progress(
+                "hand_interaction_frame_extracted",
+                current=extracted_before_video + local_current,
+                total=expected_frame_total,
+            )
+
         _extract_frames(
             video_path=video_path,
             output_pattern=video_frames_dir / "frame_%06d.jpg",
             processing_fps=args.processing_fps,
             resize_width=args.resize_width,
             resize_height=args.resize_height,
+            progress=report_video_frame,
         )
 
         frame_paths = sorted(video_frames_dir.glob("*.jpg"))
@@ -101,6 +122,25 @@ def main() -> None:
             }
         )
 
+        pending_video_frames.append(
+            (video_path, staged_video_stem, frame_paths, source_duration)
+        )
+        total_extracted_frames += len(frame_paths)
+
+    _emit_progress(
+        "hand_interaction_frame_extracted",
+        current=total_extracted_frames,
+        total=total_extracted_frames,
+    )
+    _emit_progress(
+        "hand_interaction_frames_organizing",
+        current=0,
+        total=total_extracted_frames,
+    )
+
+    organized_frames = 0
+    for video_path, staged_video_stem, frame_paths, source_duration in pending_video_frames:
+
         frames_per_subclip = args.subclip_length * args.processing_fps
 
         for subclip_index, start in enumerate(
@@ -114,6 +154,16 @@ def main() -> None:
 
             for frame_path in subclip_frames:
                 shutil.move(str(frame_path), subclip_dir / frame_path.name)
+                organized_frames += 1
+
+                if organized_frames % frames_per_subclip == 0 and (
+                    organized_frames < total_extracted_frames
+                ):
+                    _emit_progress(
+                        "hand_interaction_frame_organized",
+                        current=organized_frames,
+                        total=total_extracted_frames,
+                    )
 
             source_start = (subclip_index - 1) * args.subclip_length
             processed_duration = len(subclip_frames) / args.processing_fps
@@ -136,13 +186,6 @@ def main() -> None:
                     "processing_subclip_duration_seconds": processed_duration,
                 }
             )
-
-        total_extracted_frames += len(frame_paths)
-        _emit_progress(
-            "hand_interaction_frame_extracted",
-            current=total_extracted_frames,
-            total=total_extracted_frames,
-        )
 
     _write_csv(output_dir / INPUT_MANIFEST_FILENAME, input_rows)
     _write_csv(output_dir / SUBCLIP_MANIFEST_FILENAME, subclip_rows)
@@ -214,6 +257,33 @@ def _probe_source_video_metadata(video_path: Path) -> dict[str, int | float]:
     }
 
 
+def _expected_output_frame_total(
+    metadata_rows: list[dict[str, int | float]],
+    processing_fps: int,
+) -> int:
+    estimated_total = sum(
+        _estimated_output_frame_count(metadata, processing_fps)
+        for metadata in metadata_rows
+    )
+    return max(1, round(estimated_total)) if estimated_total > 0 else 0
+
+
+def _estimated_output_frame_count(
+    metadata: dict[str, int | float],
+    processing_fps: int,
+) -> float:
+    source_total_frames = int(metadata.get("source_total_frames", 0))
+    source_fps = float(metadata.get("source_fps", 0.0))
+    if source_total_frames > 0 and source_fps > 0:
+        return source_total_frames * processing_fps / source_fps
+
+    duration = float(metadata.get("source_duration_seconds", 0.0))
+    if duration > 0:
+        return duration * processing_fps
+
+    return 0.0
+
+
 def _extract_frames(
     *,
     video_path: Path,
@@ -221,23 +291,49 @@ def _extract_frames(
     processing_fps: int,
     resize_width: int,
     resize_height: int,
-) -> None:
-    subprocess.run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(video_path),
-            "-vf",
-            f"fps={processing_fps},scale={resize_width}:{resize_height}:flags=lanczos",
-            "-q:v",
-            "2",
-            str(output_pattern),
-        ],
-        check=True,
+    progress: Callable[[int], None],
+) -> int:
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-stats_period",
+        "0.1",
+        "-progress",
+        "pipe:1",
+        "-i",
+        str(video_path),
+        "-vf",
+        f"fps={processing_fps},scale={resize_width}:{resize_height}:flags=lanczos",
+        "-q:v",
+        "2",
+        str(output_pattern),
+    ]
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
     )
+    last_reported_frame = 0
+
+    assert process.stdout is not None
+    for line in process.stdout:
+        key, separator, value = line.strip().partition("=")
+        if separator and key == "frame":
+            next_frame = max(last_reported_frame, _parse_int(value))
+            for current in range(last_reported_frame + 1, next_frame + 1):
+                progress(current)
+            last_reported_frame = next_frame
+
+    exit_code = process.wait()
+    if exit_code != 0:
+        raise subprocess.CalledProcessError(exit_code, command)
+
+    return last_reported_frame
 
 
 def _write_csv(path: Path, rows: list[dict[str, object]]) -> None:

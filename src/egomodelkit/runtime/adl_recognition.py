@@ -568,6 +568,13 @@ def run_adl_recognition(
     
     progress(
         external_progress_line(
+            "adl_frames_discovered",
+            current=0,
+            total=global_frame_total,
+        )
+    )
+    progress(
+        external_progress_line(
             "adl_frame_extracted",
             current = global_frame_total,
             total = global_frame_total,

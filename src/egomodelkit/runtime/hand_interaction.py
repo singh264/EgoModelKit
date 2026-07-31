@@ -306,7 +306,21 @@ def run_hand_interaction(
 
     progress(
         external_progress_line(
+            "hand_interaction_frames_discovered",
+            current=0,
+            total=global_frame_total,
+        )
+    )
+    progress(
+        external_progress_line(
             "hand_interaction_frame_extracted",
+            current=global_frame_total,
+            total=global_frame_total,
+        )
+    )
+    progress(
+        external_progress_line(
+            "hand_interaction_frame_organized",
             current=global_frame_total,
             total=global_frame_total,
         )

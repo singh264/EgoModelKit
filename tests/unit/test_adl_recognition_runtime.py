@@ -1026,10 +1026,10 @@ def test_entrypoint_extract_writes_paper_faithful_segment_metadata(
     assert config["frame_resize"] is None
 
     egoviz_command = calls[0]
-    assert egoviz_command[egoviz_command.index("--subclip_length") + 1] == "60"
-    assert egoviz_command[egoviz_command.index("--fps") + 1] == "10"
-    assert egoviz_command[egoviz_command.index("--frame_fps") + 1] == "1"
-    assert "--resize" not in egoviz_command
+    assert egoviz_command[egoviz_command.index("--subclip-length") + 1] == "60"
+    assert egoviz_command[egoviz_command.index("--subclip-fps") + 1] == "10"
+    assert egoviz_command[egoviz_command.index("--frame-fps") + 1] == "1"
+    assert egoviz_command[egoviz_command.index("--progress-total") + 1] == "134"
 
     with (output_dir / "adl_segment_manifest.csv").open(
         "r",
@@ -1071,7 +1071,7 @@ def test_entrypoint_uses_strict_paper_iou_rule(
     data_root = output_dir / "work" / "egoviz"
     commands: list[list[str]] = []
 
-    monkeypatch.setattr(module, "_flatten_nested_model_outputs", lambda _path: None)
+    monkeypatch.setattr(module, "_flatten_nested_model_outputs", lambda _path: 3)
     monkeypatch.setattr(module, "predict_from_all_preds", lambda **_kwargs: None)
 
     def fake_run(command: list[str]) -> None:
@@ -1089,7 +1089,9 @@ def test_entrypoint_uses_strict_paper_iou_rule(
         active_iou=0.8,
     )
 
-    applied_threshold = float(commands[0][commands[0].index("--active_iou") + 1])
+    applied_threshold = float(commands[0][commands[0].index("--active-iou") + 1])
+    assert commands[0][commands[0].index("--progress-offset") + 1] == "3"
+    assert commands[0][commands[0].index("--progress-total") + 1] == "6"
     assert applied_threshold > 0.8
 
 

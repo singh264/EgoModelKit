@@ -174,6 +174,19 @@ def test_run_hand_interaction_extracts_then_reuses_hoc_for_each_subclip(
     assert len(executed) == 6
     assert all("detic" not in " ".join(command).lower() for command in executed)
     assert all("process_all_preds" not in " ".join(command) for command in executed)
+    organized_index = next(
+        index
+        for index, message in enumerate(messages)
+        if '"kind": "hand_interaction_frame_organized"' in message
+    )
+    hoc_index = next(
+        index
+        for index, message in enumerate(messages)
+        if '"kind": "hand_interaction_hoc_frame_processed"' in message
+    )
+    assert organized_index < hoc_index
+    assert '"current": 3' in messages[organized_index]
+    assert '"total": 3' in messages[organized_index]
     assert any('"kind": "hand_interaction_hoc_frame_processed"' in message for message in messages)
     assert messages[-1] == "hand-interaction inference completed."
     extraction = executed[0]

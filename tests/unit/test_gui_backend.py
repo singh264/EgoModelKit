@@ -1437,12 +1437,38 @@ def test_run_endpoint_reports_wireframe_adl_single_video_progress(
         output_dir: Path,
         progress: ProgressCallback,
     ) -> None:
+        progress(_progress_line("adl_frames_discovered", current = 0, total = 1200))
         progress(_progress_line("adl_frame_extracted", current = 1200, total = 1200))
         progress(_progress_line("detic_frame_processed", current = 1200, total = 1200))
         progress(_progress_line("hand_object_image_processed", current = 1200, total = 1200))
-        progress(_progress_line("adl_prediction_frames_discovered", current = 1200, total = 1200))
-        progress(_progress_line("adl_prediction_frame_processed", current = 1200, total = 1200))
-        progress(_progress_line("adl_predictions_combined"))
+        progress(
+            _progress_line(
+                "adl_prediction_frames_discovered",
+                current = 0,
+                total = 2400,
+            )
+        )
+        progress(
+            _progress_line(
+                "adl_prediction_frame_processed",
+                current = 2400,
+                total = 2400,
+            )
+        )
+        progress(
+            _progress_line(
+                "adl_summary_frames_discovered",
+                current = 0,
+                total = 2400,
+            )
+        )
+        progress(
+            _progress_line(
+                "adl_summary_frame_processed",
+                current = 2400,
+                total = 2400,
+            )
+        )
         
         _write_adl_result_files(output_dir)
         _write_adl_input_manifest(output_dir, ("participant-session-01.mp4",))
@@ -1467,13 +1493,11 @@ def test_run_endpoint_reports_wireframe_adl_single_video_progress(
     progress_body = _wait_for_run_completion(client, run_id)
 
     assert [event["displayText"] for event in progress_body["events"]] == [
-        "Preparing video input...",
         "Extracting frames: 1,200 / 1,200 frames",
         "Running object detection model on extracted frames: 1,200 / 1,200 frames",
         "Running hand-object contact on extracted frames: 1,200 / 1,200 frames",
         "Combining predictions: 1,200 / 1,200 frames",
-        "Building ADL video and session summaries: waiting",
-        "Saving outputs: waiting",
+        "Building ADL video and session summaries: 1,200 / 1,200 frames",
     ]
 
 def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
@@ -1484,6 +1508,7 @@ def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
         output_dir: Path,
         progress: ProgressCallback,
     ) -> None:
+        progress(_progress_line("adl_frames_discovered", current = 0, total = 6000))
         progress(
             _progress_line(
                 "adl_video_checked",
@@ -1524,14 +1549,11 @@ def test_run_endpoint_reports_wireframe_adl_video_directory_progress(
     progress_body = _wait_for_run_completion(client, run_id)
 
     assert [event["displayText"] for event in progress_body["events"]] == [
-        "Preparing video inputs...",
-        "Checking videos: 5 / 5 valid videos",
         "Extracting frames across all videos: 3,600 / 6,000 frames",
         "Running object detection model: 3,050 / 6,000 frames",
-        "Running hand-object contact on extracted frames: waiting",
-        "Combining predictions: waiting",
-        "Building ADL video and session summaries: waiting",
-        "Saving outputs: waiting",
+        "Running hand-object contact on extracted frames: 0 / 6,000 frames",
+        "Combining predictions: 0 / 6,000 frames",
+        "Building ADL video and session summaries: 0 / 6,000 frames",
     ]
 
 def test_run_endpoint_writes_technical_progress_without_showing_it(
@@ -1625,10 +1647,7 @@ def test_internal_progress(tmp_path: Path) -> None:
     )
 
     assert [event.display_text for event in gui_backend._initial_wireframe_events(state)] == [
-        "Preparing combined predictions input...",
-        "Combining predictions: waiting",
         "Building ADL video and session summaries: waiting",
-        "Saving outputs: waiting",
     ]
 
     unknown_state = _test_run_state(tmp_path, scenario = "unknown-scenario")
@@ -1638,22 +1657,22 @@ def test_internal_progress(tmp_path: Path) -> None:
 
     gui_backend._record_external_progress_update(
         state,
-        ExternalProgressUpdate(kind = "adl_predictions_combining", payload = {}),
+        ExternalProgressUpdate(
+            kind = "adl_summary_frames_discovered",
+            payload = {"current": 0, "total": 20},
+        ),
     )
-
-    assert any(
-        event.display_text == "Combining predictions: waiting"
-        for event in state.progress_events
-    )
-
-    before_count = len(state.progress_events)
-
     gui_backend._record_external_progress_update(
         state,
-        ExternalProgressUpdate(kind = "adl_predictions_combined", payload = {}),
+        ExternalProgressUpdate(
+            kind = "adl_summary_frame_processed",
+            payload = {"current": 7, "total": 20},
+        ),
     )
 
-    assert len(state.progress_events) == before_count
+    assert state.progress_events[0].display_text == (
+        "Building ADL video and session summaries: 4 / 10 frames"
+    )
     
 def test_hand_object_discovery_update_ignores_non_hand_object_scenarios(
     tmp_path: Path,
@@ -1707,6 +1726,24 @@ def test_external_progress_update_ignores_mismatched_or_unknown_scenarios(
     gui_backend._record_external_progress_update(
         adl_single_state,
         ExternalProgressUpdate(kind = "unknown_kind", payload = {}),
+    )
+    gui_backend._record_external_progress_update(
+        adl_single_state,
+        ExternalProgressUpdate(
+            kind = "hand_interaction_video_checked",
+            payload = {"current": 1, "total": 1},
+        ),
+    )
+    gui_backend._record_external_progress_update(
+        adl_single_state,
+        ExternalProgressUpdate(
+            kind = "hand_interaction_profiles_calculating",
+            payload = {},
+        ),
+    )
+    gui_backend._record_external_progress_update(
+        adl_single_state,
+        ExternalProgressUpdate(kind = "adl_predictions_combining", payload = {}),
     )
 
     assert len(single_image_state.progress_events) == before_single_count + 1
@@ -1813,11 +1850,26 @@ def test_stage_and_payload_helpers() -> None:
         "hand_object_output_saved"
     ) == "save_outputs"
     
-    assert (
-        gui_backend._stage_from_external_progress_kind("adl_video_checked") 
-        == "check_input"
-    )
-    
+    assert gui_backend._stage_from_external_progress_kind("adl_video_checked") is None
+
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_interaction_frames_discovered"
+    ) == "extract_frames"
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_interaction_frame_organized"
+    ) == "organize_frames"
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_interaction_hoc_frame_processed"
+    ) == "run_hand_object"
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_interaction_profile_frame_processed"
+    ) == "calculate_profiles"
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_interaction_metric_frame_processed"
+    ) == "calculate_metrics"
+    assert gui_backend._stage_from_external_progress_kind(
+        "hand_interaction_frame_prediction_saved"
+    ) == "save_frame_predictions"
     assert gui_backend._stage_from_external_progress_kind(
         "adl_frame_extracted"
     ) == "extract_frames"
@@ -1829,7 +1881,10 @@ def test_stage_and_payload_helpers() -> None:
     assert gui_backend._stage_from_external_progress_kind(
         "adl_prediction_frame_processed"
     ) == "combine_predictions"
-    
+    assert gui_backend._stage_from_external_progress_kind(
+        "adl_summary_frame_processed"
+    ) == "calculate_metrics"
+
     assert gui_backend._stage_from_external_progress_kind("unknown") is None
 
     payload = {
@@ -1844,6 +1899,20 @@ def test_stage_and_payload_helpers() -> None:
     assert gui_backend._payload_int(payload, "digits") == 5
     assert gui_backend._payload_int(payload, "letters") == 0
     assert gui_backend._payload_int(payload, "missing") == 0
+
+    assert gui_backend._adl_frame_progress({"current": 0, "total": 7200}) == (
+        0,
+        3600,
+    )
+    assert gui_backend._adl_frame_progress({"current": 1, "total": 7200}) == (
+        1,
+        3600,
+    )
+    assert gui_backend._adl_frame_progress({"current": 7200, "total": 7200}) == (
+        3600,
+        3600,
+    )
+    assert gui_backend._adl_frame_progress({"current": 9, "total": 9}) == (5, 5)
 
 def test_progress_merge_helpers_cover_remaining_branches() -> None:
     existing = ProgressEvent(
@@ -2579,38 +2648,56 @@ def test_hand_interaction_backend_helpers_and_progress(tmp_path: Path, monkeypat
     )
     _initialize_wireframe_progress(state)
     assert [event.stage for event in state.progress_events] == [
-        "prepare_input",
-        "check_input",
         "extract_frames",
+        "organize_frames",
         "run_hand_object",
         "calculate_profiles",
         "calculate_metrics",
-        "save_outputs",
+        "save_frame_predictions",
     ]
     updates = [
-        ExternalProgressUpdate("hand_interaction_video_checked", {"current": 2, "total": 2}),
-        ExternalProgressUpdate("hand_interaction_frame_extracted", {"current": 60, "total": 60}),
+        ExternalProgressUpdate(
+            "hand_interaction_frames_discovered",
+            {"current": 0, "total": 60},
+        ),
+        ExternalProgressUpdate(
+            "hand_interaction_frame_extracted",
+            {"current": 60, "total": 60},
+        ),
+        ExternalProgressUpdate(
+            "hand_interaction_frame_organized",
+            {"current": 60, "total": 60},
+        ),
         ExternalProgressUpdate(
             "hand_interaction_hoc_frame_processed",
             {"current": 60, "total": 60},
         ),
-        ExternalProgressUpdate("hand_interaction_profiles_calculating", {}),
-        ExternalProgressUpdate("hand_interaction_metrics_calculating", {}),
         ExternalProgressUpdate(
-            "hand_interaction_metrics_calculated",
-            {"current": 1, "total": 1},
+            "hand_interaction_profile_frame_processed",
+            {"current": 45, "total": 60},
         ),
-        ExternalProgressUpdate("hand_interaction_outputs_organizing", {}),
+        ExternalProgressUpdate(
+            "hand_interaction_metric_frame_processed",
+            {"current": 45, "total": 60},
+        ),
+        ExternalProgressUpdate(
+            "hand_interaction_frame_prediction_saved",
+            {"current": 30, "total": 60},
+        ),
     ]
     for update in updates:
         _record_external_progress_update(state, update)
     events = {event.stage: event for event in state.progress_events}
-    assert events["check_input"].current == 2
     assert events["extract_frames"].current == 60
+    assert events["organize_frames"].current == 60
+    assert events["organize_frames"].total == 60
     assert events["run_hand_object"].current == 60
-    assert events["calculate_profiles"].message == "Calculating interaction profiles..."
-    assert events["calculate_metrics"].current == 1
-    assert events["save_outputs"].current == 1
+    assert events["calculate_profiles"].current == 45
+    assert events["calculate_profiles"].total == 60
+    assert events["calculate_metrics"].current == 45
+    assert events["calculate_metrics"].total == 60
+    assert events["save_frame_predictions"].current == 30
+    assert events["save_frame_predictions"].total == 60
 
     single_state = _test_run_state(
         tmp_path / "single",
@@ -2620,13 +2707,19 @@ def test_hand_interaction_backend_helpers_and_progress(tmp_path: Path, monkeypat
     _initialize_wireframe_progress(single_state)
     _record_external_progress_update(
         single_state,
-        ExternalProgressUpdate("hand_interaction_video_checked", {"current": 1, "total": 1}),
+        ExternalProgressUpdate(
+            "hand_interaction_frames_discovered",
+            {"current": 0, "total": 30},
+        ),
     )
     _record_external_progress_update(
         single_state,
-        ExternalProgressUpdate("hand_interaction_frame_extracted", {"current": 30, "total": 30}),
+        ExternalProgressUpdate(
+            "hand_interaction_frame_extracted",
+            {"current": 30, "total": 30},
+        ),
     )
-    assert single_state.progress_events[1].message == "Extracting frames"
+    assert single_state.progress_events[0].message == "Extracting frames"
 
 
 def test_execute_run_uses_default_hand_interaction_gui_runner(

@@ -109,24 +109,23 @@ def _cli_progress_reporter(layout) -> Callable[[str], None]:
 
         if update is None:
             write_runtime_log_line(layout.runtime_log_path, message)
-        else:
-            payload = update.payload
-            write_progress_event(
-                layout.progress_log_path,
-                ProgressEvent(
-                    stage = update.kind,
-                    message = update.kind.replace("_", " "),
-                    current = _payload_int(payload, "current"),
-                    total = _payload_int(payload, "total"),
-                    unit = (
-                        str(payload["unit"])
-                        if isinstance(payload.get("unit"), str)
-                        else None
-                    ),
-                ),
-            )
+            _report_progress(message)
+            return
 
-        _report_progress(message)
+        payload = update.payload
+        event = ProgressEvent(
+            stage = update.kind,
+            message = update.kind.replace("_", " "),
+            current = _payload_int(payload, "current"),
+            total = _payload_int(payload, "total"),
+            unit = (
+                str(payload["unit"])
+                if isinstance(payload.get("unit"), str)
+                else None
+            ),
+        )
+        write_progress_event(layout.progress_log_path, event)
+        _report_progress(event.display_text)
 
     return report
 

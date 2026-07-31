@@ -1,14 +1,7 @@
-""" Container entry point for EgoModelKit ADL recognition core stages.
+"""Container entry point for EgoModelKit ADL recognition core stages.
 
-This file keeps EgoModelKit-specific logic small.
-
-It does not reimplement EgoVizML's ADL processing, instead it:
-
-1. stages user videos into the folder shape EgoVizML expects
-2. calls EgoVizML's video_to_subclips_and_frames.py
-3. adapts nested Detic/Shan outputs into the flat folders expected by process_all_preds.py
-4. calls EgoVizML's process_all_preds.py
-5. calls a prediction wrapper that uses egoviz.models.processing and egoviz.models.inference
+EgoModelKit stages inputs and invokes instrumented wrappers around the pinned
+EgoVizML processing so every long-running frame operation reports progress.
 """
 
 import argparse
@@ -27,6 +20,7 @@ SUPPORTED_VIDEO_SUFFIXES: Final[frozenset[str]] = frozenset({".mp4"})
 EGOVIZML_STAGED_VIDEO_SUFFIX: Final[str] = ".MP4"
 
 DEFAULT_SESSION_ID: Final[str] = "session001"
+PROGRESS_PREFIX: Final[str] = "EGOMODELKIT_PROGRESS "
 ADL_INPUT_MANIFEST_FILENAME: Final[str] = "adl_input_manifest.csv"
 ADL_SEGMENT_MANIFEST_FILENAME: Final[str] = "adl_segment_manifest.csv"
 ADL_PROCESSING_CONFIG_FILENAME: Final[str] = "adl_processing_config.json"
@@ -36,11 +30,13 @@ ADL_SESSION_SUMMARY_FILENAME: Final[str] = "adl_session_summary.csv"
 
 EGOVIZML_HOME: Final[Path] = Path("/opt/EgoVizML")
 
-VIDEO_TO_SUBCLIPS_SCRIPT: Final[Path] = (
-    EGOVIZML_HOME / "scripts" / "video_to_subclips_and_frames.py"
+VIDEO_TO_SUBCLIPS_SCRIPT: Final[Path] = Path(
+    "/opt/egomodelkit_extract_adl_frames.py"
 )
 
-PROCESS_ALL_PREDS_SCRIPT: Final[Path] = EGOVIZML_HOME / "scripts" / "process_all_preds.py"
+PROCESS_ALL_PREDS_SCRIPT: Final[Path] = Path(
+    "/opt/egomodelkit_combine_adl_predictions.py"
+)
 
 PREDICT_ADL_SCRIPT: Final[Path] = Path("/opt/egomodelkit_predict_adl.py")
 
@@ -155,19 +151,30 @@ def extract_frames(
         active_iou=active_iou,
     )
 
-    print("EgoModelKit runtime: calling EgoVizML frame extraction.", flush=True)
+    expected_frame_total = _expected_inference_frame_total(
+        staged_rows,
+        inference_frame_fps,
+    )
+    _emit_progress(
+        "adl_frames_discovered",
+        current=0,
+        total=expected_frame_total,
+    )
 
+    print("EgoModelKit runtime: calling EgoVizML frame extraction.", flush=True)
     _run(
         [
             sys.executable,
             str(VIDEO_TO_SUBCLIPS_SCRIPT),
             str(adl_dir),
-            "--subclip_length",
+            "--subclip-length",
             str(segment_length_seconds),
-            "--fps",
+            "--subclip-fps",
             str(subclip_encoding_fps),
-            "--frame_fps",
+            "--frame-fps",
             str(inference_frame_fps),
+            "--progress-total",
+            str(expected_frame_total),
         ]
     )
 
@@ -183,6 +190,32 @@ def extract_frames(
     print("EgoModelKit runtime: EgoVizML frame extraction finished.", flush=True)
 
 
+def _expected_inference_frame_total(
+    metadata_rows: list[dict[str, object]],
+    inference_frame_fps: int,
+) -> int:
+    estimated_total = sum(
+        _estimated_inference_frame_count(metadata, inference_frame_fps)
+        for metadata in metadata_rows
+    )
+    return max(1, round(estimated_total)) if estimated_total > 0 else 0
+
+
+def _estimated_inference_frame_count(
+    metadata: dict[str, object],
+    inference_frame_fps: int,
+) -> float:
+    duration = _first_positive_float(metadata.get("source_duration_seconds"))
+    if duration > 0:
+        return duration * inference_frame_fps
+
+    source_total_frames = _positive_int(metadata.get("source_total_frames"))
+    source_fps = _first_positive_float(metadata.get("source_fps"))
+    if source_total_frames > 0 and source_fps > 0:
+        return source_total_frames * inference_frame_fps / source_fps
+
+    return 0.0
+
 def finalize_predictions(
     *,
     output_dir: Path,
@@ -191,42 +224,45 @@ def finalize_predictions(
     adl_dir_name: str,
     active_iou: float,
 ) -> None:
-    print("EgoModelKit runtime: preparing EgoVizML prediction folders.", flush = True)
-    
+    print("EgoModelKit runtime: preparing EgoVizML prediction folders.", flush=True)
+
     data_root = _egoviz_data_root(
-        output_dir = output_dir,
-        work_dir_name = work_dir_name,
-        egoviz_data_dir_name = egoviz_data_dir_name,
+        output_dir=output_dir,
+        work_dir_name=work_dir_name,
+        egoviz_data_dir_name=egoviz_data_dir_name,
     )
-    
     adl_dir = data_root / adl_dir_name
-    
+
     _ensure_egovizml_adl_folders(data_root)
-    _flatten_nested_model_outputs(adl_dir)
-    
-    print("EgoModelKit runtime: calling EgoVizML process_all_preds.py", flush = True)
-    
+    paired_frame_count = _flatten_nested_model_outputs(adl_dir)
+    combination_total = paired_frame_count * 2
+
+    print("EgoModelKit runtime: combining Detic and Shan predictions.", flush=True)
     _run(
         [
             sys.executable,
             str(PROCESS_ALL_PREDS_SCRIPT),
             str(data_root),
-            "--active_iou",
+            "--active-iou",
             str(math.nextafter(active_iou, math.inf)),
+            "--progress-offset",
+            str(paired_frame_count),
+            "--progress-total",
+            str(combination_total),
         ]
     )
-    
+
     generated_all_preds = data_root / "all_preds.pkl"
     final_all_preds = output_dir / "all_preds.pkl"
-    
+
     if not generated_all_preds.exists():
         raise RuntimeError(f"EgoVizML did not write expected file: {generated_all_preds}")
-    
+
     shutil.copy2(generated_all_preds, final_all_preds)
-    
+
     predict_from_all_preds(
-        all_preds_path = final_all_preds,
-        output_dir = output_dir,
+        all_preds_path=final_all_preds,
+        output_dir=output_dir,
     )
 
 def predict_from_all_preds(
@@ -323,78 +359,84 @@ def _ensure_egovizml_adl_folders(data_root: Path) -> None:
         (data_root / adl_name / "detic").mkdir(parents = True, exist_ok = True)
         (data_root / adl_name / "shan").mkdir(parents = True, exist_ok = True)
 
-def _flatten_nested_model_outputs(adl_dir: Path) -> None:
+def _flatten_nested_model_outputs(adl_dir: Path) -> int:
     detic_raw_dir = adl_dir / "detic_raw"
     shan_raw_dir = adl_dir / "subclips_shan"
-    
+
     detic_flat_dir = adl_dir / "detic"
     shan_flat_dir = adl_dir / "shan"
-    
-    detic_flat_dir.mkdir(parents = True, exist_ok = True)
-    shan_flat_dir.mkdir(parents = True, exist_ok = True)
-    
+
+    detic_flat_dir.mkdir(parents=True, exist_ok=True)
+    shan_flat_dir.mkdir(parents=True, exist_ok=True)
+
     for old_file in detic_flat_dir.glob("*.pkl"):
         old_file.unlink()
-    
+
     for old_file in shan_flat_dir.glob("*.pkl"):
         old_file.unlink()
-    
+
     detic_by_key: dict[tuple[str, str], Path] = {}
     shan_by_key: dict[tuple[str, str], Path] = {}
-    
+
     for detic_path in sorted(detic_raw_dir.rglob("*_detic.pkl")):
         clip_name = detic_path.parent.name
         frame_stem = detic_path.stem.removesuffix("_detic")
         detic_by_key[(clip_name, frame_stem)] = detic_path
-    
+
     for shan_path in sorted(shan_raw_dir.rglob("*_shan.pkl")):
         clip_name = shan_path.parent.name
         frame_stem = shan_path.stem.removesuffix("_shan")
         shan_by_key[(clip_name, frame_stem)] = shan_path
-    
+
     detic_keys = set(detic_by_key)
     shan_keys = set(shan_by_key)
-    
-    missing_shan = [
-        str(detic_by_key[key])
-        for key in sorted(detic_keys - shan_keys)
-    ]
-    
-    missing_detic = [
-        str(shan_by_key[key])
-        for key in sorted(shan_keys - detic_keys)
-    ]
-    
+
+    missing_shan = [str(detic_by_key[key]) for key in sorted(detic_keys - shan_keys)]
+    missing_detic = [str(shan_by_key[key]) for key in sorted(shan_keys - detic_keys)]
+
     if missing_shan:
         raise RuntimeError(
             "Missing hand-object-contact outputs for Detic files: "
             + ", ".join(missing_shan[:5])
         )
-    
+
     if missing_detic:
         raise RuntimeError(
             "Missing Detic outputs for hand-object-contact files: "
             + ", ".join(missing_detic[:5])
         )
 
-    paired_count = 0
-    
-    for clip_name, frame_stem in sorted(detic_keys):
+    paired_frame_count = len(detic_keys)
+    if paired_frame_count == 0:
+        raise RuntimeError("No paired Detic and hand-object-contact predictions were found.")
+
+    combination_total = paired_frame_count * 2
+    _emit_progress(
+        "adl_prediction_frames_discovered",
+        current=0,
+        total=combination_total,
+    )
+
+    for current, (clip_name, frame_stem) in enumerate(sorted(detic_keys), start=1):
         detic_path = detic_by_key[(clip_name, frame_stem)]
         shan_path = shan_by_key[(clip_name, frame_stem)]
-        
+
         frame_token = frame_stem.replace("frame_", "frame")
         output_base = f"{clip_name}_{frame_token}"
-        
+
         shutil.copy2(detic_path, detic_flat_dir / f"{output_base}_detic.pkl")
         shutil.copy2(shan_path, shan_flat_dir / f"{output_base}_shan.pkl")
-        
-        paired_count += 1
-    
-    if paired_count == 0:
-        raise RuntimeError("No paired Detic and hand-object-contact predictions were found.")
-    
-    print(f"EgoModelKit runtime: paired {paired_count} Detic/Shan frame outputs.", flush = True)
+        _emit_progress(
+            "adl_prediction_frame_processed",
+            current=current,
+            total=combination_total,
+        )
+
+    print(
+        f"EgoModelKit runtime: paired {paired_frame_count} Detic/Shan frame outputs.",
+        flush=True,
+    )
+    return paired_frame_count
 
 def _egoviz_data_root(
     *,
@@ -674,6 +716,13 @@ def _write_adl_processing_config(
         )
         + "\n",
         encoding="utf-8",
+    )
+
+
+def _emit_progress(kind: str, **payload: object) -> None:
+    print(
+        PROGRESS_PREFIX + json.dumps({"kind": kind, **payload}, sort_keys=True),
+        flush=True,
     )
 
 

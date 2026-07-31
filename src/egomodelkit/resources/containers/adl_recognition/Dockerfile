@@ -46,6 +46,8 @@ RUN python -m pip install \
 RUN python -m pip install -e .
 
 COPY entrypoint.py /opt/egomodelkit_adl_entrypoint.py
+COPY extract_adl_frames.py /opt/egomodelkit_extract_adl_frames.py
+COPY combine_adl_predictions.py /opt/egomodelkit_combine_adl_predictions.py
 COPY predict_adl.py /opt/egomodelkit_predict_adl.py
 
 ENTRYPOINT ["python", "/opt/egomodelkit_adl_entrypoint.py"]

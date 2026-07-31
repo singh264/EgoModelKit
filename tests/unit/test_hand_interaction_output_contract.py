@@ -271,13 +271,37 @@ def test_finalize_hand_interaction_outputs_computes_and_organizes_multi_video_se
     assert config["processing_fps"] == 30
     assert config["pooling_window_frames"] == 30
     assert config["non_dominant_hand"] == "left"
-    kinds = [parse_external_progress_line(message).kind for message in progress]
-    assert kinds == [
-        "hand_interaction_profiles_calculating",
-        "hand_interaction_metrics_calculating",
-        "hand_interaction_metrics_calculated",
-        "hand_interaction_outputs_organizing",
+    updates = [parse_external_progress_line(message) for message in progress]
+    assert all(update is not None for update in updates)
+    profile_updates = [
+        update
+        for update in updates
+        if update.kind == "hand_interaction_profile_frame_processed"
     ]
+    metric_updates = [
+        update
+        for update in updates
+        if update.kind == "hand_interaction_metric_frame_processed"
+    ]
+    frame_prediction_updates = [
+        update
+        for update in updates
+        if update.kind == "hand_interaction_frame_prediction_saved"
+    ]
+    assert updates[0].kind == "hand_interaction_profile_frames_discovered"
+    assert updates[0].payload == {"current": 0, "total": 60}
+    assert updates[1].kind == "hand_interaction_metric_frames_discovered"
+    assert updates[1].payload == {"current": 0, "total": 60}
+    assert updates[2].kind == "hand_interaction_frame_predictions_discovered"
+    assert updates[2].payload == {"current": 0, "total": 60}
+    assert [update.payload["current"] for update in profile_updates] == list(range(1, 61))
+    assert {update.payload["total"] for update in profile_updates} == {60}
+    assert [update.payload["current"] for update in metric_updates] == list(range(1, 61))
+    assert {update.payload["total"] for update in metric_updates} == {60}
+    assert [update.payload["current"] for update in frame_prediction_updates] == list(
+        range(1, 61)
+    )
+    assert {update.payload["total"] for update in frame_prediction_updates} == {60}
 
 
 def test_finalize_hand_interaction_uses_stable_paths_and_rejects_partial_outputs(

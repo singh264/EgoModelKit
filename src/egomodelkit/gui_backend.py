@@ -99,6 +99,7 @@ from egomodelkit.runtime.preflight import (
 GUI_LOCAL_SERVER_NAME: Final[str] = "127.0.0.1"
 GUI_DEFAULT_SERVER_PORT: Final[int] = 7860
 GUI_UPLOAD_CHUNK_SIZE_BYTES: Final[int] = 1024 * 1024
+ADL_PROGRESS_OPERATIONS_PER_FRAME: Final[int] = 2
 
 GuiRunStatus = Literal["ready", "running", "completed", "failed", "cancelled"]
 ProgressCallback = Callable[[str], None]
@@ -1051,7 +1052,7 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 message="Running hand-object contact model on the image: waiting",
             ),
             ProgressEvent(
-                stage = "save_outputs", 
+                stage = "save_outputs",
                 message = "Saving detection outputs: waiting",
             ),
         ]
@@ -1061,19 +1062,22 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
             ProgressEvent(stage = "prepare_input", message = "Preparing image inputs..."),
             ProgressEvent(stage = "check_input", message = "Checking images: waiting"),
             ProgressEvent(
-                stage="run_hand_object", 
+                stage="run_hand_object",
                 message = "Running hand-object contact model on the images: waiting",
             ),
             ProgressEvent(
-                stage = "save_outputs", 
+                stage = "save_outputs",
                 message = "Saving detection outputs: waiting",
             ),
         ]
 
     if state.scenario == "hand-interaction-single-video":
         return [
-            ProgressEvent(stage="prepare_input", message="Preparing video input..."),
             ProgressEvent(stage="extract_frames", message="Extracting frames: waiting"),
+            ProgressEvent(
+                stage="organize_frames",
+                message="Organizing extracted frames: waiting",
+            ),
             ProgressEvent(
                 stage="run_hand_object",
                 message="Running hand-object contact on extracted frames: waiting",
@@ -1086,16 +1090,21 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 stage="calculate_metrics",
                 message="Calculating hand-use metrics: waiting",
             ),
-            ProgressEvent(stage="save_outputs", message="Saving outputs: waiting"),
+            ProgressEvent(
+                stage="save_frame_predictions",
+                message="Saving frame-level predictions: waiting",
+            ),
         ]
 
     if state.scenario == "hand-interaction-video-directory":
         return [
-            ProgressEvent(stage="prepare_input", message="Preparing video inputs..."),
-            ProgressEvent(stage="check_input", message="Checking videos: waiting"),
             ProgressEvent(
                 stage="extract_frames",
                 message="Extracting frames across all videos: waiting",
+            ),
+            ProgressEvent(
+                stage="organize_frames",
+                message="Organizing extracted frames: waiting",
             ),
             ProgressEvent(
                 stage="run_hand_object",
@@ -1109,70 +1118,63 @@ def _initial_wireframe_events(state: GuiRunState) -> list[ProgressEvent]:
                 stage="calculate_metrics",
                 message="Calculating session hand-use metrics: waiting",
             ),
-            ProgressEvent(stage="save_outputs", message="Saving outputs: waiting"),
+            ProgressEvent(
+                stage="save_frame_predictions",
+                message="Saving frame-level predictions: waiting",
+            ),
         ]
 
     if state.scenario == "adl-single-video":
         return [
-            ProgressEvent(stage = "prepare_input", message = "Preparing video input..."),
             ProgressEvent(stage = "extract_frames", message = "Extracting frames: waiting"),
             ProgressEvent(
                 stage = "run_detic",
                 message="Running object detection model on extracted frames: waiting",
             ),
             ProgressEvent(
-                stage="run_hand_object", 
+                stage="run_hand_object",
                 message="Running hand-object contact on extracted frames: waiting",
             ),
             ProgressEvent(
-                stage = "combine_predictions", 
-                message = "Combining predictions: waiting"),
+                stage = "combine_predictions",
+                message = "Combining predictions: waiting",
+            ),
             ProgressEvent(
                 stage = "calculate_metrics",
                 message = "Building ADL video and session summaries: waiting",
             ),
-            ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
         ]
 
     if state.scenario == "adl-video-directory":
         return [
-            ProgressEvent(stage = "prepare_input", message = "Preparing video inputs..."),
-            ProgressEvent(stage = "check_input", message = "Checking video: waiting"),
             ProgressEvent(
-                stage="extract_frames", 
-                message="Extracting frames across all videos: waiting"
+                stage="extract_frames",
+                message="Extracting frames across all videos: waiting",
             ),
             ProgressEvent(
-                stage = "run_detic", 
-                message = "Running object detection model: waiting"
+                stage = "run_detic",
+                message = "Running object detection model: waiting",
             ),
             ProgressEvent(
                 stage = "run_hand_object",
                 message = "Running hand-object contact on extracted frames: waiting",
             ),
             ProgressEvent(
-                stage = "combine_predictions", 
-                message = "Combining predictions: waiting"),
+                stage = "combine_predictions",
+                message = "Combining predictions: waiting",
+            ),
             ProgressEvent(
                 stage = "calculate_metrics",
                 message = "Building ADL video and session summaries: waiting",
             ),
-            ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
         ]
 
     if state.scenario == "adl-combined-predictions":
         return [
             ProgressEvent(
-                stage = "prepare_input", 
-                message = "Preparing combined predictions input..."),
-            ProgressEvent(
-                stage = "combine_predictions", 
-                message = "Combining predictions: waiting"),
-            ProgressEvent(
                 stage = "calculate_metrics",
                 message = "Building ADL video and session summaries: waiting",
             ),
-            ProgressEvent(stage = "save_outputs", message = "Saving outputs: waiting"),
         ]
 
     raise ValueError(f"Unsupported progress scenario: {state.scenario}")
@@ -1266,19 +1268,65 @@ def _record_external_progress_update(
         return
 
     if update.kind == "hand_interaction_video_checked":
-        current = _payload_int(payload, "current")
+        return
+
+    if update.kind == "hand_interaction_frames_discovered":
         total = _payload_int(payload, "total")
-        if state.scenario == "hand-interaction-video-directory":
-            _upsert_progress_event(
-                state,
-                ProgressEvent(
-                    stage="check_input",
-                    message="Checking videos",
-                    current=current,
-                    total=total,
-                    unit="valid videos",
-                ),
-            )
+        extraction_message = (
+            "Extracting frames across all videos"
+            if state.scenario == "hand-interaction-video-directory"
+            else "Extracting frames"
+        )
+        metric_message = (
+            "Calculating session hand-use metrics"
+            if state.scenario == "hand-interaction-video-directory"
+            else "Calculating hand-use metrics"
+        )
+        for event in (
+            ProgressEvent(
+                stage="extract_frames",
+                message=extraction_message,
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="organize_frames",
+                message="Organizing extracted frames",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="run_hand_object",
+                message="Running hand-object contact on extracted frames",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="calculate_profiles",
+                message="Calculating interaction profiles",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="calculate_metrics",
+                message=metric_message,
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="save_frame_predictions",
+                message="Saving frame-level predictions",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+        ):
+            _upsert_progress_event(state, event)
         return
 
     if update.kind == "hand_interaction_frame_extracted":
@@ -1301,6 +1349,22 @@ def _record_external_progress_update(
         )
         return
 
+    if update.kind in {
+        "hand_interaction_frames_organizing",
+        "hand_interaction_frame_organized",
+    }:
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="organize_frames",
+                message="Organizing extracted frames",
+                current=_payload_int(payload, "current"),
+                total=_payload_int(payload, "total"),
+                unit="frames",
+            ),
+        )
+        return
+
     if update.kind == "hand_interaction_hoc_frame_processed":
         _upsert_progress_event(
             state,
@@ -1314,155 +1378,210 @@ def _record_external_progress_update(
         )
         return
 
-    if update.kind == "hand_interaction_profiles_calculating":
+    if update.kind in {
+        "hand_interaction_profile_frames_discovered",
+        "hand_interaction_profile_frame_processed",
+    }:
         _upsert_progress_event(
             state,
             ProgressEvent(
                 stage="calculate_profiles",
-                message="Calculating interaction profiles...",
-            ),
-        )
-        return
-
-    if update.kind == "hand_interaction_metrics_calculating":
-        _upsert_progress_event(
-            state,
-            ProgressEvent(
-                stage="calculate_metrics",
-                message="Calculating hand-use metrics...",
-            ),
-        )
-        return
-
-    if update.kind == "hand_interaction_metrics_calculated":
-        _upsert_progress_event(
-            state,
-            ProgressEvent(
-                stage="calculate_metrics",
-                message="Calculating hand-use metrics",
+                message="Calculating interaction profiles",
                 current=_payload_int(payload, "current"),
                 total=_payload_int(payload, "total"),
+                unit="frames",
             ),
         )
         return
 
-    if update.kind == "hand_interaction_outputs_organizing":
+    if update.kind in {
+        "hand_interaction_metric_frames_discovered",
+        "hand_interaction_metric_frame_processed",
+    }:
+        message = (
+            "Calculating session hand-use metrics"
+            if state.scenario == "hand-interaction-video-directory"
+            else "Calculating hand-use metrics"
+        )
         _upsert_progress_event(
             state,
             ProgressEvent(
-                stage="save_outputs",
-                message="Saving outputs",
-                current=1,
-                total=1,
+                stage="calculate_metrics",
+                message=message,
+                current=_payload_int(payload, "current"),
+                total=_payload_int(payload, "total"),
+                unit="frames",
             ),
         )
+        return
+
+    if update.kind in {
+        "hand_interaction_frame_predictions_discovered",
+        "hand_interaction_frame_prediction_saved",
+    }:
+        _upsert_progress_event(
+            state,
+            ProgressEvent(
+                stage="save_frame_predictions",
+                message="Saving frame-level predictions",
+                current=_payload_int(payload, "current"),
+                total=_payload_int(payload, "total"),
+                unit="frames",
+            ),
+        )
+        return
+
+    if update.kind in {
+        "hand_interaction_profiles_calculating",
+        "hand_interaction_metrics_calculating",
+        "hand_interaction_metrics_calculated",
+        "hand_interaction_outputs_organizing",
+    }:
         return
 
     if update.kind == "adl_video_checked":
-        current = _payload_int(payload, "current")
+        return
+
+    if update.kind == "adl_frames_discovered":
         total = _payload_int(payload, "total")
-
-        if state.scenario == "adl-video-directory":
-            _upsert_progress_event(
-                state,
-                ProgressEvent(
-                    stage = "check_input",
-                    message = "Checking videos",
-                    current = current,
-                    total = total,
-                    unit = "valid videos",
-                ),
-            )
-
+        extraction_message = (
+            "Extracting frames across all videos"
+            if state.scenario == "adl-video-directory"
+            else "Extracting frames"
+        )
+        detic_message = (
+            "Running object detection model"
+            if state.scenario == "adl-video-directory"
+            else "Running object detection model on extracted frames"
+        )
+        for event in (
+            ProgressEvent(
+                stage="extract_frames",
+                message=extraction_message,
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="run_detic",
+                message=detic_message,
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="run_hand_object",
+                message="Running hand-object contact on extracted frames",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="combine_predictions",
+                message="Combining predictions",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+            ProgressEvent(
+                stage="calculate_metrics",
+                message="Building ADL video and session summaries",
+                current=0,
+                total=total,
+                unit="frames",
+            ),
+        ):
+            _upsert_progress_event(state, event)
         return
 
     if update.kind == "adl_frame_extracted":
         current = _payload_int(payload, "current")
         total = _payload_int(payload, "total")
-
         message = (
             "Extracting frames across all videos"
             if state.scenario == "adl-video-directory"
             else "Extracting frames"
         )
-
         _upsert_progress_event(
             state,
             ProgressEvent(
-                stage = "extract_frames",
-                message = message,
-                current = current,
-                total = total,
-                unit = "frames",
+                stage="extract_frames",
+                message=message,
+                current=current,
+                total=total,
+                unit="frames",
             ),
         )
-
         return
 
     if update.kind == "detic_frame_processed":
         current = _payload_int(payload, "current")
         total = _payload_int(payload, "total")
-
         message = (
             "Running object detection model"
             if state.scenario == "adl-video-directory"
             else "Running object detection model on extracted frames"
         )
-
         _upsert_progress_event(
             state,
             ProgressEvent(
-                stage = "run_detic",
-                message = message,
-                current = current,
-                total = total,
-                unit = "frames",
+                stage="run_detic",
+                message=message,
+                current=current,
+                total=total,
+                unit="frames",
             ),
         )
-
         return
 
-    if update.kind == "adl_prediction_frames_discovered":
+    if update.kind in {
+        "adl_prediction_frames_discovered",
+        "adl_prediction_frame_processed",
+    }:
+        current, total = _adl_frame_progress(payload)
         _upsert_progress_event(
             state,
             ProgressEvent(
-                stage = "combine_predictions",
-                message = "Combining predictions: waiting",
+                stage="combine_predictions",
+                message="Combining predictions",
+                current=current,
+                total=total,
+                unit="frames",
             ),
         )
-
         return
 
-    if update.kind == "adl_prediction_frame_processed":
-        current = _payload_int(payload, "current")
-        total = _payload_int(payload, "total")
-
+    if update.kind in {
+        "adl_summary_frames_discovered",
+        "adl_summary_frame_processed",
+    }:
+        current, total = _adl_frame_progress(payload)
         _upsert_progress_event(
             state,
             ProgressEvent(
-                stage = "combine_predictions",
-                message = "Combining predictions",
-                current = current,
-                total = total,
-                unit = "frames",
+                stage="calculate_metrics",
+                message="Building ADL video and session summaries",
+                current=current,
+                total=total,
+                unit="frames",
             ),
         )
-
         return
 
-    if update.kind == "adl_predictions_combining":
-        _upsert_progress_event(
-            state,
-            ProgressEvent(
-                stage = "combine_predictions",
-                message = "Combining predictions: waiting",
-            ),
-        )
-
+    if update.kind in {"adl_predictions_combining", "adl_predictions_combined"}:
         return
 
-    if update.kind == "adl_predictions_combined":
-        return
+def _adl_frame_progress(payload: dict[str, object]) -> tuple[int, int]:
+    """ Convert two-pass ADL operation progress to frame-equivalent progress. """
+    operation_current = _payload_int(payload, "current")
+    operation_total = _payload_int(payload, "total")
+    frame_current = (
+        operation_current + ADL_PROGRESS_OPERATIONS_PER_FRAME - 1
+    ) // ADL_PROGRESS_OPERATIONS_PER_FRAME
+    frame_total = (
+        operation_total + ADL_PROGRESS_OPERATIONS_PER_FRAME - 1
+    ) // ADL_PROGRESS_OPERATIONS_PER_FRAME
+    return min(frame_current, frame_total), frame_total
 
 def _display_video_name_from_payload(payload: dict[str, object]) -> str:
     """ Return a clean user-facing video label. """
@@ -1642,7 +1761,7 @@ def _docker_build_step_counts(message: str) -> tuple[int, int] | None:
     return None
 
 def _stage_from_external_progress_kind(kind: str) -> str | None:
-    """ Return the visible stage updated by one external progress kind. """
+    """Return the visible stage updated by one external progress kind."""
     if kind in {"hand_object_images_discovered", "hand_object_images_checked"}:
         return "check_input"
 
@@ -1652,11 +1771,42 @@ def _stage_from_external_progress_kind(kind: str) -> str | None:
     if kind == "hand_object_output_saved":
         return "save_outputs"
 
-    if kind == "adl_video_checked":
-        return "check_input"
-
-    if kind == "adl_frame_extracted":
+    if kind in {
+        "hand_interaction_frames_discovered",
+        "hand_interaction_frame_extracted",
+        "adl_frames_discovered",
+        "adl_frame_extracted",
+    }:
         return "extract_frames"
+
+    if kind in {
+        "hand_interaction_frames_organizing",
+        "hand_interaction_frame_organized",
+    }:
+        return "organize_frames"
+
+    if kind == "hand_interaction_hoc_frame_processed":
+        return "run_hand_object"
+
+    if kind in {
+        "hand_interaction_profile_frames_discovered",
+        "hand_interaction_profile_frame_processed",
+    }:
+        return "calculate_profiles"
+
+    if kind in {
+        "hand_interaction_metric_frames_discovered",
+        "hand_interaction_metric_frame_processed",
+        "adl_summary_frames_discovered",
+        "adl_summary_frame_processed",
+    }:
+        return "calculate_metrics"
+
+    if kind in {
+        "hand_interaction_frame_predictions_discovered",
+        "hand_interaction_frame_prediction_saved",
+    }:
+        return "save_frame_predictions"
 
     if kind == "detic_frame_processed":
         return "run_detic"

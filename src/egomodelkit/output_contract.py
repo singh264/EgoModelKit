@@ -1018,10 +1018,29 @@ def _finalize_bandini_metric_outputs(
         )
 
     if emit_progress:
-        progress(external_progress_line("hand_interaction_profiles_calculating"))
+        progress(
+            external_progress_line(
+                "hand_interaction_profile_frames_discovered",
+                current=0,
+                total=expected_prediction_count,
+            )
+        )
+        progress(
+            external_progress_line(
+                "hand_interaction_metric_frames_discovered",
+                current=0,
+                total=expected_prediction_count,
+            )
+        )
+        progress(
+            external_progress_line(
+                "hand_interaction_frame_predictions_discovered",
+                current=0,
+                total=expected_prediction_count,
+            )
+        )
+
     config = read_video_processing_config(metric_inputs.metrics_config_path)
-    if emit_progress:
-        progress(external_progress_line("hand_interaction_metrics_calculating"))
     write_bandini_metric_files(
         shan_outputs_dir=metric_inputs.shan_outputs_dir,
         input_manifest_path=metric_inputs.input_manifest_path,
@@ -1036,6 +1055,39 @@ def _finalize_bandini_metric_outputs(
         diagnostic_log=lambda message: write_runtime_log_line(
             layout.runtime_log_path,
             f"Bandini diagnostics: {message}",
+        ),
+        profile_progress=(
+            lambda current, total: progress(
+                external_progress_line(
+                    "hand_interaction_profile_frame_processed",
+                    current=current,
+                    total=total,
+                )
+            )
+            if emit_progress
+            else None
+        ),
+        metric_progress=(
+            lambda current, total: progress(
+                external_progress_line(
+                    "hand_interaction_metric_frame_processed",
+                    current=current,
+                    total=total,
+                )
+            )
+            if emit_progress
+            else None
+        ),
+        frame_prediction_progress=(
+            lambda current, total: progress(
+                external_progress_line(
+                    "hand_interaction_frame_prediction_saved",
+                    current=current,
+                    total=total,
+                )
+            )
+            if emit_progress
+            else None
         ),
     )
     actual_prediction_count = _count_csv_data_rows(layout.frame_level_predictions_path)
@@ -1056,17 +1108,7 @@ def _finalize_bandini_metric_outputs(
             f"See {layout.runtime_log_path} for path and matching details."
         )
 
-    if emit_progress:
-        progress(
-            external_progress_line(
-                "hand_interaction_metrics_calculated",
-                current=1,
-                total=1,
-            )
-        )
     _remove_path(layout.run_dir / METRICS_CONFIG_FILENAME)
-    if emit_progress:
-        progress(external_progress_line("hand_interaction_outputs_organizing"))
 
 def write_stub_video_level_metric_files(
     *,
