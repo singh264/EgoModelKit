@@ -1,15 +1,17 @@
 import { 
+    BarChart3,
     Check, 
     ChevronDown,
     ChevronLeft,
     ChevronRight, 
     ChevronUp,
     CircleCheck,
+    Cpu,
     FileText,
     Folder,
     Info, 
-    Shield, 
-    Upload 
+    Upload,
+    Video,
 } from "lucide-react";
 import {
     type ChangeEvent,
@@ -34,10 +36,6 @@ type StepperStep = Exclude<Step, "welcome" | "output-preview">;
 type ReviewMode = "ready" | "dry-run-complete" | "running";
 
 type GuiRunStatus = "ready" | "running" | "completed" | "failed" | "cancelled";
-
-const privacyMessage =
-    "Your selected files are processed locally by default. " +
-    "No telemetry or cloud upload is used in this MVP.";
 
 type ModelInfo = {
     id: string;
@@ -132,6 +130,47 @@ type RuntimeBuildStage = {
     total: number;
 };
 
+type HandInteractionMetricValues = {
+    dominant: number;
+    nonDominant: number;
+    bilateralTotal: number;
+};
+
+type HandInteractionVisualization = {
+    kind: "hand-interaction";
+    durationSeconds: number;
+    metrics: {
+        percentInteractionTime: HandInteractionMetricValues;
+        interactionDurationSeconds: HandInteractionMetricValues;
+        interactionSegmentCount: HandInteractionMetricValues;
+    };
+    segments: Array<{
+        startSeconds: number;
+        endSeconds: number;
+        handRole: "dominant" | "non_dominant";
+    }>;
+};
+
+type AdlVisualization = {
+    kind: "adl";
+    durationSeconds: number;
+    analyzedDurationSeconds: number;
+    segments: Array<{
+        startSeconds: number;
+        endSeconds: number;
+        activity: string;
+    }>;
+    activities: Array<{
+        activity: string;
+        durationSeconds: number;
+        sessionPercent: number;
+        segmentCount: number;
+    }>;
+    totalSegmentCount: number;
+};
+
+type ResultVisualization = HandInteractionVisualization | AdlVisualization;
+
 type ProgressResponse = {
     runId: string;
     status: GuiRunStatus;
@@ -141,6 +180,7 @@ type ProgressResponse = {
     runtimeStatus: RuntimeStatus | null;
     runtimeBuildStages: RuntimeBuildStage[];
     outputPreview: OutputPreview;
+    resultVisualization?: ResultVisualization | null;
 };
 
 type PersistedAppState = {
@@ -871,58 +911,91 @@ export function App() {
 }
 
 function WelcomeScreen({ onStart }: { onStart: () => void }) {
+    const workflowSteps = [
+        { label: "Video", Icon: Video },
+        { label: "Model", Icon: Cpu },
+        { label: "Metrics", Icon: BarChart3 },
+        { label: "Research outputs", Icon: FileText },
+    ];
+
     return (
-        <main className="mx-auto w-full max-w-[672px] px-6 pt-24 pb-24 text-center">
+        <main className="mx-auto w-full max-w-[800px] px-6 pt-12 pb-10 text-center sm:pt-14">
             <div
                 className="
-                    mx-auto flex h-16 w-16 items-center justify-center rounded-full
+                    mx-auto flex h-20 w-20 items-center justify-center rounded-3xl
                     bg-egm-green-soft text-egm-green
                 "
             >
-                <Shield aria-hidden="true" size={32} strokeWidth={2.2} />
+                <Video aria-hidden="true" size={40} strokeWidth={2.1} />
             </div>
 
-            <h1 className="mt-6 text-[30px] font-semibold leading-[1.15] tracking-[-0.03em]">
+            <h1 className="mt-6 text-[42px] font-semibold leading-[1.1] tracking-[-0.04em]">
                 EgoModelKit
             </h1>
 
-            <p className="mt-3.5 text-lg font-normal leading-[1.45]">
-                Run egocentric video models through a simple local interface.
+            <p className="mt-5 text-2xl font-semibold leading-[1.35] text-egm-subtitle">
+                Egocentric video analysis for rehabilitation research
             </p>
+
+            <p className="mx-auto mt-6 max-w-[680px] text-lg leading-7 text-egm-body-copy">
+                Analyze daily-activity videos using computer vision models and generate
+                structured hand-use metrics, timelines, and reproducible research outputs.
+            </p>
+
+            <div className="mt-10 rounded-2xl border border-egm-list-border bg-white px-6 py-6">
+                <div className="flex flex-wrap items-start justify-center gap-x-4 gap-y-5">
+                    {workflowSteps.map(({ label, Icon }, index) => (
+                        <div className="contents" key={label}>
+                            <div className="min-w-[112px] text-center">
+                                <div
+                                    className="
+                                        mx-auto flex h-12 w-12 items-center justify-center
+                                        rounded-2xl bg-egm-green-tint text-egm-green
+                                    "
+                                >
+                                    <Icon aria-hidden="true" size={25} strokeWidth={2} />
+                                </div>
+                                <p className="mt-2 text-sm font-semibold text-egm-strong-copy">
+                                    {label}
+                                </p>
+                            </div>
+
+                            {index < workflowSteps.length - 1 ? (
+                                <ChevronRight
+                                    aria-hidden="true"
+                                    className="mt-3 hidden text-egm-step-border sm:block"
+                                    size={26}
+                                    strokeWidth={1.8}
+                                />
+                            ) : null}
+                        </div>
+                    ))}
+                </div>
+            </div>
 
             <div
                 className="
-                    mx-auto mt-8 flex min-h-[84px] w-full max-w-[544px]
-                    gap-4 rounded-xl border border-egm-blue-border bg-egm-blue-soft
-                    px-6 py-5 text-left
+                    mx-auto mt-10 w-full max-w-[560px] rounded-2xl border
+                    border-egm-blue-border bg-egm-blue-soft px-6 py-4 text-left
+                    text-base font-medium leading-6 text-blue-800
                 "
             >
-                <Info
-                    aria-hidden="true"
-                    className="shrink-0 text-egm-blue-icon"
-                    size={20}
-                    strokeWidth={2.2}
-                />
-                <p className="text-sm leading-6">{privacyMessage}</p>
+                <strong>Local processing.</strong> All analysis runs on your computer.
+                No data is uploaded or shared.
             </div>
 
             <button
                 className="
-                    mt-8 min-h-12 min-w-[164px] rounded-lg border border-egm-green
-                    bg-egm-green px-8 py-3 text-base font-semibold text-white
+                    mt-10 min-h-14 min-w-[220px] rounded-xl border border-egm-green
+                    bg-egm-green px-9 py-3 text-lg font-semibold text-white
                     hover:bg-egm-green-dark focus-visible:outline-3
                     focus-visible:outline-offset-3 focus-visible:outline-egm-green
                 "
                 type="button"
                 onClick={onStart}
             >
-                Start New Run
+                Start analysis
             </button>
-
-            <p className="mt-7 text-xs font-normal leading-[1.45]">
-                Designed for research use. Please confirm approved data handling
-                procedures before using clinical data.
-            </p>
         </main>
     );
 }
@@ -2199,6 +2272,12 @@ function ResultsScreen({
                 dominantHand={dominantHand}
             />
 
+            {!failed && progress?.resultVisualization ? (
+                <ResultVisualizationPanel
+                    visualization={progress.resultVisualization}
+                />
+            ) : null}
+
             <div 
                 className="
                     sticky bottom-0 z-10 mt-auto flex flex-wrap justify-center gap-4 
@@ -2234,6 +2313,460 @@ function ResultsScreen({
             </div>
         </>
     )
+}
+
+function ResultVisualizationPanel({
+    visualization,
+}: {
+    visualization: ResultVisualization;
+}) {
+    return visualization.kind === "hand-interaction" ? (
+        <>
+            <HandInteractionMetricsTable visualization={visualization} />
+            <HandInteractionTimeline visualization={visualization} />
+        </>
+    ) : (
+        <>
+            <AdlActivityTimeline visualization={visualization} />
+            <AdlSummaryTable visualization={visualization} />
+        </>
+    );
+}
+
+function HandInteractionMetricsTable({
+    visualization,
+}: {
+    visualization: HandInteractionVisualization;
+}) {
+    const rows = [
+        {
+            label: "Percent interaction time",
+            values: visualization.metrics.percentInteractionTime,
+            format: (value: number) => `${formatNumber(value, 1)}%`,
+        },
+        {
+            label: "Interaction duration",
+            values: visualization.metrics.interactionDurationSeconds,
+            format: (value: number) => `${formatNumber(value, 1)} s`,
+        },
+        {
+            label: "Number of interaction segments",
+            values: visualization.metrics.interactionSegmentCount,
+            format: (value: number) => formatNumber(value, 0),
+        },
+    ];
+
+    return (
+        <section
+            aria-labelledby="hand-metrics-heading"
+            className="mt-8 rounded-2xl border border-egm-list-border bg-white px-6 py-7"
+        >
+            <h2 id="hand-metrics-heading" className="text-2xl font-semibold">
+                Clinical hand-use metrics
+            </h2>
+            <p className="mt-2 text-base leading-6 text-egm-body-copy">
+                Session-level summary of detected hand-object interactions during the
+                activity.
+            </p>
+
+            <div className="mt-6 overflow-x-auto">
+                <table className="w-full min-w-[680px] border-collapse text-left">
+                    <thead className="bg-egm-tree-bg text-sm uppercase tracking-wide">
+                        <tr>
+                            <th className="px-4 py-3 text-egm-body-copy">Metric</th>
+                            <th className="px-4 py-3 text-center text-egm-green">
+                                Dominant hand
+                            </th>
+                            <th className="px-4 py-3 text-center text-blue-700">
+                                Non-dominant hand
+                            </th>
+                            <th className="px-4 py-3 text-center text-egm-body-copy">
+                                Bilateral / total
+                            </th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows.map((row) => (
+                            <tr className="border-t border-egm-list-border" key={row.label}>
+                                <th className="px-4 py-4 font-medium">{row.label}</th>
+                                <td className="px-4 py-4 text-center font-semibold text-egm-green">
+                                    {row.format(row.values.dominant)}
+                                </td>
+                                <td className="px-4 py-4 text-center font-semibold text-blue-700">
+                                    {row.format(row.values.nonDominant)}
+                                </td>
+                                <td className="px-4 py-4 text-center">
+                                    {row.format(row.values.bilateralTotal)}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+
+            <p className="mt-6 text-sm leading-6 text-egm-body-copy">
+                These metrics summarize how often and how long each hand interacted
+                with objects during the analyzed session.
+            </p>
+        </section>
+    );
+}
+
+function HandInteractionTimeline({
+    visualization,
+}: {
+    visualization: HandInteractionVisualization;
+}) {
+    const rows = [
+        {
+            label: "Dominant hand",
+            role: "dominant" as const,
+            color: "#00b97b",
+        },
+        {
+            label: "Non-dominant hand",
+            role: "non_dominant" as const,
+            color: "#4d94ed",
+        },
+    ];
+
+    return (
+        <section
+            aria-labelledby="hand-timeline-heading"
+            className="mt-8 rounded-2xl border border-egm-list-border bg-white px-6 py-7"
+        >
+            <h2 id="hand-timeline-heading" className="text-2xl font-semibold">
+                Interaction timeline
+            </h2>
+            <p className="mt-2 text-base leading-6 text-egm-body-copy">
+                Visual overview of when each hand interacted with objects across the
+                analyzed session.
+            </p>
+
+            <TimelineRows
+                durationSeconds={visualization.durationSeconds}
+                rows={rows.map((row) => ({
+                    label: row.label,
+                    segments: visualization.segments
+                        .filter((segment) => segment.handRole === row.role)
+                        .map((segment) => ({
+                            startSeconds: segment.startSeconds,
+                            endSeconds: segment.endSeconds,
+                            color: row.color,
+                            ariaLabel: `${row.label} interaction from ${formatTimelineTime(
+                                segment.startSeconds,
+                            )} to ${formatTimelineTime(segment.endSeconds)}`,
+                        })),
+                }))}
+            />
+
+            <div className="mt-5 flex flex-wrap gap-x-8 gap-y-3 text-sm text-egm-body-copy">
+                {rows.map((row) => (
+                    <div className="flex items-center gap-2" key={row.label}>
+                        <span
+                            aria-hidden="true"
+                            className="h-4 w-8 rounded-md"
+                            style={{ backgroundColor: row.color }}
+                        />
+                        {row.label} interaction
+                    </div>
+                ))}
+            </div>
+        </section>
+    );
+}
+
+const ADL_TIMELINE_COLORS = [
+    "#00b8a9",
+    "#2f7df6",
+    "#7c4dff",
+    "#e67e22",
+    "#d94f70",
+    "#5b8c3a",
+    "#8d6e63",
+    "#00838f",
+];
+
+function AdlActivityTimeline({ visualization }: { visualization: AdlVisualization }) {
+    const colorByActivity = new Map(
+        visualization.activities.map((activity, index) => [
+            activity.activity,
+            ADL_TIMELINE_COLORS[index % ADL_TIMELINE_COLORS.length],
+        ]),
+    );
+
+    return (
+        <section
+            aria-labelledby="adl-timeline-heading"
+            className="mt-8 rounded-2xl border border-egm-list-border bg-white px-6 py-7"
+        >
+            <h2 id="adl-timeline-heading" className="text-2xl font-semibold">
+                Activity Timeline
+            </h2>
+            <p className="mt-2 text-base leading-6 text-egm-body-copy">
+                Predicted activities across the analyzed session.
+            </p>
+
+            <TimelineRows
+                durationSeconds={visualization.durationSeconds}
+                rows={[
+                    {
+                        label: "Activity",
+                        segments: visualization.segments.map((segment) => ({
+                            startSeconds: segment.startSeconds,
+                            endSeconds: segment.endSeconds,
+                            color: colorByActivity.get(segment.activity) ?? "#777a80",
+                            ariaLabel: `${segment.activity} from ${formatTimelineTime(
+                                segment.startSeconds,
+                            )} to ${formatTimelineTime(segment.endSeconds)}`,
+                        })),
+                    },
+                ]}
+            />
+
+            <div className="mt-5 flex flex-wrap gap-x-7 gap-y-3 text-sm text-egm-body-copy">
+                {visualization.activities.map((activity) => (
+                    <div className="flex items-center gap-2" key={activity.activity}>
+                        <span
+                            aria-hidden="true"
+                            className="h-4 w-4 rounded-full"
+                            style={{
+                                backgroundColor: colorByActivity.get(activity.activity),
+                            }}
+                        />
+                        {activity.activity}
+                    </div>
+                ))}
+            </div>
+        </section>
+    );
+}
+
+function AdlSummaryTable({ visualization }: { visualization: AdlVisualization }) {
+    const colorByActivity = new Map(
+        visualization.activities.map((activity, index) => [
+            activity.activity,
+            ADL_TIMELINE_COLORS[index % ADL_TIMELINE_COLORS.length],
+        ]),
+    );
+
+    return (
+        <section
+            aria-labelledby="adl-summary-heading"
+            className="mt-8 rounded-2xl border border-egm-list-border bg-white px-6 py-7"
+        >
+            <h2 id="adl-summary-heading" className="text-2xl font-semibold">
+                Activity Summary
+            </h2>
+            <p className="mt-2 text-base leading-6 text-egm-body-copy">
+                Session-level summary of the activities predicted across all analyzed
+                segments.
+            </p>
+
+            <div className="mt-6 overflow-x-auto">
+                <table className="w-full min-w-[640px] border-collapse text-left">
+                    <thead className="bg-egm-tree-bg text-sm uppercase tracking-wide text-egm-body-copy">
+                        <tr>
+                            <th className="px-4 py-3">Activity</th>
+                            <th className="px-4 py-3 text-right">Total duration</th>
+                            <th className="px-4 py-3 text-right">Session %</th>
+                            <th className="px-4 py-3 text-right">Segments</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {visualization.activities.map((activity) => (
+                            <tr
+                                className="border-t border-egm-list-border"
+                                key={activity.activity}
+                            >
+                                <th className="px-4 py-4 font-medium">
+                                    <span className="inline-flex items-center gap-3">
+                                        <span
+                                            aria-hidden="true"
+                                            className="h-4 w-4 rounded-full"
+                                            style={{
+                                                backgroundColor: colorByActivity.get(
+                                                    activity.activity,
+                                                ),
+                                            }}
+                                        />
+                                        {activity.activity}
+                                    </span>
+                                </th>
+                                <td className="px-4 py-4 text-right">
+                                    {formatDuration(activity.durationSeconds)}
+                                </td>
+                                <td className="px-4 py-4 text-right">
+                                    {formatNumber(activity.sessionPercent, 1)}%
+                                </td>
+                                <td className="px-4 py-4 text-right">
+                                    {activity.segmentCount}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                    <tfoot>
+                        <tr className="border-t-2 border-egm-list-border font-semibold">
+                            <th className="px-4 py-4">Total analyzed session</th>
+                            <td className="px-4 py-4 text-right">
+                                {formatDuration(visualization.analyzedDurationSeconds)}
+                            </td>
+                            <td className="px-4 py-4 text-right">100.0%</td>
+                            <td className="px-4 py-4 text-right">
+                                {visualization.totalSegmentCount}
+                            </td>
+                        </tr>
+                    </tfoot>
+                </table>
+            </div>
+        </section>
+    );
+}
+
+type TimelineRow = {
+    label: string;
+    segments: Array<{
+        startSeconds: number;
+        endSeconds: number;
+        color: string;
+        ariaLabel: string;
+    }>;
+};
+
+function TimelineRows({
+    durationSeconds,
+    rows,
+}: {
+    durationSeconds: number;
+    rows: TimelineRow[];
+}) {
+    const safeDuration = Math.max(durationSeconds, 1);
+    const width = timelineWidthPixels(safeDuration);
+
+    return (
+        <div className="mt-6 flex min-w-0 gap-4">
+            <div className="w-36 shrink-0 pt-8 sm:w-40">
+                {rows.map((row, index) => (
+                    <div
+                        className={[
+                            "flex h-11 items-center justify-end text-right text-sm",
+                            "font-semibold text-egm-body-copy",
+                            index > 0 ? "mt-3" : "",
+                        ].join(" ")}
+                        key={row.label}
+                    >
+                        {row.label}
+                    </div>
+                ))}
+            </div>
+
+            <div className="min-w-0 flex-1 overflow-x-auto pb-2">
+                <div style={{ width: `${width}px` }}>
+                    <TimelineAxis durationSeconds={safeDuration} />
+
+                    {rows.map((row, index) => (
+                        <div
+                            className={[
+                                "relative h-11 overflow-hidden rounded-lg bg-egm-tree-bg",
+                                index > 0 ? "mt-3" : "",
+                            ].join(" ")}
+                            key={row.label}
+                        >
+                            {row.segments.map((segment, segmentIndex) => {
+                                const start = Math.max(0, segment.startSeconds);
+                                const end = Math.min(
+                                    safeDuration,
+                                    Math.max(start, segment.endSeconds),
+                                );
+
+                                return (
+                                    <span
+                                        aria-label={segment.ariaLabel}
+                                        className="absolute inset-y-0 min-w-[2px]"
+                                        key={`${segment.startSeconds}-${segmentIndex}`}
+                                        role="img"
+                                        style={{
+                                            backgroundColor: segment.color,
+                                            left: `${100 * start / safeDuration}%`,
+                                            width: `${100 * (end - start) / safeDuration}%`,
+                                        }}
+                                        title={segment.ariaLabel}
+                                    />
+                                );
+                            })}
+                        </div>
+                    ))}
+                </div>
+            </div>
+        </div>
+    );
+}
+
+function TimelineAxis({ durationSeconds }: { durationSeconds: number }) {
+    const ticks = Array.from(
+        { length: 6 },
+        (_, index) => durationSeconds * index / 5,
+    );
+
+    return (
+        <div className="flex h-8 items-start justify-between text-xs text-egm-secondary-copy">
+            {ticks.map((tick, index) => (
+                <span key={index}>{formatTimelineTime(tick)}</span>
+            ))}
+        </div>
+    );
+}
+
+function timelineWidthPixels(durationSeconds: number): number {
+    return Math.min(3600, Math.max(720, Math.ceil(durationSeconds * 2)));
+}
+
+function formatTimelineTime(seconds: number): string {
+    const rounded = Math.max(0, Math.round(seconds));
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const remainingSeconds = rounded % 60;
+
+    if (hours > 0) {
+        return `${hours}:${String(minutes).padStart(2, "0")}:${String(
+            remainingSeconds,
+        ).padStart(2, "0")}`;
+    }
+
+    if (rounded >= 60) {
+        return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+    }
+
+    return `${rounded}s`;
+}
+
+function formatDuration(seconds: number): string {
+    const rounded = Math.max(0, Math.round(seconds));
+    const hours = Math.floor(rounded / 3600);
+    const minutes = Math.floor((rounded % 3600) / 60);
+    const remainingSeconds = rounded % 60;
+    const parts: string[] = [];
+
+    if (hours > 0) {
+        parts.push(`${hours} hr`);
+    }
+
+    if (minutes > 0) {
+        parts.push(`${minutes} min`);
+    }
+
+    if (remainingSeconds > 0 || parts.length === 0) {
+        parts.push(`${remainingSeconds} sec`);
+    }
+
+    return parts.join(" ");
+}
+
+function formatNumber(value: number, fractionDigits: number): string {
+    return value.toLocaleString(undefined, {
+        minimumFractionDigits: fractionDigits,
+        maximumFractionDigits: fractionDigits,
+    });
 }
 
 function ResultsScreenSummaryPanel({

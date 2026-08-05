@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import csv
 import platform
 import re
 import shutil
@@ -189,6 +190,7 @@ class GuiRunState:
     active_runtime_stage_id: str | None = None
     runtime_build_stages: dict[str, RuntimeBuildStage] = field(default_factory=dict)
     progress_events: list[ProgressEvent] = field(default_factory=list)
+    result_visualization: dict[str, object] | None = None
     lock: threading.Lock = field(default_factory = threading.Lock)
 
 def create_app(
@@ -638,8 +640,11 @@ def _execute_run(
             scenario = state.scenario,
             status = "completed",
         )
-                
+
+        result_visualization = _build_result_visualization(state)
+
         with state.lock:
+            state.result_visualization = result_visualization
             state.status = "completed"
     except CommandCancelledError:
         write_runtime_log_line(
@@ -1883,7 +1888,8 @@ def _progress_response(state: GuiRunState) -> dict[str, object]:
         events = list(state.progress_events)
         runtime_status = state.runtime_status
         runtime_build_stages = list(state.runtime_build_stages.values())
-    
+        result_visualization = state.result_visualization
+
     return {
         "runId": state.run_id,
         "status": status,
@@ -1919,7 +1925,201 @@ def _progress_response(state: GuiRunState) -> dict[str, object]:
             for stage in runtime_build_stages
         ],
         "outputPreview": state.output_preview,
+        "resultVisualization": result_visualization,
     }
+
+
+def _build_result_visualization(state: GuiRunState) -> dict[str, object] | None:
+    """Build compact, browser-ready result data from completed CSV outputs."""
+    try:
+        if state.model_id == HAND_INTERACTION_MODEL_ID:
+            return _hand_interaction_result_visualization(state.layout)
+
+        if state.model_id == ADL_RECOGNITION_MODEL_ID:
+            return _adl_result_visualization(state.layout)
+    except (OSError, ValueError, csv.Error):
+        return None
+
+    return None
+
+
+def _hand_interaction_result_visualization(
+    layout: RunOutputLayout,
+) -> dict[str, object] | None:
+    metric_rows = _read_csv_rows(layout.session_level_metrics_path)
+
+    if not metric_rows:
+        return None
+
+    metric_row = metric_rows[0]
+    segment_rows = _read_csv_rows(layout.interaction_segments_path)
+    segments: list[dict[str, object]] = []
+    duration_by_role = {"dominant": 0.0, "non_dominant": 0.0}
+    count_by_role = {"dominant": 0, "non_dominant": 0}
+
+    for row in segment_rows:
+        hand_role = row.get("hand_role", "")
+
+        if hand_role not in duration_by_role:
+            continue
+
+        start_seconds = _csv_float(row, "start_session_time_seconds")
+        end_seconds = _csv_float(row, "end_session_time_seconds")
+        segment_duration = _csv_float(row, "duration_seconds")
+
+        if segment_duration <= 0:
+            segment_duration = max(0.0, end_seconds - start_seconds)
+
+        if end_seconds <= start_seconds:
+            end_seconds = start_seconds + segment_duration
+
+        segments.append(
+            {
+                "startSeconds": start_seconds,
+                "endSeconds": end_seconds,
+                "handRole": hand_role,
+            }
+        )
+        duration_by_role[hand_role] += segment_duration
+        count_by_role[hand_role] += 1
+
+    dominant_percent = _csv_float(metric_row, "perc_dominant_hand")
+    non_dominant_percent = _csv_float(metric_row, "perc_non_dominant_hand")
+    bilateral_percent = _csv_float(metric_row, "perc_bilateral")
+    dominant_duration = duration_by_role["dominant"]
+    non_dominant_duration = duration_by_role["non_dominant"]
+    dominant_count = count_by_role["dominant"]
+    non_dominant_count = count_by_role["non_dominant"]
+
+    return {
+        "kind": "hand-interaction",
+        "durationSeconds": _csv_float(metric_row, "recording_time_seconds"),
+        "metrics": {
+            "percentInteractionTime": {
+                "dominant": dominant_percent,
+                "nonDominant": non_dominant_percent,
+                "bilateralTotal": bilateral_percent,
+            },
+            "interactionDurationSeconds": {
+                "dominant": dominant_duration,
+                "nonDominant": non_dominant_duration,
+                "bilateralTotal": dominant_duration + non_dominant_duration,
+            },
+            "interactionSegmentCount": {
+                "dominant": dominant_count,
+                "nonDominant": non_dominant_count,
+                "bilateralTotal": dominant_count + non_dominant_count,
+            },
+        },
+        "segments": segments,
+    }
+
+
+def _adl_result_visualization(layout: RunOutputLayout) -> dict[str, object] | None:
+    prediction_rows = _read_csv_rows(layout.adl_segment_predictions_path)
+
+    if not prediction_rows:
+        return None
+
+    input_rows = sorted(
+        _read_csv_rows(layout.adl_input_manifest_path),
+        key=lambda row: _csv_float(row, "session_sort_index"),
+    )
+    source_offsets: dict[str, float] = {}
+    source_duration_total = 0.0
+
+    for row in input_rows:
+        source_offsets[row.get("input_name", "")] = source_duration_total
+        source_duration_total += _csv_float(row, "source_duration_seconds")
+
+    ordered_rows = sorted(
+        prediction_rows,
+        key=lambda row: (
+            source_offsets.get(row.get("source_video", ""), 0.0),
+            _csv_float(row, "segment_index"),
+        ),
+    )
+    segments: list[dict[str, object]] = []
+    activity_totals: dict[str, dict[str, float | int]] = {}
+    analyzed_duration_seconds = 0.0
+
+    for row in ordered_rows:
+        valid_duration = _csv_float(row, "valid_duration_seconds")
+        analyzed_duration_seconds += valid_duration
+        label = row.get("predicted_adl", "").strip()
+
+        if not label:
+            continue
+
+        source_offset = source_offsets.get(row.get("source_video", ""), 0.0)
+        start_seconds = source_offset + _csv_float(row, "start_time_seconds")
+        end_seconds = source_offset + _csv_float(row, "end_time_seconds")
+
+        if end_seconds <= start_seconds:
+            end_seconds = start_seconds + valid_duration
+
+        segments.append(
+            {
+                "startSeconds": start_seconds,
+                "endSeconds": end_seconds,
+                "activity": label,
+            }
+        )
+
+        activity = activity_totals.setdefault(
+            label,
+            {"durationSeconds": 0.0, "segmentCount": 0},
+        )
+        activity["durationSeconds"] = (
+            float(activity["durationSeconds"]) + valid_duration
+        )
+        activity["segmentCount"] = int(activity["segmentCount"]) + 1
+
+    final_segment_end = max(
+        (float(segment["endSeconds"]) for segment in segments),
+        default=0.0,
+    )
+    duration_seconds = max(source_duration_total, final_segment_end)
+    summary_duration = analyzed_duration_seconds or duration_seconds
+
+    activities = [
+        {
+            "activity": label,
+            "durationSeconds": float(values["durationSeconds"]),
+            "sessionPercent": (
+                100.0 * float(values["durationSeconds"]) / summary_duration
+                if summary_duration > 0
+                else 0.0
+            ),
+            "segmentCount": int(values["segmentCount"]),
+        }
+        for label, values in activity_totals.items()
+    ]
+
+    return {
+        "kind": "adl",
+        "durationSeconds": duration_seconds,
+        "analyzedDurationSeconds": summary_duration,
+        "segments": segments,
+        "activities": activities,
+        "totalSegmentCount": sum(
+            int(activity["segmentCount"])
+            for activity in activities
+        ),
+    }
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+
+    with path.open(encoding="utf-8", newline="") as csv_file:
+        return list(csv.DictReader(csv_file))
+
+
+def _csv_float(row: dict[str, str], key: str) -> float:
+    value = row.get(key, "").strip()
+    return float(value) if value else 0.0
 
 def _output_preview_response(context) -> dict[str, object]:
     """ Convert an output preview context into a JSON-safe response. """

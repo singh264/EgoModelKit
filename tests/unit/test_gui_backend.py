@@ -165,6 +165,49 @@ def _test_run_state(
         output_preview={},
     )
 
+
+def _write_hand_result_visualization_files(layout) -> None:
+    layout.results_dir.mkdir(parents=True, exist_ok=True)
+    layout.post_processing_dir.mkdir(parents=True, exist_ok=True)
+    layout.session_level_metrics_path.write_text(
+        "recording_time_seconds,perc_dominant_hand,"
+        "dur_dominant_hand_seconds,perc_non_dominant_hand,"
+        "dur_non_dominant_hand_seconds,perc_bilateral,"
+        "dur_bilateral_seconds\n"
+        "30,42,2.1,18,1.8,30,3.9\n",
+        encoding="utf-8",
+    )
+    layout.interaction_segments_path.write_text(
+        "start_session_time_seconds,end_session_time_seconds,hand_role\n"
+        "3,8,dominant\n"
+        "12,15,dominant\n"
+        "1,2,non_dominant\n"
+        "20,23,non_dominant\n"
+        "0,1,ignored\n",
+        encoding="utf-8",
+    )
+
+
+def _write_adl_result_visualization_files(layout) -> None:
+    layout.results_dir.mkdir(parents=True, exist_ok=True)
+    layout.model_outputs_dir.mkdir(parents=True, exist_ok=True)
+    layout.adl_input_manifest_path.write_text(
+        "session_sort_index,input_name,source_duration_seconds\n"
+        "1,part01.mp4,120\n"
+        "2,part02.mp4,45\n",
+        encoding="utf-8",
+    )
+    layout.adl_segment_predictions_path.write_text(
+        "source_video,segment_index,start_time_seconds,end_time_seconds,"
+        "valid_duration_seconds,predicted_adl\n"
+        "part01.mp4,1,0,60,60,Food preparation\n"
+        "part01.mp4,2,60,120,60,Cleaning\n"
+        "part02.mp4,1,0,30,30,Food preparation\n"
+        "part02.mp4,2,30,30,15,Eating\n"
+        "part02.mp4,3,45,45,0,\n",
+        encoding="utf-8",
+    )
+
 def test_models_endpoint_returns_only_public_video_models() -> None:
     client = TestClient(create_app())
 
@@ -178,6 +221,160 @@ def test_models_endpoint_returns_only_public_video_models() -> None:
         ADL_RECOGNITION_MODEL_ID,
     ]
     assert all(model["supportedInputExtensions"] == [".mp4"] for model in body["models"])
+
+
+def test_builds_hand_interaction_result_visualization(tmp_path: Path) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id=HAND_INTERACTION_MODEL_ID,
+        scenario="hand-interaction-single-video",
+    )
+    _write_hand_result_visualization_files(state.layout)
+
+    result = gui_backend._build_result_visualization(state)
+
+    assert result == {
+        "kind": "hand-interaction",
+        "durationSeconds": 30.0,
+        "metrics": {
+            "percentInteractionTime": {
+                "dominant": 42.0,
+                "nonDominant": 18.0,
+                "bilateralTotal": 30.0,
+            },
+            "interactionDurationSeconds": {
+                "dominant": 8.0,
+                "nonDominant": 4.0,
+                "bilateralTotal": 12.0,
+            },
+            "interactionSegmentCount": {
+                "dominant": 2,
+                "nonDominant": 2,
+                "bilateralTotal": 4,
+            },
+        },
+        "segments": [
+            {"startSeconds": 3.0, "endSeconds": 8.0, "handRole": "dominant"},
+            {"startSeconds": 12.0, "endSeconds": 15.0, "handRole": "dominant"},
+            {
+                "startSeconds": 1.0,
+                "endSeconds": 2.0,
+                "handRole": "non_dominant",
+            },
+            {
+                "startSeconds": 20.0,
+                "endSeconds": 23.0,
+                "handRole": "non_dominant",
+            },
+        ],
+    }
+
+
+def test_hand_visualization_uses_explicit_segment_duration_for_timeline(
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id=HAND_INTERACTION_MODEL_ID,
+        scenario="hand-interaction-single-video",
+    )
+    _write_hand_result_visualization_files(state.layout)
+    state.layout.interaction_segments_path.write_text(
+        "start_session_time_seconds,end_session_time_seconds,duration_seconds,"
+        "hand_role\n"
+        "5,5,2.5,dominant\n",
+        encoding="utf-8",
+    )
+
+    result = gui_backend._build_result_visualization(state)
+
+    assert result is not None
+    assert result["metrics"]["interactionDurationSeconds"] == {
+        "dominant": 2.5,
+        "nonDominant": 0.0,
+        "bilateralTotal": 2.5,
+    }
+    assert result["segments"] == [
+        {
+            "startSeconds": 5.0,
+            "endSeconds": 7.5,
+            "handRole": "dominant",
+        }
+    ]
+
+
+def test_builds_concatenated_adl_result_visualization(tmp_path: Path) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id=ADL_RECOGNITION_MODEL_ID,
+        scenario="adl-video-directory",
+    )
+    _write_adl_result_visualization_files(state.layout)
+
+    result = gui_backend._build_result_visualization(state)
+
+    assert result is not None
+    assert result["kind"] == "adl"
+    assert result["durationSeconds"] == 165.0
+    assert result["analyzedDurationSeconds"] == 165.0
+    assert result["segments"] == [
+        {
+            "startSeconds": 0.0,
+            "endSeconds": 60.0,
+            "activity": "Food preparation",
+        },
+        {"startSeconds": 60.0, "endSeconds": 120.0, "activity": "Cleaning"},
+        {
+            "startSeconds": 120.0,
+            "endSeconds": 150.0,
+            "activity": "Food preparation",
+        },
+        {"startSeconds": 150.0, "endSeconds": 165.0, "activity": "Eating"},
+    ]
+    assert result["activities"] == [
+        {
+            "activity": "Food preparation",
+            "durationSeconds": 90.0,
+            "sessionPercent": pytest.approx(54.5454545),
+            "segmentCount": 2,
+        },
+        {
+            "activity": "Cleaning",
+            "durationSeconds": 60.0,
+            "sessionPercent": pytest.approx(36.3636363),
+            "segmentCount": 1,
+        },
+        {
+            "activity": "Eating",
+            "durationSeconds": 15.0,
+            "sessionPercent": pytest.approx(9.0909091),
+            "segmentCount": 1,
+        },
+    ]
+    assert result["totalSegmentCount"] == 4
+
+
+def test_result_visualization_is_optional_for_missing_or_invalid_outputs(
+    tmp_path: Path,
+) -> None:
+    state = _test_run_state(
+        tmp_path,
+        model_id=HAND_INTERACTION_MODEL_ID,
+        scenario="hand-interaction-single-video",
+    )
+
+    assert gui_backend._build_result_visualization(state) is None
+
+    _write_hand_result_visualization_files(state.layout)
+    state.layout.session_level_metrics_path.write_text(
+        "recording_time_seconds\ninvalid\n",
+        encoding="utf-8",
+    )
+
+    assert gui_backend._build_result_visualization(state) is None
+
+    state.model_id = HAND_OBJECT_CONTACT_MODEL_ID
+    assert gui_backend._build_result_visualization(state) is None
 
 def test_output_preview_endpoint_returns_dynamic_tree(tmp_path: Path) -> None:
     client = TestClient(create_app())
@@ -555,6 +752,18 @@ def test_cancel_run_endpoint_cancels_running_state(tmp_path: Path) -> None:
     assert '"message": "Run cancelled by user."' in progress_text
 
     block_runner.set()
+
+    for _ in range(100):
+        manifest = json.loads(
+            (run_dir / "run_manifest.json").read_text(encoding = "utf-8")
+        )
+
+        if manifest["run"]["status"] == "cancelled":
+            break
+
+        time.sleep(0.01)
+    else:
+        raise AssertionError("Cancelled worker did not finish writing its summary.")
 
 def test_open_output_folder_uses_tracked_run(
     tmp_path: Path,

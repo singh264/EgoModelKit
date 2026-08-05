@@ -152,7 +152,7 @@ async function navigateToOutputStep(
 
     render(<App />);
 
-    await user.click(await screen.findByRole("button", { name: "Start New Run" }));
+    await user.click(await screen.findByRole("button", { name: "Start analysis" }));
     await user.click(await screen.findByRole("button", { name: modelName }));
     await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -267,6 +267,7 @@ function progressResponse({
     ],
     runtimeStatus = null,
     runtimeBuildStages = [],
+    resultVisualization = null,
 } : {
     runId?: string;
     status?: string;
@@ -275,6 +276,7 @@ function progressResponse({
     events?: object[];
     runtimeStatus?: object | null;
     runtimeBuildStages?: object[] | null;
+    resultVisualization?: object | null;
 }) {
     return {
         runId,
@@ -285,7 +287,139 @@ function progressResponse({
         runtimeStatus,
         runtimeBuildStages,
         outputPreview: outputPreview(runId),
+        resultVisualization,
     }
+}
+
+function handInteractionVisualization() {
+    return {
+        kind: "hand-interaction",
+        durationSeconds: 30,
+        metrics: {
+            percentInteractionTime: {
+                dominant: 42,
+                nonDominant: 18,
+                bilateralTotal: 30,
+            },
+            interactionDurationSeconds: {
+                dominant: 8,
+                nonDominant: 4,
+                bilateralTotal: 12,
+            },
+            interactionSegmentCount: {
+                dominant: 2,
+                nonDominant: 2,
+                bilateralTotal: 4,
+            },
+        },
+        segments: [
+            {
+                startSeconds: 3,
+                endSeconds: 8,
+                handRole: "dominant",
+            },
+            {
+                startSeconds: 12,
+                endSeconds: 15,
+                handRole: "dominant",
+            },
+            {
+                startSeconds: 1,
+                endSeconds: 2,
+                handRole: "non_dominant",
+            },
+            {
+                startSeconds: 20,
+                endSeconds: 23,
+                handRole: "non_dominant",
+            },
+        ],
+    };
+}
+
+function adlVisualization({
+    durationSeconds = 300,
+    analyzedDurationSeconds = 300,
+}: {
+    durationSeconds?: number;
+    analyzedDurationSeconds?: number;
+} = {}) {
+    return {
+        kind: "adl",
+        durationSeconds,
+        analyzedDurationSeconds,
+        segments: [
+            {
+                startSeconds: 0,
+                endSeconds: Math.min(160, durationSeconds),
+                activity: "Food preparation",
+            },
+            {
+                startSeconds: Math.min(160, durationSeconds),
+                endSeconds: Math.min(240, durationSeconds),
+                activity: "Cleaning",
+            },
+            {
+                startSeconds: Math.min(240, durationSeconds),
+                endSeconds: durationSeconds,
+                activity: "Eating",
+            },
+        ],
+        activities: [
+            {
+                activity: "Food preparation",
+                durationSeconds: 160,
+                sessionPercent: 53.3,
+                segmentCount: 3,
+            },
+            {
+                activity: "Cleaning",
+                durationSeconds: 80,
+                sessionPercent: 26.7,
+                segmentCount: 2,
+            },
+            {
+                activity: "Eating",
+                durationSeconds: Math.max(0, analyzedDurationSeconds - 240),
+                sessionPercent: 20,
+                segmentCount: 1,
+            },
+        ],
+        totalSegmentCount: 6,
+    };
+}
+
+function persistCompletedVisualization({
+    modelId,
+    visualization,
+}: {
+    modelId: "hand-interaction" | "adl-recognition";
+    visualization: object;
+}) {
+    const runId = `${modelId}-results`;
+
+    localStorage.setItem(
+        APP_STATE_STORAGE_KEY,
+        JSON.stringify({
+            step: "results",
+            modelId,
+            dominantHand: "right",
+            inputNames: ["clip.mp4"],
+            ignoredInputNames: [],
+            outputRoot: "/tmp/egomodelkit-results",
+            reviewMode: "ready",
+            runId,
+            activeOperationId: "",
+            progress: progressResponse({
+                runId,
+                status: "completed",
+                outputFolder: `/tmp/egomodelkit-results/${runId}`,
+                resultVisualization: visualization,
+            }),
+            resultSummary: null,
+            outputPreview: outputPreview(runId),
+        }),
+    );
 }
 
 async function navigateToReviewStep(user: ReturnType<typeof userEvent.setup>) {
@@ -476,27 +610,36 @@ describe("App", () => {
 
         expect(
             screen.getByText(
-                "Run egocentric video models through a simple local interface.",
+                "Egocentric video analysis for rehabilitation research",
             ),
         ).toBeInTheDocument();
 
         expect(
             screen.getByText(
-                "Your selected files are processed locally by default. " +
-                "No telemetry or cloud upload is used in this MVP."
+                /Analyze daily-activity videos using computer vision models/,
             ),
         ).toBeInTheDocument();
 
+        expect(screen.getByText("Video")).toBeInTheDocument();
+        expect(screen.getByText("Model")).toBeInTheDocument();
+        expect(screen.getByText("Metrics")).toBeInTheDocument();
+        expect(screen.getByText("Research outputs")).toBeInTheDocument();
+
+        const localProcessingNotice = screen.getByText(
+            "Local processing.",
+        ).parentElement;
+
+        expect(localProcessingNotice).not.toBeNull();
+        expect(localProcessingNotice).toHaveTextContent(
+            "Local processing. All analysis runs on your computer. " +
+            "No data is uploaded or shared.",
+        );
+
         expect(
-            screen.getByRole("button", { name: "Start New Run" }),
+            screen.getByRole("button", { name: "Start analysis" }),
         ).toBeEnabled();
 
-        expect(
-            screen.getByText(
-                "Designed for research use. " +
-                "Please confirm approved data handling procedures before using clinical data."
-            ),
-        ).toBeInTheDocument()
+        expect(screen.getByText("Start analysis")).toBeInTheDocument();
     });
 
     it("opens the model-selection screen with the first wizard step active", async () => {
@@ -504,7 +647,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(
             screen.getByRole("heading", { name: "Select a model" }),
@@ -525,7 +668,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(
             screen.getByRole("button", { name: /Hand-object contact/}),
@@ -588,7 +731,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(
             await screen.findByRole("button", { name: /Prefixed model/ }),
@@ -606,7 +749,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         const handObjectModel = screen.getByRole("button", {
             name: /Hand-object contact/,
@@ -623,7 +766,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         const handObjectModel = screen.getByRole("button", {
             name: /Hand-object contact/,
@@ -649,7 +792,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(
             screen.getByRole("button", { name: /Hand-object contact/}),
@@ -675,7 +818,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(screen.getByRole("status")).toHaveTextContent(
             "Loading available models...",
@@ -702,7 +845,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(
             await screen.findByText("No models are available from the local backend."),
@@ -725,7 +868,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(await screen.findByRole("alert")).toHaveTextContent(
             "Unable to load available models.",
@@ -787,7 +930,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -812,7 +955,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Activity recognition \(ADL\)/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -853,7 +996,7 @@ describe("App", () => {
 
             render(<App />);
 
-            await user.click(screen.getByRole("button", { name: "Start New Run" }));
+            await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
             await user.click(
                 await screen.findByRole("button", { name: /Hand-object contact/ })
@@ -884,7 +1027,7 @@ describe("App", () => {
         
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -903,7 +1046,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -923,7 +1066,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -946,7 +1089,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Activity recognition \(ADL\)/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -1006,7 +1149,7 @@ describe("App", () => {
 
             render(<App />);
 
-            await user.click(screen.getByRole("button", { name: "Start New Run" }));
+            await user.click(screen.getByRole("button", { name: "Start analysis" }));
             
             await user.click(
                 await screen.findByRole("button", { name: /Missing filter extensions/ }),
@@ -1033,7 +1176,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Activity recognition \(ADL\)/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -1069,7 +1212,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -1103,13 +1246,13 @@ describe("App", () => {
     });
 
     it("ignores empty input drops", async () => {
-        const user = userEvent.setup();
-
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
-        await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
-        await user.click(screen.getByRole("button", { name: "Continue" }));
+        fireEvent.click(screen.getByRole("button", { name: "Start analysis" }));
+        fireEvent.click(
+            await screen.findByRole("button", { name: /Hand-object contact/ }),
+        );
+        fireEvent.click(screen.getByRole("button", { name: "Continue" }));
 
         fireEvent.drop(screen.getByTestId("input-drop-zone"), {
             dataTransfer: {
@@ -1126,7 +1269,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/}));
         await user.click(screen.getByRole("button", { name: "Continue" }));
         
@@ -1149,7 +1292,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -1172,10 +1315,10 @@ describe("App", () => {
         ).toBeInTheDocument();
 
         expect(
-            screen.getByRole("button", { name: "Start New Run" }),
+            screen.getByRole("button", { name: "Start analysis" }),
         ).toBeEnabled();
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         expect(
             screen.getByRole("button", { name: /Hand-object contact/}),
@@ -1209,7 +1352,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", {name: "Back"}));
 
         expect(
@@ -1217,7 +1360,7 @@ describe("App", () => {
         ).toBeInTheDocument();
 
         expect(
-            screen.getByRole("button", { name: "Start New Run" }),
+            screen.getByRole("button", { name: "Start analysis" }),
         ).toBeEnabled();
     });
 
@@ -1269,7 +1412,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
         const handObjectModel = screen.getByRole("button", { name: /Hand-object contact/  });
 
@@ -1285,7 +1428,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
 
@@ -1312,7 +1455,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
     
@@ -1327,7 +1470,7 @@ describe("App", () => {
 
         render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(screen.getByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
     
@@ -1342,7 +1485,7 @@ describe("App", () => {
         ).toBeInTheDocument();
 
         expect(
-            screen.getByRole("button", { name: "Start New Run" }),
+            screen.getByRole("button", { name: "Start analysis" }),
         ).toBeInTheDocument();
     });
 
@@ -1823,7 +1966,7 @@ describe("App", () => {
             await screen.findByRole("heading", { name: "EgoModelKit" }),
         ).toBeInTheDocument();
 
-        expect(screen.getByRole("button", { name: "Start New Run" })).toBeInTheDocument();
+        expect(screen.getByRole("button", { name: "Start analysis" })).toBeInTheDocument();
     });
 
     it("does not call the backend when opening output folder without a run id", async () => {
@@ -3305,7 +3448,7 @@ describe("App", () => {
 
         const { unmount } = render(<App />);
 
-        await user.click(screen.getByRole("button", { name: "Start New Run" }));
+        await user.click(screen.getByRole("button", { name: "Start analysis" }));
         await user.click(await screen.findByRole("button", { name: /Hand-object contact/ }));
         await user.click(screen.getByRole("button", { name: "Continue" }));
         
@@ -3359,7 +3502,7 @@ it("shows interaction settings only for hand-interaction", async () => {
 
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+    await user.click(screen.getByRole("button", { name: "Start analysis" }));
 
     expect(screen.queryByText("Interaction settings")).not.toBeInTheDocument();
 
@@ -3622,7 +3765,7 @@ it("filters unsupported files for hand interaction", async () => {
     const user = userEvent.setup({ applyAccept: false });
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+    await user.click(screen.getByRole("button", { name: "Start analysis" }));
     await user.click(await screen.findByRole("button", { name: /Hand interaction/ }));
     await user.click(await screen.findByRole("button", { name: "Continue" }));
     await user.upload(screen.getByLabelText("Choose input files"), [
@@ -3641,7 +3784,7 @@ it("scrolls to hand-interaction settings when the model is selected", async () =
     const user = userEvent.setup();
     render(<App />);
 
-    await user.click(screen.getByRole("button", { name: "Start New Run" }));
+    await user.click(screen.getByRole("button", { name: "Start analysis" }));
     expect(scrollIntoViewMock).not.toHaveBeenCalled();
 
     await user.click(await screen.findByRole("button", { name: /Hand interaction/ }));
@@ -3712,4 +3855,71 @@ it("shows the dominant hand on restored hand-interaction results", async () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Dominant hand:")).toBeInTheDocument();
     expect(screen.getByText("Left")).toBeInTheDocument();
+});
+
+it("renders the completed hand-interaction metrics and session timeline", async () => {
+    persistCompletedVisualization({
+        modelId: "hand-interaction",
+        visualization: handInteractionVisualization(),
+    });
+
+    render(<App />);
+
+    expect(
+        await screen.findByRole("heading", { name: "Clinical hand-use metrics" }),
+    ).toBeInTheDocument();
+    expect(
+        screen.getByRole("heading", { name: "Interaction timeline" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Percent interaction time")).toBeInTheDocument();
+    expect(screen.getByText("Interaction duration")).toBeInTheDocument();
+    expect(screen.getByText("Number of interaction segments")).toBeInTheDocument();
+    expect(screen.queryByText("Mean segment duration")).not.toBeInTheDocument();
+    expect(screen.getByText("30.0%")).toBeInTheDocument();
+    expect(screen.getByText("12.0 s")).toBeInTheDocument();
+    expect(
+        screen.getByRole("img", {
+            name: "Dominant hand interaction from 3s to 8s",
+        }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("30s")).toBeInTheDocument();
+});
+
+it("renders a color-only ADL timeline and summary for a very long session", async () => {
+    const visualization = adlVisualization({
+        durationSeconds: 3661,
+        analyzedDurationSeconds: 3661,
+    });
+
+    visualization.activities[1].durationSeconds = 60;
+    visualization.activities[2].durationSeconds = 0;
+    visualization.segments.push({
+        startSeconds: 3600,
+        endSeconds: 3661,
+        activity: "Unlisted activity",
+    });
+
+    persistCompletedVisualization({
+        modelId: "adl-recognition",
+        visualization,
+    });
+
+    render(<App />);
+
+    expect(
+        await screen.findByRole("heading", { name: "Activity Timeline" }),
+    ).toBeInTheDocument();
+    expect(
+        screen.getByRole("heading", { name: "Activity Summary" }),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("Food preparation")).toHaveLength(2);
+    expect(screen.getByText("1:01:01")).toBeInTheDocument();
+    expect(screen.getByText("1 min")).toBeInTheDocument();
+    expect(screen.getByText("0 sec")).toBeInTheDocument();
+    expect(screen.getByText("1 hr 1 min 1 sec")).toBeInTheDocument();
+    expect(
+        screen.getByRole("img", {
+            name: "Unlisted activity from 1:00:00 to 1:01:01",
+        }),
+    ).toBeInTheDocument();
 });
