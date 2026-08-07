@@ -50,6 +50,29 @@ python -m pip install -e ".[gui]"
 
 The `.[gui]` install includes the CLI and the optional local browser GUI dependencies.
 
+## Scripts
+
+<details>
+<summary><strong>View scripts</strong></summary>
+
+- [`scripts/egomodelkit_machine_setup.py`](scripts/egomodelkit_machine_setup.py) — install, update, repair, launch, stop, or uninstall EgoModelKit on a prepared lab machine.
+- [`scripts/egomodelkit_machine_setup.bat`](scripts/egomodelkit_machine_setup.bat) — Windows helper for launching the Python setup script from the user's Downloads folder.
+
+</details>
+
+## Documentation
+
+<details>
+<summary><strong>View documentation</strong></summary>
+
+- [Machine setup guide](docs/machine-setup/egomodelkit-machine-setup.pdf)
+- [Lab run guide after installation](docs/user-guides/egomodelkit-lab-run-guide-after-installation.pdf)
+- [Activity-recognition manual workflow](docs/manual-workflows/activity-recognition-adl-manual-run.pdf)
+- [Hand-interaction metrics manual workflow](docs/manual-workflows/hand-interaction-metrics-manual-run.pdf)
+- [Hand-object detector manual workflow](docs/manual-workflows/hand-object-detector-manual-run.pdf)
+
+</details>
+
 ## Dry Run Command
 
 Use `--dry-run` to validate a CLI request without running model inference.
