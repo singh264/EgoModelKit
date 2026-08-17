@@ -5,8 +5,24 @@ from typer.testing import CliRunner
 
 from egomodelkit.cli import CLI_RUNTIME_ERROR_EXIT_CODE, CLI_UNSUPPORTED_MODEL_EXIT_CODE, app
 from egomodelkit.runtime.adl_recognition import AdlRecognitionRuntimeError
+from egomodelkit.runtime.disk_space import DiskSpacePreflightError
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _avoid_machine_preflight_for_cli_integration_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Keep request/dispatch tests independent of the host Docker installation."""
+    monkeypatch.setattr(
+        "egomodelkit.cli.ensure_host_runtime_ready",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "egomodelkit.cli.ensure_sufficient_disk_space",
+        lambda **_kwargs: None,
+    )
 
 def test_run_rejects_internal_hand_object_contact_model(tmp_path: Path) -> None:
     image_path = tmp_path / "frame.jpg"
@@ -248,6 +264,51 @@ def test_run_executes_adl_recognition(
     assert "Completed: adl-recognition" in result.output
     assert f"Outputs: {output_dir / 'run-test'}" in result.output
     assert "request" in captured
+
+
+def test_run_rechecks_disk_space_without_cleanup_before_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"video")
+    output = tmp_path / "results"
+    calls: list[dict[str, object]] = []
+
+    def failing_disk_space_check(**kwargs) -> None:
+        calls.append(kwargs)
+        raise DiskSpacePreflightError(
+            "Insufficient disk space before model execution."
+        )
+
+    monkeypatch.setattr(
+        "egomodelkit.cli.ensure_sufficient_disk_space",
+        failing_disk_space_check,
+    )
+    monkeypatch.setattr(
+        "egomodelkit.cli.run_hand_interaction",
+        lambda *_args, **_kwargs: pytest.fail(
+            "Model runtime must not start after a disk-space failure."
+        ),
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "run",
+            "hand-interaction",
+            "--input",
+            str(video),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == CLI_RUNTIME_ERROR_EXIT_CODE
+    assert "Insufficient disk space before model execution." in result.output
+    assert len(calls) == 1
+    assert calls[0]["cleanup_stale_images"] is True
+    assert not output.exists()
 
 
 def test_run_dry_run_accepts_hand_interaction_video_and_directory(tmp_path: Path) -> None:

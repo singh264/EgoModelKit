@@ -308,6 +308,12 @@ def _ensure_runtime_image(
         f"Packaged {runtime_name} runtime image is missing; preparing it now. "
         "The first run may take longer."
     )
+    remove_stale_runtime_images(
+        docker_executable = runtime_spec.docker_executable,
+        current_image = image_identity,
+        capture_runner = capture_runner,
+        progress = progress,
+    )
     
     build_command = [
         runtime_spec.docker_executable,

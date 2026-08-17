@@ -81,6 +81,11 @@ from egomodelkit.runtime.commands import (
     cancellable_subprocess_runner,
     subprocess_runner,
 )
+from egomodelkit.runtime.disk_space import (
+    DiskSpacePreflightError,
+    DiskSpaceReport,
+    ensure_sufficient_disk_space,
+)
 from egomodelkit.runtime.hand_interaction import (
     DEFAULT_HAND_INTERACTION_RUNTIME_SPEC,
     HandInteractionRuntimeError,
@@ -106,6 +111,7 @@ GuiRunStatus = Literal["ready", "running", "completed", "failed", "cancelled"]
 ProgressCallback = Callable[[str], None]
 ModelRunner = Callable[[Path, Path, ProgressCallback], None]
 RuntimeReadyChecker = Callable[[str, ProgressCallback, Callable[[list[str]], int]], None]
+DiskSpaceChecker = Callable[..., DiskSpaceReport]
 
 GUI_REQUEST_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
     ValueError,
@@ -116,6 +122,7 @@ GUI_REQUEST_EXCEPTIONS: Final[tuple[type[Exception], ...]] = (
     HandObjectContactRuntimeError,
     HandInteractionRuntimeError,
     AdlRecognitionRuntimeError,
+    DiskSpacePreflightError,
 )
 
 class OutputPreviewRequest(BaseModel):
@@ -200,6 +207,7 @@ def create_app(
     hand_interaction_runner: ModelRunner | None = None,
     adl_runner: ModelRunner | None = None,
     runtime_checker: RuntimeReadyChecker | None = None,
+    disk_space_checker: DiskSpaceChecker | None = None,
 ) -> FastAPI:
     """ Create the local FastAPI app used by the React GUI. 
     
@@ -210,7 +218,9 @@ def create_app(
     runs: dict[str, GuiRunState] = {}
     operations: dict[str, CancelableGuiOperation] = {}
     runtime_ready_checker = runtime_checker or _check_runtime_ready_for_gui
-    runtime_checker_was_injected = runtime_checker is not None   
+    disk_space_ready_checker = disk_space_checker or ensure_sufficient_disk_space
+    runtime_checker_was_injected = runtime_checker is not None
+    disk_space_checker_was_injected = disk_space_checker is not None
      
     app.add_middleware(
         CORSMiddleware,
@@ -315,6 +325,12 @@ def create_app(
                 _ignore_progress,
                 _command_runner_for_operation(operation),
             )
+            disk_space_report = disk_space_ready_checker(
+                model_id=model_id,
+                input_path=staged.input_path,
+                output_dir=output_root,
+                progress=_ignore_progress,
+            )
             
             run_id = _build_unique_run_id(output_root, runs)
             layout = build_run_output_layout(
@@ -342,6 +358,7 @@ def create_app(
                     "status": "Ready",
                 },
                 "outputPreview": _output_preview_response(context),
+                "diskSpace": disk_space_report.as_dict(),
             }
         except CommandCancelledError as exc:
             raise HTTPException(status_code = 499, detail = str(exc)) from exc
@@ -391,6 +408,25 @@ def create_app(
                     model_id,
                     _ignore_progress,
                     _command_runner_for_operation(operation),
+                )
+
+            should_check_disk_space = (
+                disk_space_checker_was_injected
+                or _should_run_start_preflight(
+                    model_id=model_id,
+                    hand_object_runner=hand_object_runner,
+                    hand_interaction_runner=hand_interaction_runner,
+                    adl_runner=adl_runner,
+                    runtime_checker_was_injected=False,
+                )
+            )
+            if should_check_disk_space:
+                disk_space_ready_checker(
+                    model_id=model_id,
+                    input_path=staged.input_path,
+                    output_dir=output_root,
+                    progress=_ignore_progress,
+                    cleanup_stale_images=True,
                 )
             
             run_id = _build_unique_run_id(output_root, runs)

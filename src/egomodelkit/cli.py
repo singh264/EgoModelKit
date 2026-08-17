@@ -49,6 +49,7 @@ from egomodelkit.runtime.commands import (
     streaming_subprocess_runner,
     subprocess_runner,
 )
+from egomodelkit.runtime.disk_space import ensure_sufficient_disk_space
 from egomodelkit.runtime.hand_interaction import (
     HandInteractionRuntimeError,
     run_hand_interaction,
@@ -148,6 +149,14 @@ def _run_model_with_output_contract(
         validate_adl_recognition_request(request)
     else:
         raise ValueError(f"Unsupported model id: {model_id}")
+
+    ensure_sufficient_disk_space(
+        model_id=model_id,
+        input_path=request.input_path,
+        output_dir=request.output_dir,
+        progress=_report_progress,
+        cleanup_stale_images=True,
+    )
 
     output_root = request.output_dir
     run_id = _build_unique_cli_run_id(output_root)
@@ -341,6 +350,18 @@ def run(
 
             if dry_run:
                 validate_hand_interaction_request(request)
+                ensure_host_runtime_ready(
+                    docker_executable="docker",
+                    command_runner=subprocess_runner,
+                    require_linux_nvidia_gpu=False,
+                    progress=_report_progress,
+                )
+                ensure_sufficient_disk_space(
+                    model_id=model_id,
+                    input_path=input_path,
+                    output_dir=output_dir,
+                    progress=_report_progress,
+                )
                 typer.echo(HAND_INTERACTION_DRY_RUN_VALIDATION_MESSAGE)
                 typer.echo(f"Input: {input_path}")
                 typer.echo(f"Output: {output_dir}")
@@ -362,6 +383,18 @@ def run(
 
             if dry_run:
                 validate_adl_recognition_request(request)
+                ensure_host_runtime_ready(
+                    docker_executable="docker",
+                    command_runner=subprocess_runner,
+                    require_linux_nvidia_gpu=False,
+                    progress=_report_progress,
+                )
+                ensure_sufficient_disk_space(
+                    model_id=model_id,
+                    input_path=input_path,
+                    output_dir=output_dir,
+                    progress=_report_progress,
+                )
                 typer.echo(ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE)
                 typer.echo(f"Input: {input_path}")
                 typer.echo(f"Output: {output_dir}")

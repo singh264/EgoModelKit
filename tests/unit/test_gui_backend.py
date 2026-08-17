@@ -53,6 +53,7 @@ from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_MODEL_ID
 from egomodelkit.output_contract import build_run_output_layout, create_output_scaffold
 from egomodelkit.progress import ExternalProgressUpdate, ProgressEvent
 from egomodelkit.runtime.commands import CommandCancelledError, ProcessCancellation
+from egomodelkit.runtime.disk_space import DiskSpaceReport
 from egomodelkit.runtime.hand_object_contact import HandObjectContactRuntimeError
 
 
@@ -73,6 +74,19 @@ def _ready_runtime_checker(
     command_runner,
 ) -> None:
     progress(f"Runtime ready for {model_id}.")
+
+def _ready_disk_space_checker(**_kwargs) -> DiskSpaceReport:
+    return DiskSpaceReport(
+        estimated_output_bytes=1_000_000,
+        peak_output_bytes=1_100_000,
+        output_free_bytes=10_000_000,
+        docker_incremental_bytes=1_000_000,
+        docker_free_bytes=10_000_000,
+        images_to_build=(),
+        removed_images=(),
+        estimated_file_count=10,
+    )
+
 
 def _failing_runtime_checker(
     model_id: str,
@@ -397,7 +411,10 @@ def test_output_preview_endpoint_returns_dynamic_tree(tmp_path: Path) -> None:
     assert body["files"]
 
 def test_dry_run_validates_uploaded_file(tmp_path: Path) -> None:
-    client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
+    client = TestClient(create_app(
+        runtime_checker = _ready_runtime_checker,
+        disk_space_checker = _ready_disk_space_checker,
+    ))
     
     response = client.post(
         "/api/dry-run",
@@ -918,7 +935,12 @@ def test_dry_run_endpoint_checks_local_runtime_before_reporting_ready(
         checked_models.append(model_id)
         progress("Runtime check finished.")
 
-    client = TestClient(create_app(runtime_checker = runtime_checker))
+    client = TestClient(
+        create_app(
+            runtime_checker = runtime_checker,
+            disk_space_checker = _ready_disk_space_checker,
+        )
+    )
 
     response = client.post(
         "/api/dry-run",
@@ -2171,7 +2193,10 @@ def test_active_runtime_build_stage_ignores_missing_active_stage(tmp_path: Path)
     assert state.runtime_build_stages == {}
 
 def test_dry_run_rejects_missing_output_folder(tmp_path: Path) -> None:
-    app = create_app(runtime_checker = _ready_runtime_checker)
+    app = create_app(
+        runtime_checker = _ready_runtime_checker,
+        disk_space_checker = _ready_disk_space_checker,
+    )
     client = TestClient(app)
 
     input_file = tmp_path / "frame.jpg"
@@ -2198,7 +2223,10 @@ def test_dry_run_rejects_missing_output_folder(tmp_path: Path) -> None:
     )
 
 def test_start_run_rejects_missing_output_folder(tmp_path: Path) -> None:
-    app = create_app(runtime_checker = _ready_runtime_checker)
+    app = create_app(
+        runtime_checker = _ready_runtime_checker,
+        disk_space_checker = _ready_disk_space_checker,
+    )
     client = TestClient(app)
 
     input_file = tmp_path / "frame.jpg"
@@ -2255,7 +2283,10 @@ def test_dry_run_returns_499_when_runtime_check_is_cancelled(tmp_path: Path) -> 
     assert response.json()["detail"] == "Run was cancelled."
 
 def test_cancel_run_endpoint_returns_404_when_operation_is_missing() -> None:
-    client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
+    client = TestClient(create_app(
+        runtime_checker = _ready_runtime_checker,
+        disk_space_checker = _ready_disk_space_checker,
+    ))
 
     response = client.post(
         "/api/cancel-run",
@@ -2432,7 +2463,10 @@ def test_execute_run_uses_default_adl_gui_runner(
     assert operations == {}
 
 def test_dry_run_ignores_legacy_adl_dominant_hand_field(tmp_path: Path) -> None:
-    client = TestClient(create_app(runtime_checker = _ready_runtime_checker))
+    client = TestClient(create_app(
+        runtime_checker = _ready_runtime_checker,
+        disk_space_checker = _ready_disk_space_checker,
+    ))
 
     response = client.post(
         "/api/dry-run",
@@ -2477,6 +2511,52 @@ def test_run_endpoint_returns_same_preflight_error_as_dry_run(
     assert run_response.status_code == 400
     assert run_response.json()["detail"] == dry_run_response.json()["detail"]
     assert "Linux host with an NVIDIA GPU" in run_response.json()["detail"]
+
+def test_run_endpoint_rechecks_disk_space_without_cleanup_before_start(
+    tmp_path: Path,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def failing_disk_space_checker(**kwargs) -> DiskSpaceReport:
+        calls.append(kwargs)
+        raise gui_backend.DiskSpacePreflightError(
+            "Insufficient disk space before model execution."
+        )
+
+    def fake_runner(
+        _input_path: Path,
+        _output_dir: Path,
+        _progress: ProgressCallback,
+    ) -> None:
+        raise AssertionError("Model runner must not start after a disk-space failure.")
+
+    client = TestClient(
+        create_app(
+            hand_object_runner=fake_runner,
+            disk_space_checker=failing_disk_space_checker,
+        )
+    )
+    output_root = _existing_output_root(tmp_path)
+
+    response = client.post(
+        "/api/runs",
+        data={
+            "modelId": HAND_OBJECT_CONTACT_MODEL_ID,
+            "outputRoot": str(output_root),
+        },
+        files={
+            "files": ("frame.jpg", b"fake image", "image/jpeg"),
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "Insufficient disk space before model execution."
+    )
+    assert len(calls) == 1
+    assert calls[0]["cleanup_stale_images"] is True
+    assert not any(path.name.startswith("run-") for path in output_root.iterdir())
+
 
 def test_run_endpoint_preflight_failure_does_not_create_run_folder(
     tmp_path: Path,
@@ -2672,7 +2752,10 @@ def test_models_endpoint_includes_hand_interaction_in_preferred_order() -> None:
 def test_hand_interaction_preview_and_dry_run_endpoints(tmp_path: Path) -> None:
     from egomodelkit.models.hand_interaction import HAND_INTERACTION_MODEL_ID
 
-    client = TestClient(create_app(runtime_checker=_ready_runtime_checker))
+    client = TestClient(create_app(
+        runtime_checker=_ready_runtime_checker,
+        disk_space_checker=_ready_disk_space_checker,
+    ))
     output_root = _existing_output_root(tmp_path)
     preview = client.post(
         "/api/output-preview",

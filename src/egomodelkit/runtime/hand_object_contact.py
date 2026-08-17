@@ -198,6 +198,12 @@ def ensure_runtime_image(
         "Packaged hand-object-contact runtime image is missing; preparing it now. "
         "The first run may take longer."
     )
+    remove_stale_runtime_images(
+        docker_executable = runtime_spec.docker_executable,
+        current_image = image_identity,
+        capture_runner = capture_runner,
+        progress = progress,
+    )
 
     container_dir = _container_resource_dir()
     dockerfile_path = container_dir / "Dockerfile"
