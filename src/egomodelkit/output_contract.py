@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Final, Literal
+from uuid import uuid4
 
 from egomodelkit.bandini_metrics import (
     DEFAULT_VIDEO_PROCESSING_CONFIG,
@@ -1877,10 +1878,12 @@ def _mapping_value(
 
 
 def _write_json(path: Path, value: dict[str, object]) -> None:
-    path.write_text(
-        json.dumps(value, indent = 2, sort_keys = True) + "\n", 
-        encoding = "utf-8"
+    temporary_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    temporary_path.write_text(
+        json.dumps(value, indent = 2, sort_keys = True) + "\n",
+        encoding = "utf-8",
     )
+    temporary_path.replace(path)
 
 def _run_summary_payload(
     *,
