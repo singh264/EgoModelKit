@@ -465,6 +465,9 @@ def create_output_scaffold(
     
     layout.progress_log_path.touch(exist_ok = True)
     layout.runtime_log_path.touch(exist_ok = True)
+
+    if status == "running":
+        write_runtime_log_line(layout.runtime_log_path, "Run started.")
     
 def output_folder_tree(context: OutputPreviewContext) -> str:
     """ Return a dynamic plain-text folder tree for the GUI output preview. """
@@ -1946,3 +1949,9 @@ def write_run_summary(
             collect_runtime_state=status in {"completed", "failed", "cancelled"},
         ),
     )
+
+    if status in {"completed", "failed", "cancelled"}:
+        write_runtime_log_line(
+            layout.runtime_log_path,
+            f"Run finished with status: {status}.",
+        )

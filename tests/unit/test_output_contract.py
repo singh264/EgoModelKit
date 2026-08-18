@@ -186,6 +186,29 @@ def test_create_output_scaffold_creates_hand_object_and_adl_contract_files(
     )
     assert (hand_layout.visual_outputs_dir / "hand_object_contact").is_dir()
     assert json.loads(hand_layout.run_summary_path.read_text())["status"] == "running"
+    assert "Run started." in hand_layout.runtime_log_path.read_text(encoding = "utf-8")
+
+    write_run_summary(
+        layout = hand_layout,
+        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
+        input_path = image,
+        scenario = "hand-object-single-image",
+        status = "completed",
+    )
+    assert (
+        "Run finished with status: completed."
+        in hand_layout.runtime_log_path.read_text(encoding = "utf-8")
+    )
+
+    completed_log = hand_layout.runtime_log_path.read_text(encoding = "utf-8")
+    write_run_summary(
+        layout = hand_layout,
+        model_id = HAND_OBJECT_CONTACT_MODEL_ID,
+        input_path = image,
+        scenario = "hand-object-single-image",
+        status = "running",
+    )
+    assert hand_layout.runtime_log_path.read_text(encoding = "utf-8") == completed_log
 
     adl_layout = build_run_output_layout(tmp_path / "adl-results", run_id="run-adl")
     create_output_scaffold(

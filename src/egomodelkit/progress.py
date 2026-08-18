@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
@@ -75,12 +76,12 @@ def external_progress_line(kind: str, **payload: object) -> str:
     )
 
 def write_runtime_log_line(path: Path, line: str) -> None:
-    """ Append one raw runtime line to runtime.log. """
+    """ Append one timestamped runtime line to runtime.log. """
     path.parent.mkdir(parents = True, exist_ok = True)
+    timestamp = datetime.now(timezone.utc).isoformat(timespec = "milliseconds")
 
     with path.open("a", encoding = "utf-8") as stream:
-        stream.write(line)
-        stream.write("\n")    
+        stream.write(f"[{timestamp}] {line}\n")
 
 def write_progress_event(path: Path, event: ProgressEvent) -> None:
     """ Append one JSONL progress event. """

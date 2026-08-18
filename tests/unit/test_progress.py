@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 from egomodelkit.progress import (
@@ -8,6 +9,7 @@ from egomodelkit.progress import (
     parse_external_progress_line,
     read_progress_events,
     write_progress_event,
+    write_runtime_log_line,
 )
 
 
@@ -113,3 +115,16 @@ def test_parse_external_progress_line_ignores_json_arrays() -> None:
     assert parse_external_progress_line(
         'EGOMODELKIT_PROGRESS ["not", "an", "object"]'
     ) is None
+
+
+def test_write_runtime_log_line_adds_utc_timestamp(tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "runtime.log"
+
+    write_runtime_log_line(log_path, "Model step completed")
+
+    written = log_path.read_text(encoding = "utf-8").strip()
+    timestamp_text, message = written[1:].split("] ", maxsplit = 1)
+    timestamp = datetime.fromisoformat(timestamp_text)
+
+    assert timestamp.tzinfo == timezone.utc
+    assert message == "Model step completed"
