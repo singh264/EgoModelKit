@@ -30,23 +30,19 @@ from egomodelkit.bandini_metrics import (
 )
 from egomodelkit.models.adl_recognition import (
     ADL_RECOGNITION_MODEL_ID,
-    ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
     AdlRecognitionInputError,
-    AdlRecognitionRequest,
-    validate_adl_recognition_request,
+)
+from egomodelkit.models.catalog import (
+    get_model_definition,
+    gui_model_definitions,
 )
 from egomodelkit.models.hand_interaction import (
     HAND_INTERACTION_MODEL_ID,
-    HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
     HandInteractionInputError,
-    HandInteractionRequest,
-    validate_hand_interaction_request,
 )
 from egomodelkit.models.hand_object_contact import (
     HAND_OBJECT_CONTACT_MODEL_ID,
     HandObjectContactInputError,
-    HandObjectContactRequest,
-    validate_hand_object_contact_request,
 )
 from egomodelkit.output_contract import (
     InputScenario,
@@ -69,11 +65,8 @@ from egomodelkit.progress import (
     write_progress_event,
     write_runtime_log_line,
 )
-from egomodelkit.runtime.adl_recognition import (
-    DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC,
-    AdlRecognitionRuntimeError,
-    run_adl_recognition,
-)
+from egomodelkit.runtime.adapters import get_runtime_adapter
+from egomodelkit.runtime.adl_recognition import AdlRecognitionRuntimeError
 from egomodelkit.runtime.commands import (
     CommandCancelledError,
     ProcessCancellation,
@@ -86,16 +79,8 @@ from egomodelkit.runtime.disk_space import (
     DiskSpaceReport,
     ensure_sufficient_disk_space,
 )
-from egomodelkit.runtime.hand_interaction import (
-    DEFAULT_HAND_INTERACTION_RUNTIME_SPEC,
-    HandInteractionRuntimeError,
-    run_hand_interaction,
-)
-from egomodelkit.runtime.hand_object_contact import (
-    DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC,
-    HandObjectContactRuntimeError,
-    run_hand_object_contact,
-)
+from egomodelkit.runtime.hand_interaction import HandInteractionRuntimeError
+from egomodelkit.runtime.hand_object_contact import HandObjectContactRuntimeError
 from egomodelkit.runtime.host_platform import is_wsl as host_is_wsl
 from egomodelkit.runtime.preflight import (
     HostPrerequisiteError,
@@ -238,32 +223,8 @@ def create_app(
         """ Return GUI-displayable model choices. """
         return {
             "models": [
-                {
-                    "id": HAND_INTERACTION_MODEL_ID,
-                    "name": "Hand interaction",
-                    "description": (
-                        "Measures functional hand-object interactions in "
-                        "egocentric videos."
-                    ),
-                    "supportedInputExtensions": sorted(
-                        HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
-                    ),
-                    "acceptedInputLabel": "single MP4 video or multiple MP4 videos",
-                    "outputLabel": "interaction profiles and hand-use metrics",
-                },
-                {
-                    "id": ADL_RECOGNITION_MODEL_ID,
-                    "name": "Activity recognition (ADL)",
-                    "description": (
-                        "Processes egocentric video clips for "
-                        "activity of daily living (ADL) recognition."
-                    ),
-                    "supportedInputExtensions": sorted(
-                        ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
-                    ),
-                    "acceptedInputLabel": "single MP4 video or multiple MP4 videos",
-                    "outputLabel": "segment predictions and video/session summaries"
-                },
+                definition.gui_payload()
+                for definition in gui_model_definitions()
             ]
         }
     
@@ -615,43 +576,23 @@ def _execute_run(
 
             _record_runtime_output(state, message)
         
-        if state.model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-            if hand_object_runner is None:
-                _run_hand_object_contact_for_gui(
-                    state.input_path,
-                    state.layout.run_dir,
-                    progress,
-                    state.cancellation,
-                )
-            else:
-                hand_object_runner(state.input_path, state.layout.run_dir, progress)
-        elif state.model_id == HAND_INTERACTION_MODEL_ID:
-            if hand_interaction_runner is None:
-                _run_hand_interaction_for_gui(
-                    state.input_path,
-                    state.layout.run_dir,
-                    progress,
-                    state.cancellation,
-                    dominant_hand=state.dominant_hand,
-                )
-            else:
-                hand_interaction_runner(
-                    state.input_path,
-                    state.layout.run_dir,
-                    progress,
-                )
-        elif state.model_id == ADL_RECOGNITION_MODEL_ID:
-            if adl_runner is None:
-                _run_adl_recognition_for_gui(
-                    state.input_path,
-                    state.layout.run_dir,
-                    progress,
-                    state.cancellation,
-                )
-            else:
-                adl_runner(state.input_path, state.layout.run_dir, progress)
+        injected_runner = _injected_model_runner(
+            state.model_id,
+            hand_object_runner=hand_object_runner,
+            hand_interaction_runner=hand_interaction_runner,
+            adl_runner=adl_runner,
+        )
+        if injected_runner is None:
+            _run_model_for_gui(
+                model_id=state.model_id,
+                input_path=state.input_path,
+                output_dir=state.layout.run_dir,
+                progress=progress,
+                cancellation=state.cancellation,
+                dominant_hand=state.dominant_hand,
+            )
         else:
-            raise ValueError(f"Unsupported model id: {state.model_id}")
+            injected_runner(state.input_path, state.layout.run_dir, progress)
 
         state.cancellation.raise_if_cancelled()
 
@@ -727,45 +668,24 @@ def _execute_run(
         operations.pop(state.operation_id, None)
         shutil.rmtree(state.staged_root, ignore_errors = True)
         
-def _run_hand_object_contact_for_gui(
-    input_path: Path,
-    output_dir: Path,
-    progress: Callable[[str], None],
-    cancellation: ProcessCancellation,
-) -> None:
-    """ Run the existing hand-object-contact runtime. """
-    run_hand_object_contact(
-        HandObjectContactRequest(input_path = input_path, output_dir = output_dir),
-        command_runner = (
-            lambda command: cancellable_subprocess_runner(command, cancellation)
-        ),
-        streaming_command_runner = (
-            lambda command, progress_callback: (
-                cancellable_streaming_subprocess_runner(
-                    command, 
-                    progress_callback, 
-                    cancellation,
-                )
-            )
-        ),
-        progress = progress,
-    )
-
-def _run_hand_interaction_for_gui(
-    input_path: Path,
-    output_dir: Path,
-    progress: Callable[[str], None],
-    cancellation: ProcessCancellation,
+def _run_model_for_gui(
     *,
+    model_id: str,
+    input_path: Path,
+    output_dir: Path,
+    progress: Callable[[str], None],
+    cancellation: ProcessCancellation,
     dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
 ) -> None:
-    """Run the standalone hand-interaction runtime."""
-    run_hand_interaction(
-        HandInteractionRequest(
-            input_path=input_path,
-            output_dir=output_dir,
-            dominant_hand=dominant_hand,
-        ),
+    """Run one packaged model through the shared runtime adapter."""
+    adapter = get_runtime_adapter(model_id)
+    request = adapter.build_request(
+        input_path=input_path,
+        output_dir=output_dir,
+        dominant_hand=dominant_hand,
+    )
+    adapter.run(
+        request,
         command_runner=lambda command: cancellable_subprocess_runner(
             command,
             cancellation,
@@ -781,32 +701,70 @@ def _run_hand_interaction_for_gui(
     )
 
 
+def _run_hand_object_contact_for_gui(
+    input_path: Path,
+    output_dir: Path,
+    progress: Callable[[str], None],
+    cancellation: ProcessCancellation,
+) -> None:
+    """Run hand-object contact through the shared GUI adapter path."""
+    _run_model_for_gui(
+        model_id=HAND_OBJECT_CONTACT_MODEL_ID,
+        input_path=input_path,
+        output_dir=output_dir,
+        progress=progress,
+        cancellation=cancellation,
+    )
+
+
+def _run_hand_interaction_for_gui(
+    input_path: Path,
+    output_dir: Path,
+    progress: Callable[[str], None],
+    cancellation: ProcessCancellation,
+    *,
+    dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
+) -> None:
+    """Run hand interaction through the shared GUI adapter path."""
+    _run_model_for_gui(
+        model_id=HAND_INTERACTION_MODEL_ID,
+        input_path=input_path,
+        output_dir=output_dir,
+        progress=progress,
+        cancellation=cancellation,
+        dominant_hand=dominant_hand,
+    )
+
+
 def _run_adl_recognition_for_gui(
     input_path: Path,
     output_dir: Path,
     progress: Callable[[str], None],
     cancellation: ProcessCancellation,
 ) -> None:
-    """Run the ADL-recognition runtime."""
-    run_adl_recognition(
-        AdlRecognitionRequest(
-            input_path=input_path,
-            output_dir=output_dir,
-        ),
-        command_runner = (
-            lambda command: cancellable_subprocess_runner(command, cancellation)
-        ),
-        streaming_command_runner = (
-            lambda command, progress_callback: (
-                cancellable_streaming_subprocess_runner(
-                    command, 
-                    progress_callback, 
-                    cancellation,
-                )
-            )
-        ),
-        progress = progress,
+    """Run ADL recognition through the shared GUI adapter path."""
+    _run_model_for_gui(
+        model_id=ADL_RECOGNITION_MODEL_ID,
+        input_path=input_path,
+        output_dir=output_dir,
+        progress=progress,
+        cancellation=cancellation,
     )
+
+
+def _injected_model_runner(
+    model_id: str,
+    *,
+    hand_object_runner: ModelRunner | None,
+    hand_interaction_runner: ModelRunner | None,
+    adl_runner: ModelRunner | None,
+) -> ModelRunner | None:
+    """Return the optional test-injected runner for one model."""
+    return {
+        HAND_OBJECT_CONTACT_MODEL_ID: hand_object_runner,
+        HAND_INTERACTION_MODEL_ID: hand_interaction_runner,
+        ADL_RECOGNITION_MODEL_ID: adl_runner,
+    }.get(model_id)
 
 def _ignore_progress(_: str) -> None:
     """ Default no-op progress reporter for GUI runtime checks. """
@@ -817,17 +775,10 @@ def _check_runtime_ready_for_gui(
     command_runner: Callable[[list[str]], int] = subprocess_runner,
 ) -> None:
     """ Validate that the host can run packaged GPU model containers. """
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        docker_executable = DEFAULT_HAND_OBJECT_CONTACT_RUNTIME_SPEC.docker_executable
-    elif model_id == HAND_INTERACTION_MODEL_ID:
-        docker_executable = DEFAULT_HAND_INTERACTION_RUNTIME_SPEC.docker_executable
-    elif model_id == ADL_RECOGNITION_MODEL_ID:
-        docker_executable = DEFAULT_ADL_RECOGNITION_RUNTIME_SPEC.docker_executable
-    else:
-        raise ValueError(f"Unsupported model id: {model_id}")
+    adapter = get_runtime_adapter(model_id)
 
     ensure_host_runtime_ready(
-        docker_executable = docker_executable,
+        docker_executable = adapter.docker_executable,
         command_runner = command_runner,
         require_linux_nvidia_gpu = True,
         progress = progress,
@@ -855,7 +806,7 @@ def _operation_id_from_text(operation_id_text: str | None) -> str:
 
 def _model_uses_dominant_hand(model_id: str) -> bool:
     """Return whether the selected model exposes hand-role mapping."""
-    return model_id == HAND_INTERACTION_MODEL_ID
+    return get_model_definition(model_id).uses_dominant_hand
 
 
 def _dominant_hand_from_text(
@@ -895,16 +846,17 @@ def _should_run_start_preflight(
     if runtime_checker_was_injected:
         return True
 
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        return hand_object_runner is None
+    try:
+        get_runtime_adapter(model_id)
+    except ValueError:
+        return True
 
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        return hand_interaction_runner is None
-
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        return adl_runner is None
-
-    return True
+    return _injected_model_runner(
+        model_id,
+        hand_object_runner=hand_object_runner,
+        hand_interaction_runner=hand_interaction_runner,
+        adl_runner=adl_runner,
+    ) is None
 
 def _command_runner_for_operation(
     operation: CancelableGuiOperation,
@@ -999,38 +951,14 @@ def _validate_gui_request(
     output_root: Path,
     dominant_hand: HandLabel = DEFAULT_DOMINANT_HAND,
 ) -> None:
-    """ Validate GUI input through the existing model validators. """
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        validate_hand_object_contact_request(
-            HandObjectContactRequest(
-                input_path = input_path,
-                output_dir = output_root,
-            ),
-        )
-        
-        return
-
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        validate_hand_interaction_request(
-            HandInteractionRequest(
-                input_path=input_path,
-                output_dir=output_root,
-                dominant_hand=dominant_hand,
-            ),
-        )
-        return
-
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        validate_adl_recognition_request(
-            AdlRecognitionRequest(
-                input_path=input_path,
-                output_dir=output_root,
-            ),
-        )
-
-        return
-
-    raise ValueError(f"Unsupported model id: {model_id}")
+    """Validate GUI input through the shared model runtime adapter."""
+    adapter = get_runtime_adapter(model_id)
+    request = adapter.build_request(
+        input_path=input_path,
+        output_dir=output_root,
+        dominant_hand=dominant_hand,
+    )
+    adapter.validate(request)
 
 async def _stage_uploaded_files(files: list[UploadFile]) -> StagedInput:
     """ Copy uploaded browser files into a temporary local staging folder. """
@@ -2341,16 +2269,7 @@ def _input_label(input_names: tuple[str, ...]) -> str:
 
 def _model_display_name(model_id: str) -> str:
     """ Return the GUI display name for a supported model. """
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        return "Hand-object contact"
-    
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        return "Hand interaction"
-
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        return "Activity recognition (ADL)"
-    
-    raise ValueError(f"Unsupported model id: {model_id}")
+    return get_model_definition(model_id).display_name
 
 def _select_output_folder() -> str | None:
     """ Return a user-selected output folder through the host desktop picker. """

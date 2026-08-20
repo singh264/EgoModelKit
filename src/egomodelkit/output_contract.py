@@ -25,19 +25,13 @@ from egomodelkit.models.adl_recognition import (
     ADL_ACTIVE_OBJECT_IOU_THRESHOLD,
     ADL_INFERENCE_FRAME_FPS,
     ADL_RECOGNITION_MODEL_ID,
-    ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES,
     ADL_SEGMENT_LENGTH_SECONDS,
     ADL_SUBCLIP_ENCODING_FPS,
     COMBINED_PREDS_FILENAME,
 )
-from egomodelkit.models.hand_interaction import (
-    HAND_INTERACTION_MODEL_ID,
-    HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES,
-)
-from egomodelkit.models.hand_object_contact import (
-    HAND_OBJECT_CONTACT_MODEL_ID,
-    HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES,
-)
+from egomodelkit.models.catalog import get_model_definition
+from egomodelkit.models.hand_interaction import HAND_INTERACTION_MODEL_ID
+from egomodelkit.models.hand_object_contact import HAND_OBJECT_CONTACT_MODEL_ID
 from egomodelkit.progress import external_progress_line, write_runtime_log_line
 from egomodelkit.run_manifest import build_run_manifest
 
@@ -244,6 +238,21 @@ class RunOutputLayout:
         return self.post_processing_dir / METRICS_CONFIG_FILENAME
     
 @dataclass(frozen=True, slots=True)
+class ModelOutputStrategy:
+    """Model-specific hooks owned by the output-contract subsystem."""
+
+    model_id: str
+    infer_scenario: Callable[[Path], InputScenario]
+    infer_scenario_from_names: Callable[[tuple[str, ...]], InputScenario]
+    create_scaffold: Callable[
+        [RunOutputLayout, OutputPreviewContext, VideoProcessingConfig],
+        None,
+    ]
+    finalize: Callable[[RunOutputLayout, Callable[[str], None]], None]
+    model_configuration: Callable[[VideoProcessingConfig], dict[str, object]]
+
+
+@dataclass(frozen=True, slots=True)
 class _HandInteractionMetricInputPaths:
     """Runtime paths used before hand-interaction outputs are reorganized."""
 
@@ -271,62 +280,208 @@ def build_run_output_layout(
         display_run_dir = display_run_dir,
     )
 
-def infer_input_scenario(*, model_id: str, input_path: Path) -> InputScenario:
-    """ Infer the GUI/output-preview scenario from a model id and input path. """
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        if input_path.is_dir():
-            return "hand-object-image-directory"
-        
+def _infer_hand_object_scenario(input_path: Path) -> InputScenario:
+    if input_path.is_dir():
+        return "hand-object-image-directory"
+    return "hand-object-single-image"
+
+
+def _infer_hand_interaction_scenario(input_path: Path) -> InputScenario:
+    if input_path.is_dir():
+        return "hand-interaction-video-directory"
+    return "hand-interaction-single-video"
+
+
+def _infer_adl_scenario(input_path: Path) -> InputScenario:
+    if input_path.is_dir():
+        return "adl-video-directory"
+    if input_path.name == COMBINED_PREDS_FILENAME:
+        return "adl-combined-predictions"
+    return "adl-single-video"
+
+
+def _infer_hand_object_scenario_from_names(
+    input_names: tuple[str, ...],
+) -> InputScenario:
+    if len(input_names) == 1:
         return "hand-object-single-image"
-    
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        if input_path.is_dir():
-            return "hand-interaction-video-directory"
+    return "hand-object-image-directory"
 
+
+def _infer_hand_interaction_scenario_from_names(
+    input_names: tuple[str, ...],
+) -> InputScenario:
+    if len(input_names) == 1:
         return "hand-interaction-single-video"
+    return "hand-interaction-video-directory"
 
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        if input_path.is_dir():
-            return "adl-video-directory"
-        
-        if input_path.name == COMBINED_PREDS_FILENAME:
-            return "adl-combined-predictions"
-        
+
+def _infer_adl_scenario_from_names(input_names: tuple[str, ...]) -> InputScenario:
+    if len(input_names) == 1 and input_names[0] == COMBINED_PREDS_FILENAME:
+        return "adl-combined-predictions"
+    if len(input_names) == 1:
         return "adl-single-video"
-    
-    raise ValueError(f"Unsupported model id: {model_id}")
+    return "adl-video-directory"
+
+
+def _create_video_pipeline_directories(
+    layout: RunOutputLayout,
+    *,
+    include_detic_outputs: bool,
+) -> None:
+    layout.results_dir.mkdir(parents=True, exist_ok=True)
+    layout.model_outputs_dir.mkdir(parents=True, exist_ok=True)
+    layout.post_processing_dir.mkdir(parents=True, exist_ok=True)
+    layout.intermediate_files_dir.mkdir(parents=True, exist_ok=True)
+    layout.extracted_frames_dir.mkdir(parents=True, exist_ok=True)
+    layout.shan_outputs_dir.mkdir(parents=True, exist_ok=True)
+    if include_detic_outputs:
+        layout.detic_outputs_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _create_hand_object_scaffold(
+    layout: RunOutputLayout,
+    _context: OutputPreviewContext,
+    _video_processing_config: VideoProcessingConfig,
+) -> None:
+    (layout.visual_outputs_dir / HAND_OBJECT_VISUAL_OUTPUT_DIRNAME).mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+    layout.model_outputs_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _create_hand_interaction_scaffold(
+    layout: RunOutputLayout,
+    context: OutputPreviewContext,
+    video_processing_config: VideoProcessingConfig,
+) -> None:
+    _create_video_pipeline_directories(layout, include_detic_outputs=False)
+    write_stub_video_level_metric_files(
+        layout=layout,
+        context=context,
+        status="pending",
+        config=video_processing_config,
+    )
+    write_video_processing_config(
+        layout.metrics_config_path,
+        video_processing_config,
+    )
+
+
+def _create_adl_scaffold(
+    layout: RunOutputLayout,
+    context: OutputPreviewContext,
+    _video_processing_config: VideoProcessingConfig,
+) -> None:
+    _create_video_pipeline_directories(layout, include_detic_outputs=True)
+    write_stub_adl_output_files(
+        layout=layout,
+        context=context,
+        status="pending",
+    )
+    write_adl_processing_config(layout.adl_processing_config_path)
+
+
+def _finalize_hand_object_outputs(
+    layout: RunOutputLayout,
+    report: Callable[[str], None],
+) -> None:
+    report("Organizing hand-object-contact outputs.")
+    _organize_hand_object_runtime_outputs(layout)
+
+
+def _finalize_hand_interaction_outputs(
+    layout: RunOutputLayout,
+    report: Callable[[str], None],
+) -> None:
+    metric_inputs = _resolve_hand_interaction_metric_input_paths(layout)
+    _validate_hand_interaction_prediction_counts(metric_inputs)
+    _finalize_bandini_metric_outputs(
+        layout=layout,
+        metric_inputs=metric_inputs,
+        pipeline_label="Hand-interaction inference",
+        progress=report,
+        emit_progress=True,
+    )
+    _organize_hand_interaction_runtime_outputs(layout)
+
+
+def _finalize_adl_outputs(
+    layout: RunOutputLayout,
+    _report: Callable[[str], None],
+) -> None:
+    _organize_adl_runtime_outputs(layout)
+
+
+def _hand_object_model_configuration(
+    _video_processing_config: VideoProcessingConfig,
+) -> dict[str, object]:
+    return {}
+
+
+def _hand_interaction_model_configuration(
+    video_processing_config: VideoProcessingConfig,
+) -> dict[str, object]:
+    return video_processing_config.to_dict()
+
+
+def _adl_model_configuration(
+    _video_processing_config: VideoProcessingConfig,
+) -> dict[str, object]:
+    return _adl_processing_configuration()
+
+
+_MODEL_OUTPUT_STRATEGIES: Final[dict[str, ModelOutputStrategy]] = {
+    HAND_OBJECT_CONTACT_MODEL_ID: ModelOutputStrategy(
+        model_id=HAND_OBJECT_CONTACT_MODEL_ID,
+        infer_scenario=_infer_hand_object_scenario,
+        infer_scenario_from_names=_infer_hand_object_scenario_from_names,
+        create_scaffold=_create_hand_object_scaffold,
+        finalize=_finalize_hand_object_outputs,
+        model_configuration=_hand_object_model_configuration,
+    ),
+    HAND_INTERACTION_MODEL_ID: ModelOutputStrategy(
+        model_id=HAND_INTERACTION_MODEL_ID,
+        infer_scenario=_infer_hand_interaction_scenario,
+        infer_scenario_from_names=_infer_hand_interaction_scenario_from_names,
+        create_scaffold=_create_hand_interaction_scaffold,
+        finalize=_finalize_hand_interaction_outputs,
+        model_configuration=_hand_interaction_model_configuration,
+    ),
+    ADL_RECOGNITION_MODEL_ID: ModelOutputStrategy(
+        model_id=ADL_RECOGNITION_MODEL_ID,
+        infer_scenario=_infer_adl_scenario,
+        infer_scenario_from_names=_infer_adl_scenario_from_names,
+        create_scaffold=_create_adl_scaffold,
+        finalize=_finalize_adl_outputs,
+        model_configuration=_adl_model_configuration,
+    ),
+}
+
+
+def get_model_output_strategy(model_id: str) -> ModelOutputStrategy:
+    """Return the output lifecycle strategy registered for one model."""
+    try:
+        return _MODEL_OUTPUT_STRATEGIES[model_id]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported model id: {model_id}") from exc
+
+
+def infer_input_scenario(*, model_id: str, input_path: Path) -> InputScenario:
+    """Infer the GUI/output-preview scenario from a model id and input path."""
+    return get_model_output_strategy(model_id).infer_scenario(input_path)
+
 
 def infer_input_scenario_from_names(
     *,
     model_id: str,
     input_names: tuple[str, ...],
 ) -> InputScenario:
-    """ Infer an output-preview scenario before browser uploads are staged. """
+    """Infer an output-preview scenario before browser uploads are staged."""
     if not input_names:
         raise ValueError("At least one input name is required for output preview.")
-    
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        if len(input_names) == 1:
-            return "hand-object-single-image"
-        
-        return "hand-object-image-directory"
-    
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        if len(input_names) == 1:
-            return "hand-interaction-single-video"
-
-        return "hand-interaction-video-directory"
-
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        if len(input_names) == 1 and input_names[0] == COMBINED_PREDS_FILENAME:
-            return "adl-combined-predictions"
-        
-        if len(input_names) == 1:
-            return "adl-single-video"
-        
-        return "adl-video-directory"
-    
-    raise ValueError(f"Unsupported model id: {model_id}")
+    return get_model_output_strategy(model_id).infer_scenario_from_names(input_names)
 
 def build_output_preview_context_from_names(
     *,
@@ -382,26 +537,7 @@ def create_output_scaffold(
     layout.logs_dir.mkdir(parents = True, exist_ok = True)
     layout.technical_dir.mkdir(parents = True, exist_ok = True)
     
-    if model_id in {HAND_INTERACTION_MODEL_ID, ADL_RECOGNITION_MODEL_ID}:
-        layout.results_dir.mkdir(parents = True, exist_ok = True)
-        layout.model_outputs_dir.mkdir(parents = True, exist_ok = True)
-        layout.post_processing_dir.mkdir(parents = True, exist_ok = True)
-        layout.intermediate_files_dir.mkdir(parents = True, exist_ok = True)
-        layout.extracted_frames_dir.mkdir(parents = True, exist_ok = True)
-        layout.shan_outputs_dir.mkdir(parents = True, exist_ok = True)
-
-        if model_id == ADL_RECOGNITION_MODEL_ID:
-            layout.detic_outputs_dir.mkdir(parents = True, exist_ok = True)
-    elif model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        (layout.visual_outputs_dir / HAND_OBJECT_VISUAL_OUTPUT_DIRNAME).mkdir(
-            parents = True,
-            exist_ok = True,
-        )
-
-        layout.model_outputs_dir.mkdir(parents = True, exist_ok = True)
-    else:
-        raise ValueError(f"Unsupported model id: {model_id}")
-    
+    strategy = get_model_output_strategy(model_id)
     preview_context = build_output_preview_context(
         model_id = model_id,
         input_path = input_path,
@@ -414,25 +550,12 @@ def create_output_scaffold(
         encoding = "utf-8",
     )
     
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        write_stub_video_level_metric_files(
-            layout=layout,
-            context=preview_context,
-            status="pending",
-            config=video_processing_config,
-        )
-        write_video_processing_config(
-            layout.metrics_config_path,
-            video_processing_config,
-        )
-    elif model_id == ADL_RECOGNITION_MODEL_ID:
-        write_stub_adl_output_files(
-            layout=layout,
-            context=preview_context,
-            status="pending",
-        )
-        write_adl_processing_config(layout.adl_processing_config_path)
-    
+    strategy.create_scaffold(
+        layout,
+        preview_context,
+        video_processing_config,
+    )
+
     _write_json(
         layout.run_summary_path,
         _run_summary_payload(
@@ -925,12 +1048,7 @@ def output_preview_note(scenario: InputScenario) -> str:
 
 def run_readme_text(*, model_id: str, context: OutputPreviewContext) -> str:
     """ Return a plain-language README for a run output folder. """
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        main_files = "visual_outputs/hand_object_contact/"
-    elif model_id == HAND_INTERACTION_MODEL_ID:
-        main_files = "results/video_level_metrics.csv"
-    else:
-        main_files = "results/adl_segment_predictions.csv"
+    main_files = get_model_definition(model_id).recommended_output_path
     
     descriptions = "\n".join(
         f"- {description.name}: {description.description}"
@@ -968,31 +1086,7 @@ def finalize_runtime_outputs(
     """Move runtime outputs into the stable public output contract."""
     del input_path, scenario
     report = progress or (lambda _message: None)
-
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        report("Organizing hand-object-contact outputs.")
-        _organize_hand_object_runtime_outputs(layout)
-        return
-
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        metric_inputs = _resolve_hand_interaction_metric_input_paths(layout)
-        _validate_hand_interaction_prediction_counts(metric_inputs)
-        _finalize_bandini_metric_outputs(
-            layout=layout,
-            metric_inputs=metric_inputs,
-            pipeline_label="Hand-interaction inference",
-            progress=report,
-            emit_progress=True,
-        )
-        _organize_hand_interaction_runtime_outputs(layout)
-        return
-
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        _organize_adl_runtime_outputs(layout)
-        return
-
-    raise ValueError(f"Unsupported model id: {model_id}")
-
+    get_model_output_strategy(model_id).finalize(layout, report)
 
 def _finalize_bandini_metric_outputs(
     *,
@@ -1802,14 +1896,7 @@ def _input_names_for_preview(*, model_id: str, input_path: Path) -> list[str]:
     if input_path.is_file():
         return [input_path.name]
     
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        suffixes = HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES
-    elif model_id == HAND_INTERACTION_MODEL_ID:
-        suffixes = HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES
-    elif model_id == ADL_RECOGNITION_MODEL_ID:
-        suffixes = ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES
-    else:
-        raise ValueError(f"Unsupported model id: {model_id}")
+    suffixes = get_model_definition(model_id).supported_input_extensions
     
     names = sorted(
         child.name
@@ -1852,11 +1939,9 @@ def _run_model_configuration(
     model_id: str,
     video_processing_config: VideoProcessingConfig,
 ) -> dict[str, object]:
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        return video_processing_config.to_dict()
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        return _adl_processing_configuration()
-    return {}
+    return get_model_output_strategy(model_id).model_configuration(
+        video_processing_config
+    )
 
 
 def _read_json_mapping(path: Path) -> dict[str, object]:

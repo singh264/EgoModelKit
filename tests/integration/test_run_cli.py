@@ -160,7 +160,7 @@ def test_run_reports_adl_recognition_runtime_error(
         raise AdlRecognitionRuntimeError("simulated ADL failure")
 
     monkeypatch.setattr(
-        "egomodelkit.cli.run_adl_recognition",
+        "egomodelkit.runtime.adl_recognition.run_adl_recognition",
         fake_run_adl_recognition,
     )
     
@@ -202,7 +202,7 @@ def test_run_reports_output_finalization_runtime_error(
         raise RuntimeError("finalization failed")
 
     monkeypatch.setattr(
-        "egomodelkit.cli.run_adl_recognition",
+        "egomodelkit.runtime.adl_recognition.run_adl_recognition",
         fake_run_adl_recognition,
     )
     monkeypatch.setattr(
@@ -238,14 +238,15 @@ def test_run_executes_adl_recognition(
     
     captured: dict[str, object] = {}
     
-    def fake_run_adl_recognition_with_output_contract(request) -> Path:
+    def fake_run_with_output_contract(*, model_id, request) -> Path:
+        captured["model_id"] = model_id
         captured["request"] = request
 
         return output_dir / "run-test"
 
     monkeypatch.setattr(
-        "egomodelkit.cli._run_adl_recognition_with_output_contract",
-        fake_run_adl_recognition_with_output_contract,
+        "egomodelkit.cli._run_model_with_output_contract",
+        fake_run_with_output_contract,
     )
     
     result = runner.invoke(
@@ -263,6 +264,7 @@ def test_run_executes_adl_recognition(
     assert result.exit_code == 0
     assert "Completed: adl-recognition" in result.output
     assert f"Outputs: {output_dir / 'run-test'}" in result.output
+    assert captured["model_id"] == "adl-recognition"
     assert "request" in captured
 
 
@@ -286,7 +288,7 @@ def test_run_rechecks_disk_space_without_cleanup_before_execution(
         failing_disk_space_check,
     )
     monkeypatch.setattr(
-        "egomodelkit.cli.run_hand_interaction",
+        "egomodelkit.runtime.hand_interaction.run_hand_interaction",
         lambda *_args, **_kwargs: pytest.fail(
             "Model runtime must not start after a disk-space failure."
         ),
@@ -356,12 +358,13 @@ def test_run_executes_hand_interaction(tmp_path: Path, monkeypatch: pytest.Monke
     output = tmp_path / "results"
     captured: dict[str, object] = {}
 
-    def fake_run(request) -> Path:
+    def fake_run(*, model_id, request) -> Path:
+        captured["model_id"] = model_id
         captured["request"] = request
         return output / "run-test"
 
     monkeypatch.setattr(
-        "egomodelkit.cli._run_hand_interaction_with_output_contract",
+        "egomodelkit.cli._run_model_with_output_contract",
         fake_run,
     )
     result = runner.invoke(
@@ -400,14 +403,18 @@ def test_shared_output_contract_dispatches_hand_interaction(
         captured["kwargs"] = kwargs
         return [["docker", "run"]]
 
-    monkeypatch.setattr(cli, "run_hand_interaction", fake_runtime)
+    monkeypatch.setattr(
+        "egomodelkit.runtime.hand_interaction.run_hand_interaction",
+        fake_runtime,
+    )
     monkeypatch.setattr(cli, "finalize_runtime_outputs", lambda **_kwargs: None)
-    run_dir = cli._run_hand_interaction_with_output_contract(
-        HandInteractionRequest(
+    run_dir = cli._run_model_with_output_contract(
+        model_id="hand-interaction",
+        request=HandInteractionRequest(
             input_path=video,
             output_dir=tmp_path / "results",
             dominant_hand="left",
-        )
+        ),
     )
     assert run_dir.is_dir()
     assert captured["request"].output_dir == run_dir

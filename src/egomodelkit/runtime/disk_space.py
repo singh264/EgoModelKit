@@ -122,6 +122,15 @@ class _VideoMetadata:
     size_bytes: int
 
 
+@dataclass(frozen=True, slots=True)
+class ModelStorageStrategy:
+    """Model-specific storage estimation and runtime image dependencies."""
+
+    model_id: str
+    estimate: Callable[[Path], PipelineStorageEstimate]
+    runtime_images: Callable[[], tuple[DockerImageIdentity, ...]]
+
+
 def ensure_sufficient_disk_space(
     *,
     model_id: str,
@@ -230,81 +239,132 @@ def ensure_sufficient_disk_space(
     )
 
 
+def _estimate_hand_interaction_storage(input_path: Path) -> PipelineStorageEstimate:
+    videos = _supported_files(input_path, HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES)
+    metadata = [_probe_mp4(path, require_dimensions=False) for path in videos]
+    frame_count = round(sum(video.duration_seconds for video in metadata) * 30)
+    frame_bytes = frame_count * 720 * 405 * HAND_INTERACTION_BYTES_PER_PIXEL_PER_FRAME
+    estimated_output = _with_margin(frame_bytes + FIXED_OUTPUT_OVERHEAD_BYTES)
+    return PipelineStorageEstimate(
+        estimated_output_bytes=estimated_output,
+        peak_output_bytes=_with_margin(estimated_output, PEAK_MARGIN),
+        estimated_file_count=max(1, frame_count * 4 + len(videos) * 10),
+        input_bytes=sum(video.size_bytes for video in metadata),
+    )
+
+
+def _estimate_adl_storage(input_path: Path) -> PipelineStorageEstimate:
+    if input_path.is_file() and input_path.name == "all_preds.pkl":
+        input_bytes = input_path.stat().st_size
+        estimated_output = _with_margin(input_bytes + FIXED_OUTPUT_OVERHEAD_BYTES)
+        return PipelineStorageEstimate(
+            estimated_output_bytes=estimated_output,
+            peak_output_bytes=_with_margin(estimated_output, PEAK_MARGIN),
+            estimated_file_count=100,
+            input_bytes=input_bytes,
+        )
+
+    videos = _supported_files(input_path, ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES)
+    metadata = [_probe_mp4(path, require_dimensions=True) for path in videos]
+    frame_artifact_bytes = sum(
+        round(video.duration_seconds * ADL_INFERENCE_FRAME_FPS)
+        * video.width
+        * video.height
+        * ADL_BYTES_PER_PIXEL_PER_FRAME
+        for video in metadata
+    )
+    input_bytes = sum(video.size_bytes for video in metadata)
+    subclip_bytes = input_bytes * ADL_SUBCLIP_BYTES_PER_SOURCE_BYTE
+    estimated_output = _with_margin(
+        frame_artifact_bytes + subclip_bytes + FIXED_OUTPUT_OVERHEAD_BYTES
+    )
+    peak_output = _with_margin(estimated_output + input_bytes, PEAK_MARGIN)
+    frame_count = round(
+        sum(video.duration_seconds for video in metadata) * ADL_INFERENCE_FRAME_FPS
+    )
+    segment_count = sum(math.ceil(video.duration_seconds / 60) for video in metadata)
+    return PipelineStorageEstimate(
+        estimated_output_bytes=estimated_output,
+        peak_output_bytes=peak_output,
+        estimated_file_count=max(
+            1,
+            frame_count * 5 + segment_count * 3 + len(videos) * 10,
+        ),
+        input_bytes=input_bytes,
+    )
+
+
+def _estimate_hand_object_storage(input_path: Path) -> PipelineStorageEstimate:
+    images = _supported_files(input_path, HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES)
+    input_bytes = sum(path.stat().st_size for path in images)
+    estimated_output = _with_margin(
+        input_bytes * HOC_OUTPUT_BYTES_PER_INPUT_BYTE + FIXED_OUTPUT_OVERHEAD_BYTES
+    )
+    return PipelineStorageEstimate(
+        estimated_output_bytes=estimated_output,
+        peak_output_bytes=_with_margin(estimated_output, PEAK_MARGIN),
+        estimated_file_count=max(1, len(images) * 3 + 20),
+        input_bytes=input_bytes,
+    )
+
+
+def _hand_object_runtime_images() -> tuple[DockerImageIdentity, ...]:
+    from egomodelkit.runtime.hand_object_contact import hand_object_contact_image_identity
+
+    return (hand_object_contact_image_identity(),)
+
+
+def _hand_interaction_runtime_images() -> tuple[DockerImageIdentity, ...]:
+    from egomodelkit.runtime.hand_interaction import hand_interaction_image_identity
+    from egomodelkit.runtime.hand_object_contact import hand_object_contact_image_identity
+
+    return (hand_interaction_image_identity(), hand_object_contact_image_identity())
+
+
+def _adl_runtime_images() -> tuple[DockerImageIdentity, ...]:
+    from egomodelkit.runtime.adl_recognition import (
+        adl_core_image_identity,
+        adl_detic_image_identity,
+    )
+    from egomodelkit.runtime.hand_object_contact import hand_object_contact_image_identity
+
+    return (
+        adl_core_image_identity(),
+        adl_detic_image_identity(),
+        hand_object_contact_image_identity(),
+    )
+
+
+_MODEL_STORAGE_STRATEGIES: Final[dict[str, ModelStorageStrategy]] = {
+    HAND_OBJECT_CONTACT_MODEL_ID: ModelStorageStrategy(
+        model_id=HAND_OBJECT_CONTACT_MODEL_ID,
+        estimate=_estimate_hand_object_storage,
+        runtime_images=_hand_object_runtime_images,
+    ),
+    HAND_INTERACTION_MODEL_ID: ModelStorageStrategy(
+        model_id=HAND_INTERACTION_MODEL_ID,
+        estimate=_estimate_hand_interaction_storage,
+        runtime_images=_hand_interaction_runtime_images,
+    ),
+    ADL_RECOGNITION_MODEL_ID: ModelStorageStrategy(
+        model_id=ADL_RECOGNITION_MODEL_ID,
+        estimate=_estimate_adl_storage,
+        runtime_images=_adl_runtime_images,
+    ),
+}
+
+
+def get_model_storage_strategy(model_id: str) -> ModelStorageStrategy:
+    """Return the storage strategy registered for one model."""
+    try:
+        return _MODEL_STORAGE_STRATEGIES[model_id]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported model id: {model_id}") from exc
+
+
 def estimate_pipeline_storage(*, model_id: str, input_path: Path) -> PipelineStorageEstimate:
     """Return a conservative model-specific output estimate before inference."""
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        videos = _supported_files(input_path, HAND_INTERACTION_SUPPORTED_VIDEO_SUFFIXES)
-        metadata = [_probe_mp4(path, require_dimensions=False) for path in videos]
-        frame_count = round(sum(video.duration_seconds for video in metadata) * 30)
-        frame_bytes = frame_count * 720 * 405 * HAND_INTERACTION_BYTES_PER_PIXEL_PER_FRAME
-        estimated_output = _with_margin(frame_bytes + FIXED_OUTPUT_OVERHEAD_BYTES)
-        return PipelineStorageEstimate(
-            estimated_output_bytes=estimated_output,
-            peak_output_bytes=_with_margin(estimated_output, PEAK_MARGIN),
-            estimated_file_count=max(1, frame_count * 4 + len(videos) * 10),
-            input_bytes=sum(video.size_bytes for video in metadata),
-        )
-
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        if input_path.is_file() and input_path.name == "all_preds.pkl":
-            input_bytes = input_path.stat().st_size
-            estimated_output = _with_margin(
-                input_bytes + FIXED_OUTPUT_OVERHEAD_BYTES
-            )
-            return PipelineStorageEstimate(
-                estimated_output_bytes=estimated_output,
-                peak_output_bytes=_with_margin(estimated_output, PEAK_MARGIN),
-                estimated_file_count=100,
-                input_bytes=input_bytes,
-            )
-
-        videos = _supported_files(input_path, ADL_RECOGNITION_SUPPORTED_VIDEO_SUFFIXES)
-        metadata = [_probe_mp4(path, require_dimensions=True) for path in videos]
-        frame_artifact_bytes = sum(
-            round(video.duration_seconds * ADL_INFERENCE_FRAME_FPS)
-            * video.width
-            * video.height
-            * ADL_BYTES_PER_PIXEL_PER_FRAME
-            for video in metadata
-        )
-        input_bytes = sum(video.size_bytes for video in metadata)
-        subclip_bytes = input_bytes * ADL_SUBCLIP_BYTES_PER_SOURCE_BYTE
-        estimated_output = _with_margin(
-            frame_artifact_bytes + subclip_bytes + FIXED_OUTPUT_OVERHEAD_BYTES
-        )
-        peak_output = _with_margin(
-            estimated_output + input_bytes,
-            PEAK_MARGIN,
-        )
-        frame_count = round(
-            sum(video.duration_seconds for video in metadata) * ADL_INFERENCE_FRAME_FPS
-        )
-        segment_count = sum(math.ceil(video.duration_seconds / 60) for video in metadata)
-        return PipelineStorageEstimate(
-            estimated_output_bytes=estimated_output,
-            peak_output_bytes=peak_output,
-            estimated_file_count=max(
-                1,
-                frame_count * 5 + segment_count * 3 + len(videos) * 10,
-            ),
-            input_bytes=input_bytes,
-        )
-
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        images = _supported_files(input_path, HAND_OBJECT_CONTACT_SUPPORTED_IMAGE_SUFFIXES)
-        input_bytes = sum(path.stat().st_size for path in images)
-        estimated_output = _with_margin(
-            input_bytes * HOC_OUTPUT_BYTES_PER_INPUT_BYTE + FIXED_OUTPUT_OVERHEAD_BYTES
-        )
-        return PipelineStorageEstimate(
-            estimated_output_bytes=estimated_output,
-            peak_output_bytes=_with_margin(estimated_output, PEAK_MARGIN),
-            estimated_file_count=max(1, len(images) * 3 + 20),
-            input_bytes=input_bytes,
-        )
-
-    raise ValueError(f"Unsupported model id: {model_id}")
-
+    return get_model_storage_strategy(model_id).estimate(input_path)
 
 def format_bytes(value: int) -> str:
     """Format a byte count for concise user-facing dry-run output."""
@@ -436,29 +496,7 @@ def _trak_dimensions(stream, start: int, end: int) -> tuple[int, int]:
 
 
 def _runtime_image_identities(model_id: str) -> tuple[DockerImageIdentity, ...]:
-    if model_id == HAND_OBJECT_CONTACT_MODEL_ID:
-        from egomodelkit.runtime.hand_object_contact import hand_object_contact_image_identity
-
-        return (hand_object_contact_image_identity(),)
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        from egomodelkit.runtime.hand_interaction import hand_interaction_image_identity
-        from egomodelkit.runtime.hand_object_contact import hand_object_contact_image_identity
-
-        return (hand_interaction_image_identity(), hand_object_contact_image_identity())
-    if model_id == ADL_RECOGNITION_MODEL_ID:
-        from egomodelkit.runtime.adl_recognition import (
-            adl_core_image_identity,
-            adl_detic_image_identity,
-        )
-        from egomodelkit.runtime.hand_object_contact import hand_object_contact_image_identity
-
-        return (
-            adl_core_image_identity(),
-            adl_detic_image_identity(),
-            hand_object_contact_image_identity(),
-        )
-    raise ValueError(f"Unsupported model id: {model_id}")
-
+    return get_model_storage_strategy(model_id).runtime_images()
 
 def _plan_runtime_image_builds(
     *,

@@ -13,20 +13,7 @@ from egomodelkit.bandini_metrics import (
     HandLabel,
     VideoProcessingConfig,
 )
-from egomodelkit.models.adl_recognition import (
-    ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE,
-    ADL_RECOGNITION_MODEL_ID,
-    AdlRecognitionInputError,
-    AdlRecognitionRequest,
-    validate_adl_recognition_request,
-)
-from egomodelkit.models.hand_interaction import (
-    HAND_INTERACTION_DRY_RUN_VALIDATION_MESSAGE,
-    HAND_INTERACTION_MODEL_ID,
-    HandInteractionInputError,
-    HandInteractionRequest,
-    validate_hand_interaction_request,
-)
+from egomodelkit.models.catalog import cli_model_ids, get_model_definition
 from egomodelkit.output_contract import (
     build_run_id,
     build_run_output_layout,
@@ -41,23 +28,13 @@ from egomodelkit.progress import (
     write_progress_event,
     write_runtime_log_line,
 )
-from egomodelkit.runtime.adl_recognition import (
-    AdlRecognitionRuntimeError,
-    run_adl_recognition,
-)
+from egomodelkit.runtime.adapters import ModelRequest, get_runtime_adapter
 from egomodelkit.runtime.commands import (
     streaming_subprocess_runner,
     subprocess_runner,
 )
 from egomodelkit.runtime.disk_space import ensure_sufficient_disk_space
-from egomodelkit.runtime.hand_interaction import (
-    HandInteractionRuntimeError,
-    run_hand_interaction,
-)
-from egomodelkit.runtime.preflight import (
-    HostPrerequisiteError,
-    ensure_host_runtime_ready,
-)
+from egomodelkit.runtime.preflight import HostPrerequisiteError, ensure_host_runtime_ready
 
 app = typer.Typer(
     help = "EgoModelKit: reproducible egocentric-video model packaging and inference."
@@ -134,21 +111,14 @@ def _cli_progress_reporter(layout) -> Callable[[str], None]:
 def _run_model_with_output_contract(
     *,
     model_id: str,
-    request: HandInteractionRequest | AdlRecognitionRequest,
+    request: ModelRequest,
 ) -> Path:
     """ Run one validated CLI model with the same output contract used by the GUI. """
-    if model_id == HAND_INTERACTION_MODEL_ID:
-        if not isinstance(request, HandInteractionRequest):
-            raise TypeError("Hand interaction requires a HandInteractionRequest.")
-
-        validate_hand_interaction_request(request)
-    elif model_id == ADL_RECOGNITION_MODEL_ID:
-        if not isinstance(request, AdlRecognitionRequest):
-            raise TypeError("ADL recognition requires an AdlRecognitionRequest.")
-
-        validate_adl_recognition_request(request)
-    else:
+    if model_id not in cli_model_ids():
         raise ValueError(f"Unsupported model id: {model_id}")
+
+    adapter = get_runtime_adapter(model_id)
+    adapter.validate(request)
 
     ensure_sufficient_disk_space(
         model_id=model_id,
@@ -162,10 +132,11 @@ def _run_model_with_output_contract(
     run_id = _build_unique_cli_run_id(output_root)
     layout = build_run_output_layout(output_root, run_id = run_id)
     scenario = infer_input_scenario(model_id = model_id, input_path = request.input_path)
+    definition = get_model_definition(model_id)
     video_processing_config = VideoProcessingConfig(
         dominant_hand=(
             request.dominant_hand
-            if isinstance(request, HandInteractionRequest)
+            if definition.uses_dominant_hand and hasattr(request, "dominant_hand")
             else DEFAULT_DOMINANT_HAND
         ),
     )
@@ -184,31 +155,12 @@ def _run_model_with_output_contract(
     progress = _cli_progress_reporter(layout)
 
     try:
-        if model_id == HAND_INTERACTION_MODEL_ID:
-            hand_interaction_request = request
-            assert isinstance(hand_interaction_request, HandInteractionRequest)
-            run_hand_interaction(
-                HandInteractionRequest(
-                    input_path=hand_interaction_request.input_path,
-                    output_dir=layout.run_dir,
-                    dominant_hand=hand_interaction_request.dominant_hand,
-                ),
-                command_runner=subprocess_runner,
-                streaming_command_runner=streaming_subprocess_runner,
-                progress=progress,
-            )
-        else:
-            adl_request = request
-            assert isinstance(adl_request, AdlRecognitionRequest)
-            run_adl_recognition(
-                AdlRecognitionRequest(
-                    input_path=adl_request.input_path,
-                    output_dir=layout.run_dir,
-                ),
-                command_runner=subprocess_runner,
-                streaming_command_runner=streaming_subprocess_runner,
-                progress=progress,
-            )
+        adapter.run(
+            adapter.with_output_dir(request, layout.run_dir),
+            command_runner=subprocess_runner,
+            streaming_command_runner=streaming_subprocess_runner,
+            progress=progress,
+        )
 
         finalize_runtime_outputs(
             layout = layout,
@@ -238,26 +190,6 @@ def _run_model_with_output_contract(
         raise
 
     return layout.run_dir
-
-
-def _run_hand_interaction_with_output_contract(
-    request: HandInteractionRequest,
-) -> Path:
-    """Run hand interaction through the shared CLI output contract."""
-    return _run_model_with_output_contract(
-        model_id=HAND_INTERACTION_MODEL_ID,
-        request=request,
-    )
-
-
-def _run_adl_recognition_with_output_contract(
-    request: AdlRecognitionRequest,
-) -> Path:
-    """ Run ADL recognition through the shared CLI output contract. """
-    return _run_model_with_output_contract(
-        model_id = ADL_RECOGNITION_MODEL_ID,
-        request = request,
-    )
 
 @app.callback()
 def main() -> None:
@@ -315,9 +247,7 @@ def run(
     ],
     model_id: str = typer.Argument(
         ...,
-        help = (
-            "Public model id. Supported: hand-interaction, adl-recognition."
-        ),
+        help = f"Public model id. Supported: {', '.join(cli_model_ids())}.",
     ),
     dry_run: bool = typer.Option(
         False,
@@ -333,85 +263,56 @@ def run(
     ] = None,
 ) -> None:
     """ Run one packaged model adapter. """
-    if model_id not in {
-        HAND_INTERACTION_MODEL_ID,
-        ADL_RECOGNITION_MODEL_ID,
-    }:
+    if model_id not in cli_model_ids():
         typer.echo(f"Unsupported model: {model_id}", err = True)
         raise typer.Exit(code=CLI_UNSUPPORTED_MODEL_EXIT_CODE)
-        
+
     try:
-        if model_id == HAND_INTERACTION_MODEL_ID:
-            request = HandInteractionRequest(
-                input_path=input_path,
-                output_dir=output_dir,
-                dominant_hand=cast(HandLabel, dominant_hand or DEFAULT_DOMINANT_HAND),
+        definition = get_model_definition(model_id)
+        if dominant_hand is not None and not definition.uses_dominant_hand:
+            raise ValueError(
+                "--dominant-hand is only supported for hand-interaction."
             )
 
-            if dry_run:
-                validate_hand_interaction_request(request)
-                ensure_host_runtime_ready(
-                    docker_executable="docker",
-                    command_runner=subprocess_runner,
-                    require_linux_nvidia_gpu=False,
-                    progress=_report_progress,
-                )
-                ensure_sufficient_disk_space(
-                    model_id=model_id,
-                    input_path=input_path,
-                    output_dir=output_dir,
-                    progress=_report_progress,
-                )
-                typer.echo(HAND_INTERACTION_DRY_RUN_VALIDATION_MESSAGE)
-                typer.echo(f"Input: {input_path}")
-                typer.echo(f"Output: {output_dir}")
+        adapter = get_runtime_adapter(model_id)
+        request = adapter.build_request(
+            input_path=input_path,
+            output_dir=output_dir,
+            dominant_hand=cast(
+                HandLabel,
+                dominant_hand or DEFAULT_DOMINANT_HAND,
+            ),
+        )
+
+        if dry_run:
+            adapter.validate(request)
+            ensure_host_runtime_ready(
+                docker_executable=adapter.docker_executable,
+                command_runner=subprocess_runner,
+                require_linux_nvidia_gpu=False,
+                progress=_report_progress,
+            )
+            ensure_sufficient_disk_space(
+                model_id=model_id,
+                input_path=input_path,
+                output_dir=output_dir,
+                progress=_report_progress,
+            )
+            typer.echo(adapter.dry_run_validation_message)
+            typer.echo(f"Input: {input_path}")
+            typer.echo(f"Output: {output_dir}")
+            if definition.uses_dominant_hand and hasattr(request, "dominant_hand"):
                 typer.echo(f"Dominant hand: {request.dominant_hand}")
-                return
+            return
 
-            completed_output_dir = _run_hand_interaction_with_output_contract(request)
-            typer.echo("Completed: hand-interaction")
-        else:
-            if dominant_hand is not None:
-                raise AdlRecognitionInputError(
-                    "--dominant-hand is only supported for hand-interaction."
-                )
-
-            request = AdlRecognitionRequest(
-                input_path=input_path,
-                output_dir=output_dir,
-            )
-
-            if dry_run:
-                validate_adl_recognition_request(request)
-                ensure_host_runtime_ready(
-                    docker_executable="docker",
-                    command_runner=subprocess_runner,
-                    require_linux_nvidia_gpu=False,
-                    progress=_report_progress,
-                )
-                ensure_sufficient_disk_space(
-                    model_id=model_id,
-                    input_path=input_path,
-                    output_dir=output_dir,
-                    progress=_report_progress,
-                )
-                typer.echo(ADL_RECOGNITION_DRY_RUN_VALIDATION_MESSAGE)
-                typer.echo(f"Input: {input_path}")
-                typer.echo(f"Output: {output_dir}")
-                return
-
-            completed_output_dir = _run_adl_recognition_with_output_contract(request)
-            typer.echo("Completed: adl-recognition")
-    except (
-        HandInteractionInputError,
-        AdlRecognitionInputError,
-        HostPrerequisiteError,
-        HandInteractionRuntimeError,
-        AdlRecognitionRuntimeError,
-        RuntimeError,
-    ) as exc:
+        completed_output_dir = _run_model_with_output_contract(
+            model_id=model_id,
+            request=request,
+        )
+        typer.echo(f"Completed: {model_id}")
+    except (ValueError, RuntimeError) as exc:
         typer.echo(f"Error: {exc}", err = True)
-        
+
         raise typer.Exit(code=CLI_RUNTIME_ERROR_EXIT_CODE) from exc
-    
+
     typer.echo(f"Outputs: {completed_output_dir}")

@@ -1269,12 +1269,12 @@ def test_runtime_wrappers_delegate_to_existing_runners(
         progress("adl progress")
     
     monkeypatch.setattr(
-        "egomodelkit.gui_backend.run_hand_object_contact",
+        "egomodelkit.runtime.hand_object_contact.run_hand_object_contact",
         fake_hand_object_runner,
     )
 
     monkeypatch.setattr(
-        "egomodelkit.gui_backend.run_adl_recognition",
+        "egomodelkit.runtime.adl_recognition.run_adl_recognition",
         fake_adl_runner,
     )
     
@@ -2354,18 +2354,23 @@ def test_execute_run_uses_default_hand_object_gui_runner(
     state = _test_run_state(tmp_path)
     calls: list[tuple[Path, Path, ProcessCancellation]] = []
 
-    def fake_hand_object_gui_runner(
+    def fake_gui_runner(
+        *,
+        model_id: str,
         input_path: Path,
         output_dir: Path,
         progress: ProgressCallback,
         cancellation: ProcessCancellation,
+        dominant_hand: str,
     ) -> None:
+        del dominant_hand
+        assert model_id == HAND_OBJECT_CONTACT_MODEL_ID
         calls.append((input_path, output_dir, cancellation))
         progress("Hand-object runtime output")
 
     monkeypatch.setattr(
-        "egomodelkit.gui_backend._run_hand_object_contact_for_gui",
-        fake_hand_object_gui_runner,
+        "egomodelkit.gui_backend._run_model_for_gui",
+        fake_gui_runner,
     )
 
     monkeypatch.setattr(
@@ -2413,18 +2418,23 @@ def test_execute_run_uses_default_adl_gui_runner(
 
     calls: list[tuple[Path, Path, ProcessCancellation]] = []
 
-    def fake_adl_gui_runner(
+    def fake_gui_runner(
+        *,
+        model_id: str,
         input_path: Path,
         output_dir: Path,
         progress: ProgressCallback,
         cancellation: ProcessCancellation,
+        dominant_hand: str,
     ) -> None:
+        del dominant_hand
+        assert model_id == ADL_RECOGNITION_MODEL_ID
         calls.append((input_path, output_dir, cancellation))
         progress("ADL runtime output")
 
     monkeypatch.setattr(
-        "egomodelkit.gui_backend._run_adl_recognition_for_gui",
-        fake_adl_gui_runner,
+        "egomodelkit.gui_backend._run_model_for_gui",
+        fake_gui_runner,
     )
 
     monkeypatch.setattr(
@@ -2875,7 +2885,10 @@ def test_default_hand_interaction_gui_runner_uses_cancellable_commands(
         ) == 0
         return []
 
-    monkeypatch.setattr(gui_backend, "run_hand_interaction", fake_runtime)
+    monkeypatch.setattr(
+        "egomodelkit.runtime.hand_interaction.run_hand_interaction",
+        fake_runtime,
+    )
     monkeypatch.setattr(gui_backend, "cancellable_subprocess_runner", lambda command, token: 0)
     monkeypatch.setattr(
         gui_backend,
@@ -3026,20 +3039,22 @@ def test_execute_run_uses_default_hand_interaction_gui_runner(
     state.dominant_hand = "left"
     calls: list[tuple[Path, Path, ProcessCancellation, str]] = []
 
-    def fake_hand_interaction_gui_runner(
+    def fake_gui_runner(
+        *,
+        model_id: str,
         input_path: Path,
         output_dir: Path,
         progress: ProgressCallback,
         cancellation: ProcessCancellation,
-        *,
         dominant_hand: str,
     ) -> None:
+        assert model_id == HAND_INTERACTION_MODEL_ID
         calls.append((input_path, output_dir, cancellation, dominant_hand))
         progress("Hand-interaction runtime output")
 
     monkeypatch.setattr(
-        "egomodelkit.gui_backend._run_hand_interaction_for_gui",
-        fake_hand_interaction_gui_runner,
+        "egomodelkit.gui_backend._run_model_for_gui",
+        fake_gui_runner,
     )
     monkeypatch.setattr(
         "egomodelkit.gui_backend.finalize_runtime_outputs",
